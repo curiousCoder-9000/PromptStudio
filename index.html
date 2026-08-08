@@ -544,6 +544,23 @@
         </div>
     </div>
 
+    <!-- Lightweight scrape job chip (non-modal) -->
+    <div class="scrape-job-chip" id="scrapeJobChip" style="display:none;" role="status" aria-live="polite">
+        <div class="scrape-job-chip-main">
+            <i class="fa-solid fa-arrows-rotate scrape-job-chip-icon" id="scrapeJobChipIcon"></i>
+            <div class="scrape-job-chip-text">
+                <div class="scrape-job-chip-title" id="scrapeJobChipTitle">Sync idle</div>
+                <div class="scrape-job-chip-sub" id="scrapeJobChipSub"></div>
+            </div>
+        </div>
+        <div class="scrape-job-chip-actions">
+            <button type="button" class="scrape-job-chip-btn" id="scrapeJobChipCancel" title="Cancel running job">Cancel</button>
+            <button type="button" class="scrape-job-chip-btn ghost" id="scrapeJobChipDismiss" title="Hide">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+        </div>
+    </div>
+
     <!-- Notification Toast -->
     <div class="toast-container" id="toastContainer"></div>
 

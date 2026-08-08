@@ -25,6 +25,11 @@ const state = {
     currentPromptData: null,
     photoToDelete: null,
     syncPollTimer: null,
+    scrapePollTimer: null,
+    scrapeStatus: null,
+    scrapeChipDismissed: false,
+    scrapeNotifiedFinished: null,
+    scrapeWasActive: false,
     batchPollTimer: null,
     classifyPollTimer: null,
     classifyStatus: null,
@@ -140,6 +145,12 @@ const elements = {
     scrapeClearPendingBtn: document.getElementById('scrapeClearPendingBtn'),
     scrapeQueueStatus: document.getElementById('scrapeQueueStatus'),
     scrapeQueueList: document.getElementById('scrapeQueueList'),
+    scrapeJobChip: document.getElementById('scrapeJobChip'),
+    scrapeJobChipIcon: document.getElementById('scrapeJobChipIcon'),
+    scrapeJobChipTitle: document.getElementById('scrapeJobChipTitle'),
+    scrapeJobChipSub: document.getElementById('scrapeJobChipSub'),
+    scrapeJobChipCancel: document.getElementById('scrapeJobChipCancel'),
+    scrapeJobChipDismiss: document.getElementById('scrapeJobChipDismiss'),
     batchPromptBtn: document.getElementById('batchPromptBtn'),
     unanalyzedFilterBtn: document.getElementById('unanalyzedFilterBtn'),
     favoritesFilterBtn: document.getElementById('favoritesFilterBtn'),
@@ -659,9 +670,48 @@ function renderCreatorList() {
 }
 
 function syncBadgeHtml(creator) {
-    if (!creator.last_synced_at) return '';
+    let html = '';
+    const name = (creator.name || '').toLowerCase();
+    const scrape = state.scrapeStatus;
+    if (scrape) {
+        const running = scrape.running_job;
+        const pending = scrape.pending || [];
+        if (running && (running.username || '').toLowerCase() === name) {
+            html += ` <span class="creator-sync-pill" title="Syncing new posts">syncing</span>`;
+        } else if (pending.some((j) => (j.username || '').toLowerCase() === name)) {
+            html += ` <span class="creator-sync-pill queued" title="Queued for sync">queued</span>`;
+        }
+    }
+    if (!creator.last_synced_at) return html;
     const label = formatRelativeTime(creator.last_synced_at);
-    return ` <span class="sync-pill" title="Last synced ${creator.last_synced_at}">${label}</span>`;
+    return `${html} <span class="sync-pill" title="Last synced ${creator.last_synced_at}">${label}</span>`;
+}
+
+function updateSyncLatestButtonUi() {
+    if (!elements.syncLatestCreatorBtn) return;
+    const creator = state.selectedCreator;
+    const scrape = state.scrapeStatus;
+    const running = scrape && scrape.running_job;
+    const runningHere =
+        !!(running && creator && (running.username || '').toLowerCase() === creator.toLowerCase());
+    const pendingHere = !!(
+        scrape &&
+        creator &&
+        (scrape.pending || []).some(
+            (j) => (j.username || '').toLowerCase() === creator.toLowerCase()
+        )
+    );
+    elements.syncLatestCreatorBtn.disabled = !creator;
+    if (runningHere) {
+        elements.syncLatestCreatorBtn.innerHTML =
+            '<i class="fa-solid fa-spinner fa-spin"></i> Syncing…';
+    } else if (pendingHere) {
+        elements.syncLatestCreatorBtn.innerHTML =
+            '<i class="fa-solid fa-clock"></i> Queued';
+    } else {
+        elements.syncLatestCreatorBtn.innerHTML =
+            '<i class="fa-solid fa-arrows-rotate"></i> Sync new posts';
+    }
 }
 
 function formatRelativeTime(iso) {
@@ -729,6 +779,7 @@ function updateClassifyPanelUi() {
     if (elements.cancelClassifyBtn) {
         elements.cancelClassifyBtn.style.display = runningHere ? 'inline-flex' : 'none';
     }
+    updateSyncLatestButtonUi();
 }
 
 async function updateCreatorStylePanel() {
@@ -740,6 +791,7 @@ async function updateCreatorStylePanel() {
     }
     elements.creatorStylePanel.style.display = 'flex';
     updateClassifyPanelUi();
+    updateSyncLatestButtonUi();
     elements.creatorStylePrefix.textContent = 'Loading…';
     elements.creatorStyleTerms.innerHTML = '';
     try {
@@ -1608,6 +1660,15 @@ function setupEventListeners() {
     if (elements.syncLatestCreatorBtn) {
         elements.syncLatestCreatorBtn.addEventListener('click', syncLatestSelectedCreator);
     }
+    if (elements.scrapeJobChipCancel) {
+        elements.scrapeJobChipCancel.addEventListener('click', cancelRunningSyncJob);
+    }
+    if (elements.scrapeJobChipDismiss) {
+        elements.scrapeJobChipDismiss.addEventListener('click', () => {
+            state.scrapeChipDismissed = true;
+            hideScrapeJobChip();
+        });
+    }
     if (elements.reviewRejectsBtn) {
         elements.reviewRejectsBtn.addEventListener('click', () => {
             if (!state.selectedCreator) {
@@ -2032,21 +2093,39 @@ function setupEventListeners() {
     });
 }
 
-function showToast(message, duration = 3000) {
+/**
+ * Toast: showToast('message') or showToast({ title, body, variant, duration })
+ */
+function showToast(messageOrOpts, duration = 3000) {
+    if (!elements.toastContainer) return;
     const toast = document.createElement('div');
-    toast.className = 'toast';
-    toast.textContent = message;
+    let durationMs = duration;
+    if (messageOrOpts && typeof messageOrOpts === 'object') {
+        const { title, body, variant, duration: d } = messageOrOpts;
+        durationMs = d != null ? d : 3500;
+        toast.className = `toast${variant ? ` ${variant}` : ''}`;
+        if (title && body) {
+            toast.innerHTML = `<div class="toast-title"></div><div class="toast-body"></div>`;
+            toast.querySelector('.toast-title').textContent = title;
+            toast.querySelector('.toast-body').textContent = body;
+        } else {
+            toast.textContent = title || body || '';
+        }
+    } else {
+        toast.className = 'toast';
+        toast.textContent = String(messageOrOpts ?? '');
+    }
     elements.toastContainer.appendChild(toast);
     setTimeout(() => {
         toast.remove();
-    }, duration);
+    }, durationMs);
 }
 
 // Instagram sync helpers
 function openSyncModal() {
     elements.syncModal.style.display = 'flex';
     pollSyncStatus();
-    pollScrapeStatus();
+    ensureScrapePolling();
     loadFollowingPicker();
 }
 
@@ -2058,20 +2137,160 @@ function setOneShotSyncEnabled(enabled, reason) {
     });
 }
 
-async function pollScrapeStatus() {
-    const update = async () => {
-        if (!elements.scrapeQueueStatus) return;
-        try {
-            const res = await fetch('/api/scrape/status');
-            if (res.status === 404) {
-                elements.scrapeQueueStatus.textContent = 'Scrape queue disabled';
-                return;
-            }
-            const data = await res.json();
-            const pending = data.pending || [];
-            const running = data.running_job;
-            const paused = Boolean(data.paused);
-            const sync = data.sync || {};
+function hideScrapeJobChip() {
+    if (elements.scrapeJobChip) elements.scrapeJobChip.style.display = 'none';
+}
+
+function updateScrapeJobChip(data) {
+    if (!elements.scrapeJobChip) return;
+    const pending = data.pending || [];
+    const running = data.running_job;
+    const paused = Boolean(data.paused);
+    const sync = data.sync || {};
+    const active = !!(running || pending.length || paused || sync.running);
+
+    if (!active) {
+        hideScrapeJobChip();
+        return;
+    }
+    if (state.scrapeChipDismissed && !running && !sync.running) {
+        // Allow hide while only pending if user dismissed; re-show if running again
+        if (!pending.length) {
+            hideScrapeJobChip();
+            return;
+        }
+    }
+    if (running || sync.running || paused) {
+        state.scrapeChipDismissed = false;
+    }
+
+    elements.scrapeJobChip.style.display = 'flex';
+    elements.scrapeJobChip.classList.toggle('paused', paused);
+
+    if (elements.scrapeJobChipIcon) {
+        elements.scrapeJobChipIcon.className =
+            'fa-solid scrape-job-chip-icon ' +
+            (paused ? 'fa-pause' : 'fa-arrows-rotate spinning');
+    }
+
+    let title = 'Sync idle';
+    if (paused) {
+        title = `Paused${data.pause_reason ? ' — ' + data.pause_reason : ''}`;
+    } else if (running) {
+        title = `Syncing @${running.username}`;
+    } else if (sync.running && sync.scrape_username) {
+        title = `Syncing @${sync.scrape_username}`;
+    } else if (sync.running) {
+        title = sync.progress || 'Sync running…';
+    } else if (pending.length) {
+        title = `Queued @${pending[0].username}`;
+    }
+
+    let sub = '';
+    if (running) {
+        const mode = running.mode || 'latest';
+        sub = mode;
+        if (pending.length) sub += ` · +${pending.length} queued`;
+        if (sync.progress) sub += ` · ${sync.progress}`;
+    } else if (paused) {
+        sub = pending.length
+            ? `${pending.length} waiting — resume from IG Sync when ready`
+            : 'Resume from IG Sync when ready';
+    } else if (pending.length) {
+        sub = `position 1 · ${pending.length} in queue`;
+    }
+
+    if (elements.scrapeJobChipTitle) elements.scrapeJobChipTitle.textContent = title;
+    if (elements.scrapeJobChipSub) elements.scrapeJobChipSub.textContent = sub;
+    if (elements.scrapeJobChipCancel) {
+        elements.scrapeJobChipCancel.style.display =
+            running || (sync.running && sync.job_type === 'creator_queue') ? '' : 'none';
+    }
+}
+
+function toastForEnqueueResult(username, data) {
+    const st = data.status || 'queued';
+    if (st === 'started') {
+        showToast({
+            title: `Syncing @${username}`,
+            body: 'Fetching new posts…',
+            variant: 'info',
+            duration: 4000,
+        });
+    } else if (st === 'queued') {
+        const pos = data.position != null ? data.position : '?';
+        showToast({
+            title: `Queued @${username}`,
+            body: `Waiting · position ${pos}`,
+            variant: 'info',
+            duration: 4000,
+        });
+    } else if (st === 'already_running') {
+        showToast({
+            title: `Already syncing @${username}`,
+            body: 'This creator is already running',
+            variant: 'info',
+        });
+    } else if (st === 'already_pending') {
+        showToast({
+            title: `@${username} already queued`,
+            body: 'Waiting for its turn',
+            variant: 'info',
+        });
+    } else {
+        showToast({ title: `@${username}`, body: st, variant: 'info' });
+    }
+}
+
+function toastForFinishedJob(job, result) {
+    if (!job) return;
+    const user = job.username || 'creator';
+    const st = job.status || '';
+    if (st === 'done') {
+        const r = result || job.result || {};
+        const n = r.downloaded != null ? r.downloaded : 0;
+        const sk = r.skipped != null ? r.skipped : 0;
+        const del = r.skipped_deleted ? ` · ${r.skipped_deleted} deleted` : '';
+        showToast({
+            title: `@${user} sync complete`,
+            body: `${n} new · ${sk} skipped${del}`,
+            variant: 'success',
+            duration: 4500,
+        });
+    } else if (st === 'cancelled') {
+        showToast({
+            title: `@${user} sync cancelled`,
+            body: job.error || 'Stopped',
+            variant: 'info',
+        });
+    } else if (st === 'error') {
+        showToast({
+            title: `@${user} sync stopped`,
+            body: job.error || job.stop_reason || 'Error',
+            variant: 'error',
+            duration: 5000,
+        });
+    }
+}
+
+async function refreshScrapeStatusOnce() {
+    try {
+        const res = await fetch('/api/scrape/status');
+        if (res.status === 404) {
+            hideScrapeJobChip();
+            return null;
+        }
+        const data = await res.json();
+        state.scrapeStatus = data;
+
+        const pending = data.pending || [];
+        const running = data.running_job;
+        const paused = Boolean(data.paused);
+        const sync = data.sync || {};
+        const active = !!(running || pending.length || paused || (sync.running && sync.job_type === 'creator_queue'));
+
+        // Modal-only queue panel (if open)
+        if (elements.scrapeQueueStatus) {
             let line = paused
                 ? `Paused — ${data.pause_reason || 'queue paused'}`
                 : running
@@ -2079,66 +2298,114 @@ async function pollScrapeStatus() {
                   : pending.length
                     ? `${pending.length} pending`
                     : 'Queue idle';
-            if (sync.running && sync.progress) {
-                line += ` · ${sync.progress}`;
-            }
+            if (sync.running && sync.progress) line += ` · ${sync.progress}`;
             if (data.stats) {
                 line += ` · today ${data.stats.completed_today || 0} jobs / ${data.stats.downloaded_today || 0} files`;
             }
             elements.scrapeQueueStatus.textContent = line;
-            if (elements.scrapeQueueList) {
-                const rows = [];
-                if (running) {
-                    rows.push(`▶ @${running.username} [${running.mode}] running`);
-                }
-                pending.slice(0, 8).forEach((j, i) => {
-                    rows.push(`${i + 1}. @${j.username} [${j.mode}] prio ${j.priority || 0}`);
-                });
-                (data.history || []).slice(0, 5).forEach((j) => {
-                    rows.push(
-                        `✓ @${j.username} → ${j.status}${j.stop_reason ? ' (' + j.stop_reason + ')' : ''}`
-                    );
-                });
-                elements.scrapeQueueList.innerHTML = rows.length
-                    ? rows.map((r) => `<div class="scrape-queue-row">${r}</div>`).join('')
-                    : '';
-            }
-            // Fairness: disable one-shot when pending and not paused
-            const block = pending.length > 0 && !paused;
-            setOneShotSyncEnabled(
-                !block,
-                block
-                    ? `Creator scrape queue has ${pending.length} pending — pause or empty first`
-                    : ''
-            );
-            // Refresh gallery when a scrape job just finished
-            if (
-                !sync.running &&
-                sync.job_type === 'creator_queue' &&
-                sync.result &&
-                !state._scrapeLastFinishedAt
-            ) {
-                state._scrapeLastFinishedAt = sync.finished_at;
-                await initApp();
-            } else if (sync.finished_at && sync.finished_at !== state._scrapeLastFinishedAt) {
-                if (!sync.running && sync.job_type === 'creator_queue') {
-                    state._scrapeLastFinishedAt = sync.finished_at;
-                    await initApp();
-                }
-            }
-        } catch (err) {
-            console.error('Scrape status error:', err);
         }
-    };
-    await update();
-    if (state.scrapePollTimer) clearInterval(state.scrapePollTimer);
-    state.scrapePollTimer = setInterval(update, 2500);
+        if (elements.scrapeQueueList) {
+            const rows = [];
+            if (running) rows.push(`▶ @${running.username} [${running.mode}] running`);
+            pending.slice(0, 8).forEach((j, i) => {
+                rows.push(`${i + 1}. @${j.username} [${j.mode}] prio ${j.priority || 0}`);
+            });
+            (data.history || []).slice(0, 5).forEach((j) => {
+                rows.push(
+                    `✓ @${j.username} → ${j.status}${j.stop_reason ? ' (' + j.stop_reason + ')' : ''}`
+                );
+            });
+            elements.scrapeQueueList.innerHTML = rows.length
+                ? rows.map((r) => `<div class="scrape-queue-row">${r}</div>`).join('')
+                : '';
+        }
+
+        const block = pending.length > 0 && !paused;
+        setOneShotSyncEnabled(
+            !block,
+            block
+                ? `Creator scrape queue has ${pending.length} pending — pause or empty first`
+                : ''
+        );
+
+        updateScrapeJobChip(data);
+        updateSyncLatestButtonUi();
+
+        // Creator list pills only when active set changes
+        const pillKey = [
+            running && running.username,
+            pending.map((j) => j.username).join(','),
+            paused ? '1' : '0',
+        ].join('|');
+        if (pillKey !== state._scrapePillKey) {
+            state._scrapePillKey = pillKey;
+            if (elements.creatorList) renderCreatorList();
+        }
+
+        // Completion toast from history
+        const hist = (data.history || [])[0];
+        if (hist && hist.finished_at && hist.finished_at !== state.scrapeNotifiedFinished) {
+            const isNewEvent =
+                state.scrapeNotifiedFinished != null || state.scrapeWasActive;
+            // First observation of any history: seed baseline only if we haven't
+            // started a job this session (avoids toasting ancient history on load).
+            if (state.scrapeNotifiedFinished == null && !state.scrapeWasActive) {
+                state.scrapeNotifiedFinished = hist.finished_at;
+            } else if (isNewEvent) {
+                toastForFinishedJob(hist, hist.result);
+                const finishedUser = (hist.username || '').toLowerCase();
+                const selected = (state.selectedCreator || '').toLowerCase();
+                if (hist.status === 'done' && finishedUser && finishedUser === selected) {
+                    await fetchPhotos();
+                } else if (hist.status === 'done') {
+                    try {
+                        const cr = await fetch('/api/creators');
+                        state.creators = await cr.json();
+                        renderCreatorList();
+                    } catch (e) { /* ignore */ }
+                }
+                state.scrapeNotifiedFinished = hist.finished_at;
+            }
+        }
+
+        if (active) state.scrapeWasActive = true;
+
+        // Stop polling when fully idle (unless Sync modal open for status panel)
+        if (!active && state.scrapePollTimer && !isSyncModalOpen()) {
+            clearInterval(state.scrapePollTimer);
+            state.scrapePollTimer = null;
+            state.scrapeWasActive = false;
+        }
+
+        return data;
+    } catch (err) {
+        console.error('Scrape status error:', err);
+        return null;
+    }
+}
+
+function isSyncModalOpen() {
+    return elements.syncModal && elements.syncModal.style.display === 'flex';
+}
+
+function ensureScrapePolling() {
+    if (state.scrapePollTimer) return;
+    refreshScrapeStatusOnce();
+    state.scrapePollTimer = setInterval(() => {
+        refreshScrapeStatusOnce();
+    }, 2500);
+}
+
+/** @deprecated use ensureScrapePolling — kept for modal call sites */
+async function pollScrapeStatus() {
+    ensureScrapePolling();
+    await refreshScrapeStatusOnce();
 }
 
 async function syncLatestSelectedCreator() {
     const username = (state.selectedCreator || '').trim().replace(/^@/, '');
     if (!username) {
-        showToast('Select a creator first');
+        showToast({ title: 'Select a creator first', variant: 'error' });
         return;
     }
     try {
@@ -2149,23 +2416,27 @@ async function syncLatestSelectedCreator() {
                 username,
                 mode: 'latest',
                 max_posts: 50,
-                include_videos: syncIncludeVideosValue(),
+                include_videos: true,
             }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-            showToast(data.message || data.error || `Sync failed (${res.status})`);
+            showToast({
+                title: 'Can’t sync',
+                body: data.message || data.error || `Failed (${res.status})`,
+                variant: 'error',
+            });
             return;
         }
-        const st = data.status || 'queued';
-        if (st === 'started') showToast(`Syncing new posts for @${username}…`);
-        else if (st === 'queued') showToast(`@${username} latest sync queued`);
-        else if (st === 'already_pending' || st === 'already_running') {
-            showToast(`@${username} already ${st.replace('already_', '')}`);
-        } else showToast(`@${username}: ${st}`);
-        openSyncModal();
+        // Mark so completion toast fires even for first job this session
+        state.scrapeWasActive = true;
+        state.scrapeChipDismissed = false;
+        toastForEnqueueResult(username, data);
+        ensureScrapePolling();
+        await refreshScrapeStatusOnce();
+        // Never open full Sync modal — chip + toast only
     } catch (err) {
-        showToast('Failed to start latest sync');
+        showToast({ title: 'Failed to start sync', variant: 'error' });
     }
 }
 
@@ -2197,20 +2468,22 @@ async function enqueueCreatorScrape() {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
-            showToast(data.message || data.error || `Enqueue failed (${res.status})`);
+            showToast({
+                title: 'Can’t enqueue',
+                body: data.message || data.error || `Failed (${res.status})`,
+                variant: 'error',
+            });
             return;
         }
-        const st = data.status || 'queued';
-        if (st === 'started') showToast(`Scraping @${username} started`);
-        else if (st === 'queued') showToast(`@${username} queued (#${data.position || '?'})`);
-        else if (st === 'already_pending') showToast(`@${username} already pending`);
-        else if (st === 'already_running') showToast(`@${username} already running`);
-        else showToast(`@${username}: ${st}`);
+        state.scrapeWasActive = true;
+        state.scrapeChipDismissed = false;
+        toastForEnqueueResult(username, data);
         if (elements.scrapeCreatorInput) elements.scrapeCreatorInput.value = '';
-        pollScrapeStatus();
+        ensureScrapePolling();
+        await refreshScrapeStatusOnce();
         pollSyncStatus();
     } catch (err) {
-        showToast('Failed to enqueue scrape');
+        showToast({ title: 'Failed to enqueue scrape', variant: 'error' });
     }
 }
 
@@ -2343,7 +2616,15 @@ function closeSyncModal() {
         clearInterval(state.syncPollTimer);
         state.syncPollTimer = null;
     }
-    if (state.scrapePollTimer) {
+    // Keep scrape polling if a job is still active (chip UX); else stop
+    const scrape = state.scrapeStatus;
+    const stillActive =
+        scrape &&
+        (scrape.running_job ||
+            (scrape.pending && scrape.pending.length) ||
+            scrape.paused ||
+            (scrape.sync && scrape.sync.running && scrape.sync.job_type === 'creator_queue'));
+    if (!stillActive && state.scrapePollTimer) {
         clearInterval(state.scrapePollTimer);
         state.scrapePollTimer = null;
     }
