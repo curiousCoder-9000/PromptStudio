@@ -209,6 +209,7 @@ const elements = {
     scrapeClearPendingBtn: document.getElementById('scrapeClearPendingBtn'),
     scrapeQueueStatus: document.getElementById('scrapeQueueStatus'),
     scrapeQueueList: document.getElementById('scrapeQueueList'),
+    syncOneShotBanner: document.getElementById('syncOneShotBanner'),
     scrapeJobChip: document.getElementById('scrapeJobChip'),
     scrapeJobChipIcon: document.getElementById('scrapeJobChipIcon'),
     scrapeJobChipTitle: document.getElementById('scrapeJobChipTitle'),
@@ -3916,12 +3917,33 @@ function openSyncModal() {
     loadFollowingPicker();
 }
 
+/**
+ * One-shot jobs (Saved / Following) need the exclusive SyncManager worker.
+ * They stay disabled while a creator-queue job is running or pending.
+ * "Sync Feed" is NOT one-shot — it enqueues like Enqueue and stays enabled.
+ */
 function setOneShotSyncEnabled(enabled, reason) {
-    [elements.syncSavedBtn, elements.syncCreatorBtn, elements.syncFollowingBtn].forEach((btn) => {
+    const tip = enabled ? '' : (reason || 'Creator scrape queue is busy — pause, clear pending, or wait');
+    [elements.syncSavedBtn, elements.syncFollowingBtn].forEach((btn) => {
         if (!btn) return;
         btn.disabled = !enabled;
-        btn.title = enabled ? '' : (reason || 'Creator scrape queue has pending jobs');
+        btn.title = tip;
     });
+    // Sync Feed = enqueue path; always leave usable for new handles
+    if (elements.syncCreatorBtn) {
+        elements.syncCreatorBtn.disabled = false;
+        elements.syncCreatorBtn.title = 'Enqueue this creator (full archive) — works even if the queue is busy';
+    }
+    if (elements.syncOneShotBanner) {
+        if (enabled) {
+            elements.syncOneShotBanner.style.display = 'none';
+            elements.syncOneShotBanner.textContent = '';
+        } else {
+            elements.syncOneShotBanner.style.display = 'block';
+            elements.syncOneShotBanner.textContent =
+                tip + ' · Use Enqueue (top) for new handles. Clear pending or Cancel job to free Saved/Following.';
+        }
+    }
 }
 
 function hideScrapeJobChip() {
@@ -4126,16 +4148,26 @@ async function refreshScrapeStatusOnce() {
             });
             elements.scrapeQueueList.innerHTML = rows.length
                 ? rows.map((r) => `<div class="scrape-queue-row">${escapeHtml(r)}</div>`).join('')
-                : '';
+                : '<div class="scrape-queue-row" style="opacity:0.55">No jobs yet — add a creator below</div>';
         }
 
-        const block = pending.length > 0 && !paused;
-        setOneShotSyncEnabled(
-            !block,
-            block
-                ? `Creator scrape queue has ${pending.length} pending — pause or empty first`
-                : ''
-        );
+        // Lock Saved/Following while anything holds the worker (running or unpaused pending).
+        const workerBusy =
+            Boolean(running) ||
+            Boolean(sync.running) ||
+            (pending.length > 0 && !paused);
+        let busyReason = '';
+        if (running) {
+            busyReason = `Scraping @${running.username} now` +
+                (pending.length ? ` · ${pending.length} more queued` : '') +
+                ' — wait, Cancel job, or Clear pending';
+        } else if (sync.running) {
+            busyReason = `Sync busy (${sync.job_type || 'job'}) — wait or cancel`;
+        } else if (pending.length > 0 && !paused) {
+            busyReason =
+                `Creator scrape queue has ${pending.length} pending — Clear pending or Pause queue first`;
+        }
+        setOneShotSyncEnabled(!workerBusy, busyReason);
 
         updateScrapeJobChip(data);
         updateSyncLatestButtonUi();
@@ -4376,7 +4408,12 @@ function updateScrapeSourceUI() {
 async function enqueueCreatorScrape() {
     const username = (elements.scrapeCreatorInput?.value || '').trim().replace(/^@/, '');
     if (!username) {
-        showToast('Enter a creator handle');
+        showToast({
+            title: 'Enter a handle',
+            body: 'Type a creator above, or click someone in “From accounts you follow”.',
+            variant: 'error',
+        });
+        elements.scrapeCreatorInput?.focus();
         return;
     }
     const body = {
@@ -4385,6 +4422,7 @@ async function enqueueCreatorScrape() {
         ...scrapeModePayload(),
         include_videos: syncIncludeVideosValue(),
     };
+    if (elements.scrapeEnqueueBtn) elements.scrapeEnqueueBtn.disabled = true;
     try {
         const res = await fetch('/api/scrape/enqueue', {
             method: 'POST',
@@ -4393,9 +4431,14 @@ async function enqueueCreatorScrape() {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
+            // BaseHTTPRequestHandler send_error often returns HTML, not JSON
+            let msg = data.message || data.error;
+            if (!msg && typeof data === 'object' && !Object.keys(data).length) {
+                msg = `Failed (${res.status})`;
+            }
             showToast({
-                title: 'Can’t enqueue',
-                body: data.message || data.error || `Failed (${res.status})`,
+                title: 'Can’t add to queue',
+                body: msg || `Failed (${res.status})`,
                 variant: 'error',
             });
             return;
@@ -4404,11 +4447,21 @@ async function enqueueCreatorScrape() {
         state.scrapeChipDismissed = false;
         toastForEnqueueResult(username, data);
         if (elements.scrapeCreatorInput) elements.scrapeCreatorInput.value = '';
+        if (elements.syncCreatorInput) elements.syncCreatorInput.value = '';
+        if (elements.syncSelectedChip) {
+            elements.syncSelectedChip.style.display = 'none';
+            elements.syncSelectedChip.textContent = '';
+        }
+        elements.followingList?.querySelectorAll('.following-row.active').forEach((r) => {
+            r.classList.remove('active');
+        });
         ensureScrapePolling();
         await refreshScrapeStatusOnce();
         pollSyncStatus();
     } catch (err) {
-        showToast({ title: 'Failed to enqueue scrape', variant: 'error' });
+        showToast({ title: 'Failed to add to queue', variant: 'error' });
+    } finally {
+        if (elements.scrapeEnqueueBtn) elements.scrapeEnqueueBtn.disabled = false;
     }
 }
 
@@ -4472,6 +4525,36 @@ async function clearPendingScrapeJobs() {
     }
 }
 
+/**
+ * Fill the primary "Add a creator" handle from a following-list pick.
+ * Also mirrors into the hidden legacy syncCreatorInput for any old callers.
+ */
+function selectFollowingHandle(username, { enqueue = false, source = 'instagram' } = {}) {
+    const handle = String(username || '').trim().replace(/^@/, '');
+    if (!handle) return;
+    if (elements.scrapeSourceSelect) {
+        elements.scrapeSourceSelect.value = source;
+        updateScrapeSourceUI();
+    }
+    if (elements.scrapeCreatorInput) {
+        elements.scrapeCreatorInput.value = handle;
+        elements.scrapeCreatorInput.focus();
+        elements.scrapeCreatorInput.select();
+    }
+    if (elements.syncCreatorInput) {
+        elements.syncCreatorInput.value = handle;
+    }
+    if (elements.syncSelectedChip) {
+        elements.syncSelectedChip.style.display = 'flex';
+        elements.syncSelectedChip.innerHTML =
+            `<i class="fa-solid fa-check"></i> Selected <strong>@${escapeHtml(handle)}</strong>` +
+            (enqueue ? ' · adding…' : ' — click <strong>Add to queue</strong> or double‑click the row');
+    }
+    if (enqueue) {
+        enqueueCreatorScrape();
+    }
+}
+
 async function loadFollowingPicker(search = '') {
     if (!elements.followingList) return;
     elements.followingList.innerHTML = '<div class="following-empty">Loading…</div>';
@@ -4495,10 +4578,16 @@ async function loadFollowingPicker(search = '') {
             return;
         }
         elements.followingList.innerHTML = '';
+        const current =
+            (elements.scrapeCreatorInput?.value || '').trim().replace(/^@/, '').toLowerCase();
         accounts.forEach((acct) => {
-            const row = document.createElement('div');
+            const row = document.createElement('button');
+            row.type = 'button';
             row.className = 'following-row';
             const username = acct.username || '';
+            if (username && username.toLowerCase() === current) {
+                row.classList.add('active');
+            }
             const privateBadge = acct.is_private
                 ? '<span class="following-private">Private</span>'
                 : '';
@@ -4510,17 +4599,23 @@ async function loadFollowingPicker(search = '') {
                     ${privateBadge}
                 </div>
                 <div class="following-meta">${escapeHtml(acct.media_count ?? '—')} posts · ${escapeHtml(formatFollowers(acct.followers_count))}</div>
+                <span class="following-use" aria-hidden="true">Use</span>
             `;
+            row.title = `Fill @${username} into Add a creator (double-click to queue now)`;
             row.addEventListener('click', () => {
                 elements.followingList.querySelectorAll('.following-row').forEach((r) => {
                     r.classList.remove('active');
                 });
                 row.classList.add('active');
-                elements.syncCreatorInput.value = username;
+                selectFollowingHandle(username, { enqueue: false });
             });
-            row.addEventListener('dblclick', () => {
-                elements.syncCreatorInput.value = username;
-                startSyncCreator();
+            row.addEventListener('dblclick', (e) => {
+                e.preventDefault();
+                elements.followingList.querySelectorAll('.following-row').forEach((r) => {
+                    r.classList.remove('active');
+                });
+                row.classList.add('active');
+                selectFollowingHandle(username, { enqueue: true });
             });
             elements.followingList.appendChild(row);
         });
@@ -4570,13 +4665,24 @@ async function pollSyncStatus() {
             const res = await fetch('/api/sync/status');
             const data = await res.json();
             const cq = data.creator_queue || {};
-            if (cq.enabled !== false && cq.pending_count > 0 && !cq.paused) {
-                setOneShotSyncEnabled(
-                    false,
-                    `Creator scrape queue has ${cq.pending_count} pending — pause or empty first`
-                );
-            } else if (!state.scrapePollTimer) {
-                setOneShotSyncEnabled(true, '');
+            // Prefer scrape-status polling when active; only set one-shot lock here as fallback
+            if (!state.scrapePollTimer) {
+                const busy =
+                    Boolean(data.running) ||
+                    (cq.enabled !== false &&
+                        ((cq.pending_count > 0 && !cq.paused) || cq.current_username));
+                let reason = '';
+                if (data.running && data.scrape_username) {
+                    reason = `Scraping @${data.scrape_username} — wait or cancel`;
+                } else if (cq.current_username) {
+                    reason = `Scraping @${cq.current_username}` +
+                        (cq.pending_count ? ` · ${cq.pending_count} queued` : '');
+                } else if (cq.pending_count > 0 && !cq.paused) {
+                    reason = `Creator scrape queue has ${cq.pending_count} pending — Clear pending or Pause first`;
+                } else if (data.running) {
+                    reason = `Sync busy (${data.job_type || 'job'})`;
+                }
+                setOneShotSyncEnabled(!busy, reason);
             }
             if (elements.syncRateMeta) {
                 const hits = data.rate_limit_hits || 0;
@@ -4660,42 +4766,27 @@ function syncIncludeVideosValue() {
 }
 
 async function startSyncCreator() {
-    // Modal "Sync creator" — same full-feed deep path as sidebar (via scrape queue).
-    // Never max_posts=50 / bounded: that only pulled glam top-N and stopped early.
-    const username = elements.syncCreatorInput.value.trim().replace(/^@/, '');
+    // Legacy "Sync Feed" — now aliases the primary enqueue path.
+    // Prefer scrapeCreatorInput; fall back to hidden syncCreatorInput.
+    const fromPrimary = (elements.scrapeCreatorInput?.value || '').trim().replace(/^@/, '');
+    const fromLegacy = (elements.syncCreatorInput?.value || '').trim().replace(/^@/, '');
+    const username = fromPrimary || fromLegacy;
     if (!username) {
         showToast('Enter a creator handle');
         return;
     }
-    try {
-        const res = await fetch('/api/scrape/enqueue', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                username,
-                mode: 'full',
-                deep: true,
-                include_videos: syncIncludeVideosValue(),
-            }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) {
-            showToast({
-                title: 'Can’t sync',
-                body: data.message || data.error || `Failed (${res.status})`,
-                variant: 'error',
-            });
-            return;
-        }
-        state.scrapeWasActive = true;
-        state.scrapeChipDismissed = false;
-        toastForEnqueueResult(username, data);
-        ensureScrapePolling();
-        await refreshScrapeStatusOnce();
-        pollSyncStatus();
-    } catch (err) {
-        showToast('Failed to start creator sync');
+    if (elements.scrapeCreatorInput) elements.scrapeCreatorInput.value = username;
+    if (elements.scrapeSourceSelect) {
+        elements.scrapeSourceSelect.value = 'instagram';
+        updateScrapeSourceUI();
     }
+    // Full archive when using this alias (matches prior Sync Feed behaviour)
+    const fullRadio = document.getElementById('scrapeModeFull');
+    if (fullRadio) {
+        fullRadio.checked = true;
+        updateScrapeModeUi();
+    }
+    await enqueueCreatorScrape();
 }
 
 async function startSyncFollowing() {

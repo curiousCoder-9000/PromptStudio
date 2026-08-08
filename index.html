@@ -35,8 +35,8 @@
                 <button id="batchPromptBtn" class="btn btn-secondary" title="Analyze all uncached photos with Ollama Vision">
                     <i class="fa-solid fa-bolt"></i> Batch Analyze
                 </button>
-                <button id="syncInstagramBtn" class="btn btn-secondary">
-                    <i class="fa-brands fa-instagram"></i> IG Sync
+                <button id="syncInstagramBtn" class="btn btn-secondary" title="Download creators, saved posts, following">
+                    <i class="fa-solid fa-cloud-arrow-down"></i> Download
                 </button>
                 <button id="uploadPhotoBtn" class="btn btn-secondary">
                     <i class="fa-solid fa-cloud-arrow-up"></i> Upload Photo
@@ -477,112 +477,142 @@
         </div>
     </div>
 
-    <!-- Instagram Sync Modal -->
+    <!-- Download / Sync Modal — single primary path + following picker + advanced -->
     <div class="modal-dialog-container" id="syncModal" style="display:none;">
         <div class="modal-overlay" id="syncModalOverlay"></div>
-        <div class="modal-card">
-            <div class="modal-icon pink"><i class="fa-brands fa-instagram"></i></div>
-            <h3>Instagram Sync</h3>
-            <p>Download new photos into your local archive. Jobs run in the background.</p>
+        <div class="modal-card sync-modal-card">
+            <div class="sync-modal-header">
+                <div class="modal-icon pink"><i class="fa-solid fa-cloud-arrow-down"></i></div>
+                <div class="sync-modal-titles">
+                    <h3>Download media</h3>
+                    <p class="sync-modal-lead">Add creators to a serial queue. One download at a time — no parallel scrapes.</p>
+                </div>
+            </div>
 
             <div class="sync-actions">
-                <div class="scrape-queue-block" id="scrapeQueueBlock">
-                    <div class="sync-status-label">Scrape creator (full archive queue)</div>
-                    <p class="scrape-queue-hint">Enqueue targets one-by-one. Jobs never run in parallel, on any source.</p>
-                    <div class="sync-creator-row">
-                        <select id="scrapeSourceSelect" class="modal-select" title="Source platform">
+                <!-- Live queue -->
+                <div class="sync-section sync-queue-live" id="scrapeQueueBlock">
+                    <div class="sync-section-head">
+                        <span class="sync-section-title"><i class="fa-solid fa-list-check"></i> Queue</span>
+                        <span class="scrape-queue-status" id="scrapeQueueStatus">Idle</span>
+                    </div>
+                    <div class="scrape-queue-list" id="scrapeQueueList"></div>
+                    <div class="scrape-queue-actions">
+                        <button class="btn btn-secondary" id="scrapePauseBtn" type="button" title="Pause after current job">Pause</button>
+                        <button class="btn btn-secondary" id="scrapeResumeBtn" type="button">Resume</button>
+                        <button class="btn btn-secondary" id="scrapeCancelBtn" type="button" title="Cancel the running job">Cancel job</button>
+                        <button class="btn btn-secondary" id="scrapeClearPendingBtn" type="button" title="Drop waiting jobs (not the one running)">Clear pending</button>
+                    </div>
+                </div>
+
+                <!-- Primary: add one creator -->
+                <div class="sync-section sync-section-primary" id="syncAddCreatorSection">
+                    <div class="sync-section-head">
+                        <span class="sync-section-title"><i class="fa-solid fa-user-plus"></i> Add a creator</span>
+                    </div>
+                    <div class="sync-creator-row sync-primary-row">
+                        <select id="scrapeSourceSelect" class="modal-select" title="Platform" aria-label="Source platform">
                             <option value="instagram" selected>Instagram</option>
                             <option value="x">X / Twitter</option>
                             <option value="reddit">Reddit</option>
                         </select>
-                        <input type="text" id="scrapeCreatorInput" placeholder="@creator handle" class="modal-input" autocomplete="off">
-                        <button class="btn btn-primary" id="scrapeEnqueueBtn">
-                            <i class="fa-solid fa-cloud-arrow-down"></i> Enqueue
+                        <input type="text" id="scrapeCreatorInput" placeholder="@handle or r/subreddit" class="modal-input" autocomplete="off" aria-label="Creator handle">
+                        <button class="btn btn-primary" id="scrapeEnqueueBtn" type="button">
+                            <i class="fa-solid fa-plus"></i> Add to queue
                         </button>
                     </div>
                     <p class="scrape-queue-hint" id="scrapeSourceHint"></p>
-                    <!-- One radio group per backend mode. Three independent
-                         checkboxes encoded a 3-value enum and couldn't express
-                         true catch-up (catch_up_only) at all. -->
-                    <div class="segmented" id="scrapeModeGroup" role="radiogroup" aria-label="Scrape mode">
+                    <div class="sync-selected-chip" id="syncSelectedChip" style="display:none;" role="status"></div>
+
+                    <div class="sync-mode-label">How much to download</div>
+                    <div class="segmented segmented-horizontal" id="scrapeModeGroup" role="radiogroup" aria-label="Scrape mode">
                         <label class="segmented-option">
                             <input type="radio" name="scrapeMode" value="full" id="scrapeModeFull" checked>
                             <span class="segmented-label">
                                 <span class="segmented-title">Full archive</span>
-                                <span class="segmented-hint">Walk the whole feed, fill every gap</span>
+                                <span class="segmented-hint">Whole feed · fill gaps</span>
                             </span>
                         </label>
                         <label class="segmented-option">
                             <input type="radio" name="scrapeMode" value="catch_up" id="scrapeModeCatchUp">
                             <span class="segmented-label">
                                 <span class="segmented-title">Catch-up</span>
-                                <span class="segmented-hint">Newest only, stop once posts are known</span>
+                                <span class="segmented-hint">Newest until known</span>
                             </span>
                         </label>
                         <label class="segmented-option">
                             <input type="radio" name="scrapeMode" value="bounded" id="scrapeModeBounded">
                             <span class="segmented-label">
-                                <span class="segmented-title">Bounded</span>
-                                <span class="segmented-hint">Glam-ranked top N posts</span>
+                                <span class="segmented-title">Top N</span>
+                                <span class="segmented-hint">Glam-ranked sample</span>
                             </span>
                         </label>
                     </div>
                     <div class="sync-creator-row" id="scrapeMaxPostsRow" style="display:none;">
                         <label class="sync-num-label" for="scrapeMaxPosts">Max posts</label>
-                        <input type="number" id="scrapeMaxPosts" class="modal-input sync-num" value="50" min="1" max="5000" title="Ceiling for Catch-up and Bounded modes">
+                        <input type="number" id="scrapeMaxPosts" class="modal-input sync-num" value="50" min="1" max="5000" title="Ceiling for Catch-up and Top N">
                     </div>
-                    <div class="scrape-queue-actions">
-                        <button class="btn btn-secondary" id="scrapePauseBtn" type="button">Pause queue</button>
-                        <button class="btn btn-secondary" id="scrapeResumeBtn" type="button">Resume</button>
-                        <button class="btn btn-secondary" id="scrapeCancelBtn" type="button" title="Cancel running IG job">Cancel job</button>
-                        <button class="btn btn-secondary" id="scrapeClearPendingBtn" type="button">Clear pending</button>
-                    </div>
-                    <div class="scrape-queue-status" id="scrapeQueueStatus">Queue idle</div>
-                    <div class="scrape-queue-list" id="scrapeQueueList"></div>
-                </div>
-                <hr class="sync-divider">
-                <button class="btn btn-primary full-width" id="syncSavedBtn">
-                    <i class="fa-solid fa-bookmark"></i> Sync Saved Posts
-                </button>
-                <div class="sync-creator-row">
-                    <input type="text" id="syncCreatorInput" placeholder="@creator handle" class="modal-input" autocomplete="off">
-                    <button class="btn btn-secondary" id="syncCreatorBtn">
-                        <i class="fa-solid fa-user"></i> Sync Feed
-                    </button>
-                </div>
-                <div class="following-picker" id="followingPicker">
-                    <div class="sync-status-label">Pick from following list</div>
-                    <input type="text" id="followingSearchInput" class="modal-input" placeholder="Search following…" autocomplete="off">
-                    <div class="following-list" id="followingList">
-                        <div class="following-empty" id="followingEmpty">Loading…</div>
-                    </div>
-                </div>
-                <div class="sync-following-block">
-                    <div class="sync-status-label">Sync Following</div>
-                    <div class="sync-creator-row">
-                        <input type="number" id="syncFollowMaxAccounts" class="modal-input sync-num" value="20" min="1" max="200" title="Accounts per day / run">
-                        <input type="number" id="syncFollowMaxPosts" class="modal-input sync-num" value="20" min="1" max="100" title="Max posts per account">
-                    </div>
-                    <input type="text" id="syncFollowKeywords" class="modal-input" placeholder="Bio keywords (model, lingerie…) — blank = config defaults" autocomplete="off">
                     <label class="sync-check-label" for="syncIncludeVideos" title="Download reels / video posts (images always included)">
                         <input type="checkbox" id="syncIncludeVideos" checked>
                         Include reels / videos
                     </label>
-                    <button class="btn btn-secondary full-width" id="syncFollowingBtn">
-                        <i class="fa-solid fa-users"></i> Sync Following List
-                    </button>
                 </div>
+
+                <!-- Following picker → fills primary handle -->
+                <div class="sync-section following-picker" id="followingPicker">
+                    <div class="sync-section-head">
+                        <span class="sync-section-title"><i class="fa-solid fa-address-book"></i> From accounts you follow</span>
+                    </div>
+                    <p class="scrape-queue-hint">Click a row to fill the handle above, then <strong>Add to queue</strong>. Double-click to add immediately.</p>
+                    <input type="text" id="followingSearchInput" class="modal-input" placeholder="Search following…" autocomplete="off" aria-label="Search following list">
+                    <div class="following-list" id="followingList">
+                        <div class="following-empty" id="followingEmpty">Loading…</div>
+                    </div>
+                </div>
+
+                <!-- Advanced / one-shot jobs -->
+                <div class="sync-oneshot-banner" id="syncOneShotBanner" style="display:none;" role="status"></div>
+                <details class="sync-advanced" id="syncAdvancedDetails">
+                    <summary class="sync-advanced-summary">
+                        <i class="fa-solid fa-sliders"></i> More sync options
+                        <span class="sync-advanced-hint">Saved bookmarks · bulk following crawl</span>
+                    </summary>
+                    <div class="sync-advanced-body">
+                        <p class="scrape-queue-hint">
+                            These use the same worker as the queue. They stay locked while a creator job is running or waiting.
+                            Prefer <strong>Add to queue</strong> above for single handles.
+                        </p>
+                        <button class="btn btn-secondary full-width" id="syncSavedBtn" type="button">
+                            <i class="fa-solid fa-bookmark"></i> Sync my Instagram Saved posts
+                        </button>
+                        <div class="sync-following-block">
+                            <div class="sync-status-label">Bulk: following list crawl</div>
+                            <div class="sync-creator-row">
+                                <input type="number" id="syncFollowMaxAccounts" class="modal-input sync-num" value="20" min="1" max="200" title="Accounts per day / run" aria-label="Max accounts">
+                                <input type="number" id="syncFollowMaxPosts" class="modal-input sync-num" value="20" min="1" max="100" title="Max posts per account" aria-label="Max posts per account">
+                            </div>
+                            <input type="text" id="syncFollowKeywords" class="modal-input" placeholder="Bio keywords filter (optional)" autocomplete="off">
+                            <button class="btn btn-secondary full-width" id="syncFollowingBtn" type="button">
+                                <i class="fa-solid fa-users"></i> Start following crawl
+                            </button>
+                        </div>
+                    </div>
+                </details>
+
+                <!-- Hidden legacy Sync Feed control (kept for JS refs; primary path is Enqueue) -->
+                <input type="hidden" id="syncCreatorInput" value="" autocomplete="off">
+                <button type="button" id="syncCreatorBtn" style="display:none;" aria-hidden="true" tabindex="-1">Sync Feed</button>
             </div>
 
             <div class="sync-status-panel" id="syncStatusPanel">
-                <div class="sync-status-label">Status</div>
+                <div class="sync-status-label">Worker status</div>
                 <div class="sync-status-text" id="syncStatusText">Idle</div>
                 <div class="sync-rate-meta" id="syncRateMeta"></div>
                 <div class="sync-progress-bar"><div class="sync-progress-fill" id="syncProgressFill"></div></div>
             </div>
 
             <div class="modal-actions">
-                <button class="btn btn-secondary" id="closeSyncModalBtn">Close</button>
+                <button class="btn btn-secondary" id="closeSyncModalBtn" type="button">Close</button>
             </div>
         </div>
     </div>

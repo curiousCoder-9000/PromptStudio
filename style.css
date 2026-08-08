@@ -1975,10 +1975,104 @@ button.tag-pill.tag-clickable:hover {
     box-shadow: var(--surface-inset), var(--shadow-lg), 0 0 0 1px rgba(139, 92, 246, 0.06);
 }
 
-#syncModal .modal-card {
-    max-width: 560px;
-    max-height: 90vh;
+#syncModal .modal-card,
+.modal-card.sync-modal-card {
+    max-width: 640px;
+    max-height: 92vh;
     overflow-y: auto;
+    align-items: stretch;
+    text-align: left;
+}
+
+.sync-modal-header {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    width: 100%;
+}
+
+.sync-modal-header .modal-icon {
+    flex: 0 0 auto;
+    margin: 0;
+}
+
+.sync-modal-titles {
+    flex: 1;
+    min-width: 0;
+}
+
+.sync-modal-titles h3 {
+    margin: 0 0 4px;
+    text-align: left;
+}
+
+.sync-modal-lead {
+    margin: 0;
+    font-size: 0.86rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+
+.sync-actions {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.sync-section {
+    width: 100%;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px;
+    border-radius: var(--radius-md);
+    background: rgba(15, 23, 42, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.sync-section-primary {
+    background: rgba(139, 92, 246, 0.1);
+    border-color: rgba(139, 92, 246, 0.28);
+}
+
+.sync-queue-live {
+    background: rgba(6, 182, 212, 0.08);
+    border-color: rgba(6, 182, 212, 0.22);
+}
+
+.sync-section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.sync-section-title {
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: #fff;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.sync-section-title i {
+    color: var(--accent-cyan);
+    opacity: 0.9;
+}
+
+.sync-section-primary .sync-section-title i {
+    color: var(--accent-purple);
+}
+
+.sync-mode-label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.65);
+    margin-top: 4px;
 }
 
 .scrape-queue-block {
@@ -2013,22 +2107,41 @@ button.tag-pill.tag-clickable:hover {
 }
 
 .scrape-queue-status {
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     color: var(--accent-cyan);
     font-family: "Fira Code", monospace;
+    text-align: right;
 }
 
 .scrape-queue-list {
-    max-height: 120px;
+    max-height: 110px;
     overflow-y: auto;
     font-size: 0.78rem;
     color: var(--text-secondary);
     font-family: "Fira Code", monospace;
+    min-height: 1.2em;
 }
 
 .scrape-queue-row {
-    padding: 2px 0;
+    padding: 3px 0;
     border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.sync-selected-chip {
+    display: none;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 11px;
+    border-radius: 10px;
+    font-size: 0.82rem;
+    color: #a5f3fc;
+    background: rgba(6, 182, 212, 0.12);
+    border: 1px solid rgba(6, 182, 212, 0.35);
+}
+
+.sync-selected-chip strong {
+    color: #fff;
 }
 
 .sync-divider {
@@ -2038,9 +2151,81 @@ button.tag-pill.tag-clickable:hover {
     margin: 8px 0;
 }
 
+.sync-oneshot-banner {
+    width: 100%;
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: 10px;
+    font-size: 0.82rem;
+    line-height: 1.4;
+    color: #fde68a;
+    background: rgba(245, 158, 11, 0.12);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.sync-advanced {
+    width: 100%;
+    border-radius: var(--radius-md);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: rgba(15, 23, 42, 0.4);
+    padding: 0;
+}
+
+.sync-advanced-summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 12px 14px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 12px;
+    font-size: 0.88rem;
+    font-weight: 600;
+    color: #fff;
+    user-select: none;
+}
+
+.sync-advanced-summary::-webkit-details-marker {
+    display: none;
+}
+
+.sync-advanced-summary i {
+    color: rgba(255, 255, 255, 0.55);
+}
+
+.sync-advanced-hint {
+    font-weight: 400;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
+.sync-advanced[open] .sync-advanced-summary {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.sync-advanced-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px 14px;
+}
+
 .sync-actions .btn:disabled {
     opacity: 0.45;
     cursor: not-allowed;
+}
+
+.sync-primary-row {
+    align-items: stretch;
+}
+
+.sync-primary-row .modal-select {
+    flex: 0 0 auto;
+    max-width: 130px;
+}
+
+.sync-primary-row #scrapeEnqueueBtn {
+    white-space: nowrap;
 }
 
 /* Trash modal — wider than the confirm dialogs, left-aligned rows */
@@ -2249,6 +2434,16 @@ button.tag-pill.tag-clickable:hover {
     margin: 4px 0 2px;
 }
 
+.segmented-horizontal {
+    flex-direction: row;
+    flex-wrap: wrap;
+}
+
+.segmented-horizontal .segmented-option {
+    flex: 1 1 140px;
+    min-width: 0;
+}
+
 .segmented-option {
     display: flex;
     align-items: flex-start;
@@ -2309,18 +2504,28 @@ button.tag-pill.tag-clickable:hover {
 }
 
 .following-list {
-    max-height: 180px;
+    max-height: 200px;
     overflow-y: auto;
     border: 1px solid var(--border-glass);
     border-radius: var(--radius-md);
-    background: rgba(15, 23, 42, 0.6);
+    background: rgba(8, 12, 22, 0.45);
 }
 
 .following-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
     padding: 10px 12px;
+    border: none;
     border-bottom: 1px solid var(--border-glass);
+    background: transparent;
+    color: inherit;
+    text-align: left;
     cursor: pointer;
     transition: background var(--transition-fast);
+    font: inherit;
 }
 
 .following-row:last-child {
@@ -2330,6 +2535,31 @@ button.tag-pill.tag-clickable:hover {
 .following-row:hover,
 .following-row.active {
     background: rgba(139, 92, 246, 0.15);
+}
+
+.following-row:focus-visible {
+    outline: 2px solid #06b6d4;
+    outline-offset: -2px;
+}
+
+.following-row .following-main {
+    flex: 1;
+    min-width: 0;
+}
+
+.following-use {
+    flex: 0 0 auto;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--accent-cyan);
+    opacity: 0.55;
+}
+
+.following-row:hover .following-use,
+.following-row.active .following-use {
+    opacity: 1;
 }
 
 .following-main {
