@@ -207,11 +207,151 @@ destructive mode.
 
 ---
 
+Phases 1–12 built the **acquisition** half. Phases 13–15 build the half that
+justifies it. Source: [product_review.md](product_review.md) — the value chain is
+`scrape → organize → analyze → search → generate`, and `scraping/` carries 3.1×
+the LOC of `prompts/` + `comfy/` combined. Feature IDs below (A1, B2, …) map to
+that document; S-numbers map to [review_backend_architecture.md](review_backend_architecture.md).
+
+---
+
+## Phase 13 — Instrument, then close the loop 🔜
+
+**Goal:** measure whether the pipeline works, stop losing what it produces, and
+let the user see and judge output for the first time.
+
+Theme A items are specified in
+[design_generation_loop.md](design_generation_loop.md).
+
+| Deliverable | ID | Status |
+|-------------|----|--------|
+| Quality dashboard — prompt edit rate, regenerate rate, score distribution per `prompt_version` (`GET /api/insights`) | B1 | Todo |
+| **Provenance** — record the seed actually used (`resolve_seed`, required builder arg, returned by the API, echoed in the UI) | A0 | **Done** |
+| **Storage** — `generations` table in `archive.db`, full prompts, drop the 20-per-source cap, retire `resolve_archive_file` | A0 | Todo |
+| Atomic JSON writes everywhere — extract `atomic_write_json` from `creator_queue._save`, apply to the other nine writers | S1 | Todo |
+| Top-level error boundary — unhandled route errors return JSON 500 instead of dropping the connection | S2 | Todo |
+| `logging` + rotating file handler; walk the 21 `except: pass` sites | S3 | Todo |
+| `export --derived` / import — prompts, glam scores, favorites, styles, labels, generation index | E1 | Todo |
+| Rate generations (keep / discard / ⭐) — `PUT /api/generation/rate` | A3 | Todo |
+| Outputs gallery — `GET /api/generations/list`, filter by creator/date/checkpoint/rating, full provenance | A1 | Todo |
+
+**B1 first.** `parameters.manual_edit` (`handler.py:358`) and prompt `history`
+have been written since Phase 4 and read by nothing — edit rate is a free,
+already-instrumented measure of prompt quality. Phase 13 is cheap to justify
+only *after* it exists.
+
+**A0 before A3 and A1.** `build_pro_workflow` resolves `seed=None` into a random
+integer inside the builder (`comfy/client.py:218-220`) and never returns it, so
+`_run_pro` records `seed: null` on every generation where the user did not tick
+the seed lock — which is the default. Until that is fixed, the outputs gallery
+would ship a provenance panel whose most important field is empty and a
+"regenerate" button that cannot reproduce anything. `_save_outputs` also
+truncates prompts to 500/300 chars and the index silently caps history at 20 per
+source. Full evidence in
+[design_generation_loop.md](design_generation_loop.md) §2.
+
+**A3 before A1**, so the outputs gallery ships with ranking rather than gaining
+it later.
+
+---
+
+## Phase 14 — Studio usable at archive scale 🔜
+
+**Goal:** generation becomes a batch operation, and the single hardcoded
+workflow stops being the ceiling.
+
+| Deliverable | ID | Status |
+|-------------|----|--------|
+| Batch generate queue — `POST /api/comfy/batch` + status/cancel, `renderJobChip('generate', …)` | A2 | Todo |
+| Custom `workflow_api.json` import + slot-mapping UI (prompt / negative / seed / image) | A4 | Todo |
+| Post / carousel grouping in the gallery | C2 | Todo |
+| Pass-rate badge per filter + CI failure when one bucket exceeds 60% of outputs | B4 | Todo |
+
+Clone the `BatchPromptManager` shape for A2 — cooperative cancel, progress chip
+and resume-after-refresh are already built and tested; only the runner changes.
+A2 must respect the existing single-flight rule on the Comfy resource.
+
+**A2 is the sixth job manager.** That is precisely the trigger
+[review_backend_architecture.md](review_backend_architecture.md) S6 names for
+extracting `BackgroundJob` + a resource lease — do S6 first or A2 adds another
+round of pairwise `is_running()` checks.
+
+C2 is near-free: `post_id` is in every sidecar and `group_by_post_id()` already
+exists at `storage/metadata.py:100`; only the gallery ignores it.
+
+B4 becomes standing policy from here — Phase 5's Sexy filter reached 92% pass
+rate with nothing to notice.
+
+---
+
+## Phase 15 — Taste as the durable asset 🔜
+
+**Goal:** stop hand-encoding a preference function in English. Learn it from the
+labels the product has been discarding, and mine the same embeddings three ways.
+
+| Deliverable | ID | Status |
+|-------------|----|--------|
+| Rapid labeling mode + `labels` table, seeded from `photos.favorite` and `_trash/` | B3 | Todo |
+| SigLIP-2 embeddings cached in `archive.db` + logistic head → calibrated `P(keep)`, "For You" sort | B2 | Todo |
+| Semantic search — text→image over sqlite-vec, `?search=…&mode=semantic` | C1 | Todo |
+| Near-dup collapse — `phash` column first, embedding kNN second | C3 | Todo |
+| Faceted attributes (setting / outfit / framing / pose) as columns + filter chips | C5 | Todo |
+| Collections / saved views — cross-creator boards, saved filter sets | C4 | Todo |
+| Activity view over the run journal (JSONL per job kind) | E2 | Todo |
+
+**One embedding job serves B2, C1 and C3.** Build it once. This retires the
+Phase 6 note ("CLIP? Not needed…") — that call was right for the Comfy loop and
+wrong for everything else, because the cost side changed: sqlite-vec drops into
+the `archive.db` that already exists, no server.
+
+The VLM is **demoted, not removed** — it keeps `brief_reason` and the ~10–20% of
+items near the decision boundary. Rationale in
+[research_glam_classifier.md](research_glam_classifier.md) §3.5.
+
+B3 gates B2 (labels are the training set) and is also
+`design_reel_classifier_v2.md` P0 — one labeling harness, both consumers.
+E2 depends on S3 landing in Phase 13. C5 rides free on a vision call already
+being made.
+
+---
+
+## Interleaved engineering work
+
+From [review_backend_architecture.md](review_backend_architecture.md), placed
+rather than left floating:
+
+| Item | Where |
+|------|-------|
+| S1 · S2 · S3 — atomic writes, error boundary, logging | Phase 13, as one "make failures visible" PR |
+| S6 — `BackgroundJob` + resource lease | **Before A2** in Phase 14 |
+| S4 · S5 — prompt cache → SQLite table, FTS5 search | Phase 15, folded into the storage PR that adds embeddings |
+| S8 — `journal_mode=WAL`, `busy_timeout`, mtime-diffed `rebuild()` | Whichever storage PR lands first |
+| S7 — route table, `handler.py` decomposition | Continuous, inside feature PRs only — never standalone |
+
+`app.js` (5,074 lines) has the same monolith problem as `handler.py` and gets
+the same treatment on the same terms.
+
+---
+
+## Deliberately not building
+
+Recorded so it is not relitigated — full reasoning in
+[product_review.md](product_review.md) §7.
+
+- **Onboarding investment** (first-run wizard, doctor, demo mode, settings UI for
+  the 89 env vars) — cut by owner. Revisit only if the distribution intent changes.
+- **A fourth scrape source** — three is enough; more widens the gap Phases 13–15 close.
+- **Classifier prompt tuning before the eval set exists** — that is what produced
+  85% saturation.
+- **Auth / multi-user / hosting** — ToS constraint makes it a dead end.
+- **A general-purpose vector DB** — sqlite-vec in `archive.db`, no new process.
+
+---
+
 ## Future (optional)
 
-- CLIP embedding index for visual similarity (optional; not required for Comfy)
 - FastAPI async job queue (partially covered by threaded HTTP + background jobs)
-- Custom ComfyUI `workflow_api.json` import UI
+- Content-addressed thumbnails so renames and re-scores don't orphan `_thumbs/`
 
 ---
 

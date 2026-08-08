@@ -280,6 +280,8 @@ Idempotent: skip by `post_id`/`shortcode` in DB + meta. Catch-up stop after `IG_
 | [instagram_downloader.md](instagram_downloader.md) | Sync pacing, queue, resume |
 | [troubleshooting.md](troubleshooting.md) | Ollama, ports, cache wipe |
 | [roadmap.md](roadmap.md) | Phase history / future |
+| [product_review.md](product_review.md) | Product themes A/B/C/E, accepted backlog + sequence |
+| [design_generation_loop.md](design_generation_loop.md) | Theme A spec — generations table, rating, outputs gallery, batch, workflow registry |
 | [agent.md](agent.md) | Short ops checklist |
 | Root [AGENTS.md](../AGENTS.md) | Injected workspace rules |
 | [scripts/README.md](../scripts/README.md) | CLI examples |
