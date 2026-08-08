@@ -155,7 +155,7 @@ def _download_sample(
                 L.context,
                 {"id": str(userid), "pk": str(userid), "username": username},
             )
-            profile._has_full_metadata = True  # noqa: SLF001
+            profile._has_full_metadata = True
             _log(f"  profile from user_id={userid} (no web_profile_info)")
         except Exception as e:
             last_err = str(e)

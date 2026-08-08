@@ -53,7 +53,7 @@ def list_all_archive_media(
         folder = os.path.join(SAVED_DIR, name)
         if not os.path.isdir(folder):
             continue
-        if name in EXCLUDED_FOLDERS or name.startswith(".") or name.startswith("_"):
+        if name in EXCLUDED_FOLDERS or name.startswith((".", "_")):
             continue
         for fname in sorted(os.listdir(folder)):
             if fname.lower().endswith(exts):

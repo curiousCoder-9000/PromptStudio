@@ -41,6 +41,9 @@
                 <button id="uploadPhotoBtn" class="btn btn-secondary">
                     <i class="fa-solid fa-cloud-arrow-up"></i> Upload Photo
                 </button>
+                <button id="trashBtn" class="btn btn-secondary" title="Restore or permanently remove deleted media" style="display:none;">
+                    <i class="fa-solid fa-trash-can"></i> Trash <span class="nav-count-badge" id="trashCountBadge">0</span>
+                </button>
                 <button id="refreshBtn" class="btn btn-primary">
                     <i class="fa-solid fa-arrows-rotate"></i> Refresh
                 </button>
@@ -485,27 +488,48 @@
             <div class="sync-actions">
                 <div class="scrape-queue-block" id="scrapeQueueBlock">
                     <div class="sync-status-label">Scrape creator (full archive queue)</div>
-                    <p class="scrape-queue-hint">Enqueue handles one-by-one. Jobs never run in parallel (Instagram rate limits).</p>
+                    <p class="scrape-queue-hint">Enqueue targets one-by-one. Jobs never run in parallel, on any source.</p>
                     <div class="sync-creator-row">
+                        <select id="scrapeSourceSelect" class="modal-select" title="Source platform">
+                            <option value="instagram" selected>Instagram</option>
+                            <option value="x">X / Twitter</option>
+                            <option value="reddit">Reddit</option>
+                        </select>
                         <input type="text" id="scrapeCreatorInput" placeholder="@creator handle" class="modal-input" autocomplete="off">
                         <button class="btn btn-primary" id="scrapeEnqueueBtn">
                             <i class="fa-solid fa-cloud-arrow-down"></i> Enqueue
                         </button>
                     </div>
-                    <label class="sync-check-label" for="scrapeLatestMode" title="Server upgrades this to full+deep archive fill (avoids stopping after 50 posts). True catch-up needs catch_up_only API flag.">
-                        <input type="checkbox" id="scrapeLatestMode">
-                        Latest (upgraded to full archive fill)
-                    </label>
-                    <label class="sync-check-label" for="scrapeFullDeep" title="Walk entire feed; fill gaps even after glam top-N pulls">
-                        <input type="checkbox" id="scrapeFullDeep" checked>
-                        Full archive (deep — catch-up off)
-                    </label>
-                    <label class="sync-check-label" for="scrapeBoundedMode" title="Use bounded top-N instead of full feed">
-                        <input type="checkbox" id="scrapeBoundedMode">
-                        Bounded only (max posts)
-                    </label>
-                    <div class="sync-creator-row">
-                        <input type="number" id="scrapeMaxPosts" class="modal-input sync-num" value="50" min="1" max="5000" title="Max posts when bounded; full mode ceiling optional" disabled>
+                    <p class="scrape-queue-hint" id="scrapeSourceHint"></p>
+                    <!-- One radio group per backend mode. Three independent
+                         checkboxes encoded a 3-value enum and couldn't express
+                         true catch-up (catch_up_only) at all. -->
+                    <div class="segmented" id="scrapeModeGroup" role="radiogroup" aria-label="Scrape mode">
+                        <label class="segmented-option">
+                            <input type="radio" name="scrapeMode" value="full" id="scrapeModeFull" checked>
+                            <span class="segmented-label">
+                                <span class="segmented-title">Full archive</span>
+                                <span class="segmented-hint">Walk the whole feed, fill every gap</span>
+                            </span>
+                        </label>
+                        <label class="segmented-option">
+                            <input type="radio" name="scrapeMode" value="catch_up" id="scrapeModeCatchUp">
+                            <span class="segmented-label">
+                                <span class="segmented-title">Catch-up</span>
+                                <span class="segmented-hint">Newest only, stop once posts are known</span>
+                            </span>
+                        </label>
+                        <label class="segmented-option">
+                            <input type="radio" name="scrapeMode" value="bounded" id="scrapeModeBounded">
+                            <span class="segmented-label">
+                                <span class="segmented-title">Bounded</span>
+                                <span class="segmented-hint">Glam-ranked top N posts</span>
+                            </span>
+                        </label>
+                    </div>
+                    <div class="sync-creator-row" id="scrapeMaxPostsRow" style="display:none;">
+                        <label class="sync-num-label" for="scrapeMaxPosts">Max posts</label>
+                        <input type="number" id="scrapeMaxPosts" class="modal-input sync-num" value="50" min="1" max="5000" title="Ceiling for Catch-up and Bounded modes">
                     </div>
                     <div class="scrape-queue-actions">
                         <button class="btn btn-secondary" id="scrapePauseBtn" type="button">Pause queue</button>
@@ -559,6 +583,30 @@
 
             <div class="modal-actions">
                 <button class="btn btn-secondary" id="closeSyncModalBtn">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Trash Modal — restore or permanently remove soft-deleted media -->
+    <div class="modal-dialog-container" id="trashModal" style="display:none;">
+        <div class="modal-overlay"></div>
+        <div class="modal-card wide">
+            <div class="modal-icon red"><i class="fa-solid fa-trash-can"></i></div>
+            <h3>Trash</h3>
+            <p id="trashSummary">Deleted media is kept here so you can put it back.</p>
+
+            <div class="trash-list" id="trashList">
+                <div class="trash-empty" id="trashEmpty">Loading…</div>
+            </div>
+
+            <div class="modal-actions trash-modal-actions">
+                <button class="btn btn-ghost" id="trashPurgeExpiredBtn" type="button" title="Permanently remove entries past the retention window">
+                    <i class="fa-solid fa-broom"></i> Purge expired
+                </button>
+                <button class="btn btn-danger" id="trashEmptyBtn" type="button" title="Permanently remove everything in the Trash">
+                    <i class="fa-solid fa-fire"></i> Empty Trash
+                </button>
+                <button class="btn btn-secondary" id="closeTrashModalBtn" type="button">Close</button>
             </div>
         </div>
     </div>
@@ -623,20 +671,54 @@
         <i class="fa-solid fa-circle-notch fa-spin"></i>
     </div>
 
-    <!-- Lightweight scrape job chip (non-modal) -->
-    <div class="scrape-job-chip" id="scrapeJobChip" style="display:none;" role="status" aria-live="polite">
-        <div class="scrape-job-chip-main">
-            <i class="fa-solid fa-arrows-rotate scrape-job-chip-icon" id="scrapeJobChipIcon"></i>
-            <div class="scrape-job-chip-text">
-                <div class="scrape-job-chip-title" id="scrapeJobChipTitle">Sync idle</div>
-                <div class="scrape-job-chip-sub" id="scrapeJobChipSub"></div>
+    <!-- Background job chips (non-modal). Long jobs report progress here rather
+         than through repeating toasts. One chip per job kind; several can run. -->
+    <div class="job-chip-stack" id="jobChipStack">
+        <!-- Instagram scrape / sync queue -->
+        <div class="scrape-job-chip" id="scrapeJobChip" style="display:none;" role="status" aria-live="polite">
+            <div class="scrape-job-chip-main">
+                <i class="fa-solid fa-arrows-rotate scrape-job-chip-icon" id="scrapeJobChipIcon"></i>
+                <div class="scrape-job-chip-text">
+                    <div class="scrape-job-chip-title" id="scrapeJobChipTitle">Sync idle</div>
+                    <div class="scrape-job-chip-sub" id="scrapeJobChipSub"></div>
+                </div>
+            </div>
+            <div class="scrape-job-chip-actions">
+                <button type="button" class="scrape-job-chip-btn" id="scrapeJobChipCancel" title="Cancel running job">Cancel</button>
+                <button type="button" class="scrape-job-chip-btn ghost" id="scrapeJobChipDismiss" title="Hide">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
             </div>
         </div>
-        <div class="scrape-job-chip-actions">
-            <button type="button" class="scrape-job-chip-btn" id="scrapeJobChipCancel" title="Cancel running job">Cancel</button>
-            <button type="button" class="scrape-job-chip-btn ghost" id="scrapeJobChipDismiss" title="Hide">
-                <i class="fa-solid fa-xmark"></i>
-            </button>
+
+        <!-- Batch vision analyze -->
+        <div class="scrape-job-chip" id="batchJobChip" style="display:none;" role="status" aria-live="polite">
+            <div class="scrape-job-chip-main">
+                <i class="fa-solid fa-bolt scrape-job-chip-icon spinning" id="batchJobChipIcon"></i>
+                <div class="scrape-job-chip-text">
+                    <div class="scrape-job-chip-title" id="batchJobChipTitle">Batch analyze</div>
+                    <div class="scrape-job-chip-sub" id="batchJobChipSub"></div>
+                    <div class="job-chip-progress"><div class="job-chip-progress-fill" id="batchJobChipFill"></div></div>
+                </div>
+            </div>
+            <div class="scrape-job-chip-actions">
+                <button type="button" class="scrape-job-chip-btn" id="batchJobChipCancel" title="Stop after the current photo">Cancel</button>
+            </div>
+        </div>
+
+        <!-- Glam classify -->
+        <div class="scrape-job-chip" id="classifyJobChip" style="display:none;" role="status" aria-live="polite">
+            <div class="scrape-job-chip-main">
+                <i class="fa-solid fa-fire scrape-job-chip-icon spinning" id="classifyJobChipIcon"></i>
+                <div class="scrape-job-chip-text">
+                    <div class="scrape-job-chip-title" id="classifyJobChipTitle">Classifying</div>
+                    <div class="scrape-job-chip-sub" id="classifyJobChipSub"></div>
+                    <div class="job-chip-progress"><div class="job-chip-progress-fill" id="classifyJobChipFill"></div></div>
+                </div>
+            </div>
+            <div class="scrape-job-chip-actions">
+                <button type="button" class="scrape-job-chip-btn" id="classifyJobChipCancel" title="Stop after the current item">Cancel</button>
+            </div>
         </div>
     </div>
 

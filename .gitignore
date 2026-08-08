@@ -4,10 +4,13 @@
 .env.*.local
 !.env.example
 
-# ── Instagram / Instaloader sessions (never commit) ──────────────
+# ── Sessions & cookies (never commit — these are credentials) ────
 **/session-*
 *.session
+# Both orders: cookies.txt, cookies-x.txt, x-cookies.txt, reddit_cookies.txt
 cookies*.txt
+*cookies*.txt
+*.cookies
 instaloader/
 
 # ── Personal following / classify dumps (generated locally) ──────

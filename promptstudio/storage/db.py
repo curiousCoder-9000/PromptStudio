@@ -13,11 +13,11 @@ from promptstudio.config import (
     ARCHIVE_DB_FILE,
     EXCLUDED_FOLDERS,
     IMAGE_EXTENSIONS,
-    VIDEO_EXTENSIONS,
     MEDIA_EXTENSIONS,
     PROMPT_PIPELINE_VERSION,
     REBUILD_INDEX,
     SAVED_DIR,
+    VIDEO_EXTENSIONS,
 )
 from promptstudio.storage.thumbs import thumb_url
 
@@ -26,6 +26,12 @@ _FILENAME_TS = re.compile(
     re.IGNORECASE,
 )
 
+# NOTE on the two differently-named platform columns:
+#   photos.source        — which platform the media came from ("instagram", "x",
+#                          "reddit"). Matches the sidecar's "source" key.
+#   deleted_posts.platform — same meaning, but this table already has a `source`
+#                          column meaning *who performed the delete* ("ui"),
+#                          so the platform discriminator needs its own name.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS photos (
   rel_path TEXT PRIMARY KEY,
@@ -39,7 +45,8 @@ CREATE TABLE IF NOT EXISTS photos (
   prompt_search TEXT,
   post_id TEXT,
   shortcode TEXT,
-  glam_score INTEGER NOT NULL DEFAULT -1
+  glam_score INTEGER NOT NULL DEFAULT -1,
+  source TEXT NOT NULL DEFAULT 'instagram'
 );
 CREATE INDEX IF NOT EXISTS idx_photos_creator ON photos(creator);
 CREATE INDEX IF NOT EXISTS idx_photos_taken ON photos(taken_at);
@@ -56,7 +63,8 @@ CREATE TABLE IF NOT EXISTS deleted_posts (
   post_id TEXT,
   rel_path TEXT,
   deleted_at TEXT NOT NULL,
-  source TEXT DEFAULT 'ui'
+  source TEXT DEFAULT 'ui',
+  platform TEXT NOT NULL DEFAULT 'instagram'
 );
 CREATE INDEX IF NOT EXISTS idx_deleted_creator ON deleted_posts(creator);
 """
@@ -66,20 +74,12 @@ _IDENTITY_COLUMNS = (
     ("shortcode", "TEXT"),
     # glam_score: -1 unscored, 0 modest/no-woman, 1 woman, 2 sexy, 3 sexy+figure
     ("glam_score", "INTEGER NOT NULL DEFAULT -1"),
+    # Back-fills every pre-existing row as Instagram, which is what they are.
+    ("source", "TEXT NOT NULL DEFAULT 'instagram'"),
 )
 
-_DELETED_POSTS_SCHEMA = """
-CREATE TABLE IF NOT EXISTS deleted_posts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  creator TEXT NOT NULL,
-  shortcode TEXT,
-  post_id TEXT,
-  rel_path TEXT,
-  deleted_at TEXT NOT NULL,
-  source TEXT DEFAULT 'ui'
-);
-CREATE INDEX IF NOT EXISTS idx_deleted_creator ON deleted_posts(creator);
-"""
+DEFAULT_SOURCE = "instagram"
+
 
 def is_media_file(name: str) -> bool:
     return name.lower().endswith(MEDIA_EXTENSIONS)
@@ -175,19 +175,40 @@ class ArchiveIndex:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_photos_glam ON photos(glam_score)"
         )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photos_source ON photos(source)"
+        )
 
     def _migrate_deleted_posts(self) -> None:
-        """Ensure deleted_posts tombstone table exists on older DBs."""
-        self._conn.executescript(_DELETED_POSTS_SCHEMA)
-        # Partial unique indexes (SQLite) — recreate if missing
+        """Add deleted_posts.platform and scope the unique indexes by it.
+
+        Without `platform` in the key, a Reddit submission id or X tweet id can
+        collide with an Instagram mediaid/shortcode and a post gets silently
+        skipped as "deleted" (or a deleted post comes back). The table is
+        created by _SCHEMA; this only handles pre-existing DBs.
+        """
+        cols = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(deleted_posts)").fetchall()
+        }
+        if "platform" not in cols:
+            self._conn.execute(
+                "ALTER TABLE deleted_posts "
+                f"ADD COLUMN platform TEXT NOT NULL DEFAULT '{DEFAULT_SOURCE}'"
+            )
+        # The old indexes are (creator, shortcode) / (creator, post_id). Adding
+        # platform makes them strictly less restrictive, so any data that
+        # satisfied the old constraint satisfies the new one — safe to recreate.
+        self._conn.execute("DROP INDEX IF EXISTS idx_deleted_shortcode")
+        self._conn.execute("DROP INDEX IF EXISTS idx_deleted_post_id")
         self._conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_deleted_shortcode "
-            "ON deleted_posts(creator, shortcode) "
+            "ON deleted_posts(platform, creator, shortcode) "
             "WHERE shortcode IS NOT NULL AND shortcode != ''"
         )
         self._conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_deleted_post_id "
-            "ON deleted_posts(creator, post_id) "
+            "ON deleted_posts(platform, creator, post_id) "
             "WHERE post_id IS NOT NULL AND post_id != ''"
         )
 
@@ -309,6 +330,7 @@ class ArchiveIndex:
                             post_id or None,
                             shortcode or None,
                             glam,
+                            self._source_from_file(full),
                         )
                     )
 
@@ -318,8 +340,8 @@ class ArchiveIndex:
                 "INSERT INTO photos("
                 "rel_path, creator, filename, taken_at, mtime, "
                 "favorite, has_prompt, prompt_stale, prompt_search, "
-                "post_id, shortcode, glam_score"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "post_id, shortcode, glam_score, source"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
             self._meta_set(
@@ -341,6 +363,7 @@ class ArchiveIndex:
         post_id: Optional[str] = None,
         shortcode: Optional[str] = None,
         glam_score: Optional[int] = None,
+        source: Optional[str] = None,
     ) -> None:
         rel = normalize_rel_path(rel_path)
         creator, _, filename = rel.partition("/")
@@ -369,7 +392,7 @@ class ArchiveIndex:
         with self._lock:
             existing = self._conn.execute(
                 "SELECT favorite, has_prompt, prompt_stale, prompt_search, "
-                "post_id, shortcode, glam_score FROM photos WHERE rel_path = ?",
+                "post_id, shortcode, glam_score, source FROM photos WHERE rel_path = ?",
                 (rel,),
             ).fetchone()
             fav = favorite if favorite is not None else (int(existing["favorite"]) if existing else 0)
@@ -381,16 +404,25 @@ class ArchiveIndex:
             if shortcode is None and existing:
                 shortcode = existing["shortcode"]
             if glam_score is None:
-                if existing and "glam_score" in existing.keys() and existing["glam_score"] is not None:
+                # `.keys()` is required: sqlite3.Row iterates VALUES, so
+                # `"glam_score" in existing` would test the row's values and
+                # silently drop the existing score. Do not "simplify" this.
+                if existing and "glam_score" in existing.keys() and existing["glam_score"] is not None:  # noqa: SIM118
                     glam_score = int(existing["glam_score"])
                 else:
                     glam_score = -1
+            # Keep the row's existing platform unless told otherwise; only fall
+            # back to the sidecar (then instagram) for rows we've never seen.
+            if source is None and existing and "source" in existing.keys():  # noqa: SIM118
+                source = existing["source"]
+            if not source:
+                source = self._source_from_file(full)
             self._conn.execute(
                 "INSERT INTO photos("
                 "rel_path, creator, filename, taken_at, mtime, "
                 "favorite, has_prompt, prompt_stale, prompt_search, "
-                "post_id, shortcode, glam_score"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "post_id, shortcode, glam_score, source"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(rel_path) DO UPDATE SET "
                 "creator=excluded.creator, filename=excluded.filename, "
                 "taken_at=excluded.taken_at, mtime=excluded.mtime, "
@@ -398,7 +430,7 @@ class ArchiveIndex:
                 "prompt_stale=excluded.prompt_stale, prompt_search=excluded.prompt_search, "
                 "post_id=COALESCE(excluded.post_id, photos.post_id), "
                 "shortcode=COALESCE(excluded.shortcode, photos.shortcode), "
-                "glam_score=excluded.glam_score",
+                "glam_score=excluded.glam_score, source=excluded.source",
                 (
                     rel,
                     creator,
@@ -412,6 +444,7 @@ class ArchiveIndex:
                     post_id or None,
                     shortcode or None,
                     int(glam_score),
+                    self._norm_platform(source),
                 ),
             )
             self._conn.commit()
@@ -460,6 +493,17 @@ class ArchiveIndex:
             self._conn.execute("DELETE FROM photos WHERE rel_path = ?", (rel,))
             self._conn.commit()
 
+    def get_photo_source(self, rel_path: str) -> str:
+        """Return the indexed platform for a rel_path (instagram if unknown)."""
+        rel = normalize_rel_path(rel_path)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT source FROM photos WHERE rel_path = ?", (rel,)
+            ).fetchone()
+        if not row:
+            return DEFAULT_SOURCE
+        return str(row["source"] or "").strip().lower() or DEFAULT_SOURCE
+
     def get_photo_identity(self, rel_path: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         """Return (creator, post_id, shortcode) from index for a rel_path."""
         rel = normalize_rel_path(rel_path)
@@ -480,6 +524,21 @@ class ArchiveIndex:
     def _norm_creator(creator: str) -> str:
         return (creator or "").lstrip("@").strip().lower()
 
+    @staticmethod
+    def _norm_platform(platform: Optional[str]) -> str:
+        return (platform or DEFAULT_SOURCE).strip().lower() or DEFAULT_SOURCE
+
+    @staticmethod
+    def _source_from_file(full_path: str) -> str:
+        """Return the sidecar's `source`, defaulting to instagram for legacy files."""
+        try:
+            from promptstudio.storage.metadata import load_post_metadata
+
+            meta = load_post_metadata(full_path) or {}
+            return str(meta.get("source") or "").strip().lower() or DEFAULT_SOURCE
+        except Exception:
+            return DEFAULT_SOURCE
+
     def record_deleted_post(
         self,
         creator: str,
@@ -488,14 +547,17 @@ class ArchiveIndex:
         post_id: Optional[str] = None,
         rel_path: Optional[str] = None,
         source: str = "ui",
+        platform: str = DEFAULT_SOURCE,
     ) -> bool:
-        """Tombstone an Instagram post so sync never re-downloads it.
+        """Tombstone a post so sync never re-downloads it.
 
+        `source` is who deleted it ("ui"); `platform` is which site it came from.
         Returns True if a row was written/updated.
         """
         from datetime import datetime, timezone
 
         creator_key = self._norm_creator(creator)
+        plat = self._norm_platform(platform)
         sc = (shortcode or "").strip() or None
         pid = str(post_id or "").strip() or None
         if not creator_key or (not sc and not pid):
@@ -507,13 +569,15 @@ class ArchiveIndex:
             existing = None
             if sc:
                 existing = self._conn.execute(
-                    "SELECT id FROM deleted_posts WHERE creator = ? AND shortcode = ?",
-                    (creator_key, sc),
+                    "SELECT id FROM deleted_posts "
+                    "WHERE platform = ? AND creator = ? AND shortcode = ?",
+                    (plat, creator_key, sc),
                 ).fetchone()
             if not existing and pid:
                 existing = self._conn.execute(
-                    "SELECT id FROM deleted_posts WHERE creator = ? AND post_id = ?",
-                    (creator_key, pid),
+                    "SELECT id FROM deleted_posts "
+                    "WHERE platform = ? AND creator = ? AND post_id = ?",
+                    (plat, creator_key, pid),
                 ).fetchone()
             if existing:
                 self._conn.execute(
@@ -524,9 +588,10 @@ class ArchiveIndex:
                 )
             else:
                 self._conn.execute(
-                    "INSERT INTO deleted_posts(creator, shortcode, post_id, rel_path, deleted_at, source) "
-                    "VALUES(?, ?, ?, ?, ?, ?)",
-                    (creator_key, sc, pid, rel, now, source or "ui"),
+                    "INSERT INTO deleted_posts("
+                    "creator, shortcode, post_id, rel_path, deleted_at, source, platform"
+                    ") VALUES(?, ?, ?, ?, ?, ?, ?)",
+                    (creator_key, sc, pid, rel, now, source or "ui", plat),
                 )
             self._conn.commit()
         return True
@@ -537,15 +602,17 @@ class ArchiveIndex:
         *,
         shortcode: Optional[str] = None,
         post_id: Optional[str] = None,
+        platform: str = DEFAULT_SOURCE,
     ) -> bool:
-        """True if this Instagram identity was intentionally deleted for creator."""
+        """True if this identity was intentionally deleted for creator on platform."""
         creator_key = self._norm_creator(creator)
+        plat = self._norm_platform(platform)
         sc = (shortcode or "").strip()
         pid = str(post_id or "").strip()
         if not creator_key or (not sc and not pid):
             return False
         clauses: List[str] = []
-        params: List[Any] = [creator_key]
+        params: List[Any] = [plat, creator_key]
         if sc:
             clauses.append("shortcode = ?")
             params.append(sc)
@@ -555,7 +622,8 @@ class ArchiveIndex:
         where_id = " OR ".join(clauses)
         with self._lock:
             row = self._conn.execute(
-                f"SELECT 1 FROM deleted_posts WHERE creator = ? AND ({where_id}) LIMIT 1",
+                "SELECT 1 FROM deleted_posts "
+                f"WHERE platform = ? AND creator = ? AND ({where_id}) LIMIT 1",
                 params,
             ).fetchone()
         return row is not None
@@ -566,15 +634,17 @@ class ArchiveIndex:
         *,
         shortcode: Optional[str] = None,
         post_id: Optional[str] = None,
+        platform: str = DEFAULT_SOURCE,
     ) -> int:
         """Remove tombstone(s). Returns number of rows deleted."""
         creator_key = self._norm_creator(creator)
+        plat = self._norm_platform(platform)
         sc = (shortcode or "").strip()
         pid = str(post_id or "").strip()
         if not creator_key or (not sc and not pid):
             return 0
         clauses: List[str] = []
-        params: List[Any] = [creator_key]
+        params: List[Any] = [plat, creator_key]
         if sc:
             clauses.append("shortcode = ?")
             params.append(sc)
@@ -584,7 +654,8 @@ class ArchiveIndex:
         where_id = " OR ".join(clauses)
         with self._lock:
             cur = self._conn.execute(
-                f"DELETE FROM deleted_posts WHERE creator = ? AND ({where_id})",
+                "DELETE FROM deleted_posts "
+                f"WHERE platform = ? AND creator = ? AND ({where_id})",
                 params,
             )
             self._conn.commit()
@@ -595,8 +666,14 @@ class ArchiveIndex:
         *,
         shortcode: Optional[str] = None,
         post_id: Optional[str] = None,
+        source: Optional[str] = DEFAULT_SOURCE,
     ) -> List[str]:
-        """Return on-disk rel_paths for an Instagram post identity."""
+        """Return on-disk rel_paths for a post identity.
+
+        Scoped by `source` because ids are only unique *within* a platform — an
+        unscoped lookup lets an X tweet id match an Instagram mediaid and
+        miscount a carousel as already complete. Pass source=None to search all.
+        """
         clauses: List[str] = []
         params: List[Any] = []
         if shortcode:
@@ -608,6 +685,9 @@ class ArchiveIndex:
         if not clauses:
             return []
         where = " OR ".join(clauses)
+        if source is not None:
+            where = f"({where}) AND source = ?"
+            params.append(self._norm_platform(source))
         with self._lock:
             rows = self._conn.execute(
                 f"SELECT rel_path FROM photos WHERE {where}", params
@@ -763,14 +843,24 @@ class ArchiveIndex:
         return creators
 
     def stats(self) -> Dict[str, int]:
+        """Gallery counters for /api/stats — all indexed, no filesystem walk.
+
+        `prompts_ready` reads the `has_prompt` column (idx_photos_prompt), which
+        PromptCache maintains write-through via update_prompt_flags. The old
+        count_prompts_ready() iterated every photo in the archive and loaded the
+        whole prompt cache on each call, and /api/stats is on the init path.
+        """
         with self._lock:
-            photos = self._conn.execute("SELECT COUNT(*) AS c FROM photos").fetchone()
-            creators = self._conn.execute(
-                "SELECT COUNT(DISTINCT creator) AS c FROM photos"
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS photos, "
+                "COUNT(DISTINCT creator) AS creators, "
+                "SUM(CASE WHEN has_prompt = 1 THEN 1 ELSE 0 END) AS prompts_ready "
+                "FROM photos"
             ).fetchone()
         return {
-            "total_photos": int(photos["c"]),
-            "total_creators": int(creators["c"]),
+            "total_photos": int(row["photos"] or 0),
+            "total_creators": int(row["creators"] or 0),
+            "prompts_ready": int(row["prompts_ready"] or 0),
         }
 
     def query_photos(

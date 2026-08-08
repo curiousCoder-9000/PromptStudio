@@ -12,7 +12,9 @@ Analyzes images under a local archive folder with **Ollama** multimodal vision, 
 - Glassmorphic gallery: search, favorites, sort, media type, infinite scroll, thumbs
 - Lightbox: edit prompts, history restore, Mode E, optional ComfyUI generate
 - Instagram sync: saved posts, creator feed, following bulk (anti-ban pacing + resume)
-- Safe delete, upload, creator folders, batch analyze, reel metadata panel
+- X / Twitter and Reddit scraping via gallery-dl, into the same archive and gallery
+- Safe delete: soft delete to `_trash/` with one-click **Undo** + Trash restore/purge
+- Upload, creator folders, batch analyze, reel metadata panel
 
 ## Quickstart
 
@@ -63,7 +65,12 @@ Set `INSTAGRAM_SESSION_USER` and (if needed) `INSTALOADER_SESSION_DIR` in `.env`
 | `OLLAMA_VISION_MODEL` | Vision model | `qwen2.5vl:7b` |
 | `PROMPT_INTENSITY` | Prompt tone: `low` / `balanced` / `high` | `balanced` |
 | `IG_CAPTION_KEYWORDS` | Caption rank keywords | fashion/model set |
+| `PROMPTSTUDIO_TRASH` | Soft delete to `_trash/` (`0` = unlink now) | `1` |
+| `PROMPTSTUDIO_TRASH_DAYS` | Trash retention for "Purge expired" | `30` |
 | `COMFYUI_URL` | Optional ComfyUI | `http://127.0.0.1:8188` |
+| `X_COOKIES_FILE` | cookies.txt for X scraping | _(empty — required for X)_ |
+| `REDDIT_COOKIES_FILE` | cookies.txt for Reddit (optional) | _(empty)_ |
+| `SCRAPE_FOLDER_SUFFIX` | Suffix non-IG folders (`nina__x`) | `1` |
 
 Full list: **[`.env.example`](.env.example)**
 
@@ -75,6 +82,7 @@ Do **not** commit:
 
 - `.env` — credentials and personal paths
 - Instaloader `session-*` files
+- **Any `cookies.txt`** used for X / Reddit — these are session credentials
 - `following_list.json` and classify reports
 - Your media archive (`PROMPTSTUDIO_ARCHIVE`)
 - Generated docs dumps (`docs/following_list.md`, etc.)
@@ -88,6 +96,22 @@ py scripts/classify_following.py
 
 Use `following_list.example.json` as a shape reference.
 
+## Development
+
+```powershell
+pip install -r requirements.txt -r requirements-dev.txt
+pytest                    # unit tests (fast, no server needed)
+ruff check .              # lint
+./tests/ui/run.sh         # browser suites (needs Node 22+ and Chrome)
+```
+
+`pytest` runs against a throwaway archive in a temp directory — it never touches
+`PROMPTSTUDIO_ARCHIVE`. The browser suites boot their own server on `:5099` and
+tear it down afterwards; see [tests/ui/README.md](tests/ui/README.md).
+
+CI runs lint + tests on Python 3.10 and 3.13, plus the UI suites
+([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+
 ## Docs
 
 | Doc | Purpose |
@@ -96,6 +120,7 @@ Use `following_list.example.json` as a shape reference.
 | [docs/api.md](docs/api.md) | HTTP contracts |
 | [docs/architecture.md](docs/architecture.md) | Components & flows |
 | [docs/instagram_downloader.md](docs/instagram_downloader.md) | Sync & anti-ban |
+| [docs/multi_source_scraping.md](docs/multi_source_scraping.md) | X / Reddit scraping via gallery-dl |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Setup & failures |
 | [docs/roadmap.md](docs/roadmap.md) | Phases done / optional next |
 | [AGENTS.md](AGENTS.md) | Hard rules for AI agents |

@@ -42,7 +42,6 @@ __all__ = [
 
 if __name__ == "__main__":
     import glob
-    import json
     import os
     import sys
 

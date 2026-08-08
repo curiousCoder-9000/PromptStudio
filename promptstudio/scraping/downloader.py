@@ -5,8 +5,7 @@ import json
 import os
 import random
 import time
-from dataclasses import dataclass, field, asdict
-from typing import Callable, List, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 import instaloader
 
@@ -43,9 +42,9 @@ from promptstudio.scraping.filters import (
 )
 from promptstudio.scraping.organizer import deduplicate_archive, organize_root_images
 from promptstudio.scraping.queue import FollowingQueue
+from promptstudio.scraping.results import SyncResult
 from promptstudio.scraping.session import authenticated_profile, create_instaloader, load_session
 from promptstudio.storage.metadata import build_metadata_from_post, save_post_metadata
-
 
 LogFn = Optional[Callable[[str], None]]
 
@@ -57,24 +56,8 @@ ABUSE_SIGNAL_PHRASES = (
     "checkpoint_required",
 )
 
-
-@dataclass
-class SyncResult:
-    job_type: str
-    downloaded: int = 0
-    skipped: int = 0
-    skipped_deleted: int = 0
-    errors: int = 0
-    rate_limit_hits: int = 0
-    aborted: bool = False
-    abort_reason: str = ""
-    accounts_processed: int = 0
-    queue_summary: Optional[dict] = None
-    messages: List[str] = field(default_factory=list)
-    stop_reason: str = ""
-
-    def to_dict(self) -> dict:
-        return asdict(self)
+# Re-exported: `from promptstudio.scraping.downloader import SyncResult` still works.
+__all__ = ["ABUSE_SIGNAL_PHRASES", "InstagramDownloader", "SyncResult"]
 
 
 class InstagramDownloader:
@@ -627,7 +610,7 @@ class InstagramDownloader:
             + (f" ({result.skipped_deleted} deleted)" if result.skipped_deleted else "")
             + f", {result.errors} errors"
             + (f" [{result.stop_reason}]" if result.stop_reason else "")
-            + (f" [ABORTED]" if result.aborted else "")
+            + (" [ABORTED]" if result.aborted else "")
         )
         return result
 
@@ -758,7 +741,7 @@ class InstagramDownloader:
             + (f" ({result.skipped_deleted} deleted)" if result.skipped_deleted else "")
             + f", {result.errors} errors"
             + (f" [{result.stop_reason}]" if result.stop_reason else "")
-            + (f" [ABORTED]" if result.aborted else "")
+            + (" [ABORTED]" if result.aborted else "")
         )
         return result
 

@@ -38,7 +38,6 @@ from promptstudio.config import (
 )
 from promptstudio.scraping.downloader import InstagramDownloader
 
-
 # Folders that are system/utility, not creator folders
 SKIP_FOLDERS = EXCLUDED_FOLDERS
 
@@ -56,7 +55,7 @@ def get_local_creator_folders(base_dir: str) -> list[str]:
         full = os.path.join(base_dir, name)
         if not os.path.isdir(full):
             continue
-        if name.startswith(".") or name.startswith("_"):
+        if name.startswith((".", "_")):
             continue
         if name.lower() in {s.lower() for s in SKIP_FOLDERS}:
             continue

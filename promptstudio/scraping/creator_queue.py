@@ -17,6 +17,7 @@ from promptstudio.config import (
     CREATOR_SCRAPE_MAX_PENDING,
     CREATOR_SCRAPE_QUEUE_FILE,
 )
+from promptstudio.storage.db import DEFAULT_SOURCE
 
 
 def _utc_now() -> str:
@@ -25,6 +26,23 @@ def _utc_now() -> str:
 
 def normalize_username(username: str) -> str:
     return (username or "").lstrip("@").strip().lower()
+
+
+def normalize_source(source: str) -> str:
+    return (source or DEFAULT_SOURCE).strip().lower() or DEFAULT_SOURCE
+
+
+def job_key(job: Dict[str, Any]) -> tuple:
+    """Queue identity of a job.
+
+    Keyed on (source, username) rather than username alone: the same handle can
+    legitimately be queued for Instagram and X at once, and they are different
+    accounts landing in different folders.
+    """
+    return (
+        normalize_source(job.get("source") or DEFAULT_SOURCE),
+        normalize_username(job.get("username") or ""),
+    )
 
 
 def _new_job_id() -> str:
@@ -91,6 +109,12 @@ class CreatorScrapeQueue:
                 base["history"] = []
             if not isinstance(base["stats"], dict):
                 base["stats"] = self._default()["stats"]
+            # Queue files written before multi-source support have no `source`.
+            # Every job in them is Instagram — make that explicit on load.
+            for bucket in ("jobs", "history"):
+                for job in base.get(bucket) or []:
+                    if isinstance(job, dict) and not job.get("source"):
+                        job["source"] = DEFAULT_SOURCE
             return base
         except Exception:
             return self._default()
@@ -176,15 +200,19 @@ class CreatorScrapeQueue:
                     return copy.deepcopy(j)
             return None
 
-    def find_active_by_username(self, username: str) -> Optional[Dict[str, Any]]:
-        key = normalize_username(username)
+    def find_active_by_username(
+        self,
+        username: str,
+        source: str = DEFAULT_SOURCE,
+    ) -> Optional[Dict[str, Any]]:
+        key = (normalize_source(source), normalize_username(username))
         with self._lock:
             for j in self._data.get("jobs") or []:
                 if not isinstance(j, dict):
                     continue
                 if j.get("status") not in ("pending", "running"):
                     continue
-                if normalize_username(j.get("username") or "") == key:
+                if job_key(j) == key:
                     return copy.deepcopy(j)
             return None
 
@@ -200,6 +228,7 @@ class CreatorScrapeQueue:
         folder_name: str = "",
         folder_created: bool = False,
         catch_up_only: bool = False,
+        source: str = DEFAULT_SOURCE,
     ) -> Dict[str, Any]:
         """
         Enqueue a job. Returns:
@@ -214,6 +243,8 @@ class CreatorScrapeQueue:
         key = normalize_username(username)
         if not key:
             raise ValueError("username required")
+        src = normalize_source(source)
+        ident = (src, key)
         mode = (mode or "full").strip().lower()
         if mode not in ("full", "bounded", "latest"):
             raise ValueError("mode must be full, bounded, or latest")
@@ -234,7 +265,7 @@ class CreatorScrapeQueue:
                     continue
                 if j.get("status") not in ("pending", "running"):
                     continue
-                if normalize_username(j.get("username") or "") == key:
+                if job_key(j) == ident:
                     existing = j
                     break
             if existing:
@@ -269,6 +300,7 @@ class CreatorScrapeQueue:
             job = {
                 "id": _new_job_id(),
                 "username": key,
+                "source": src,
                 "mode": mode,
                 "deep": job_deep,
                 "max_posts": max_posts,
@@ -489,6 +521,7 @@ class CreatorScrapeQueue:
             "paused": bool(snap.get("paused")),
             "pause_reason": snap.get("pause_reason") or "",
             "current_username": running.get("username"),
+            "current_source": running.get("source") or (DEFAULT_SOURCE if running else None),
             "current_job_id": running.get("id"),
             "enabled": True,
         }

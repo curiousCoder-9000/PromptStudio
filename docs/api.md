@@ -22,11 +22,15 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/prompt/mode-e` | Mode E rewrite (outfit/scene; optional `apply`) |
 | `PUT` | `/api/favorite` | Toggle or set favorite flag |
 | `POST` | `/api/prompt/batch` | Background batch analyze (`creator`, `force`, `limit`, `paths`) |
-| `GET` | `/api/prompt/batch/status` | Batch job progress |
+| `GET` | `/api/prompt/batch/status` | Batch job progress (cheap — snapshot, no archive scan) |
+| `POST` | `/api/prompt/batch/cancel` | Cooperative cancel after the current photo |
 | `POST` | `/api/classify/start` | Background glam classify for one creator (`creator`, `only_unscored`, `force`, `include_videos`, `limit`) |
 | `GET` | `/api/classify/status` | Classify job progress (`kept` / `rejected` / `failed`) |
 | `POST` | `/api/classify/cancel` | Cooperative cancel after current item |
-| `DELETE` | `/api/photo` | Delete photo + cache + meta + fav |
+| `DELETE` | `/api/photo` | Soft delete → `_trash/` (`permanent=1` to unlink) |
+| `GET` | `/api/trash` | List trashed entries (`limit`, `offset`) + size/retention |
+| `POST` | `/api/trash/restore` | Restore by `id` or `ids` |
+| `POST` | `/api/trash/purge` | Permanent remove: `id` / `ids` / `all` / `expired` (+`days`) |
 | `POST` | `/api/creator/create` | Create creator folder |
 | `POST` | `/api/photo/upload` | Multipart upload |
 | `POST` | `/api/sync/saved` | Sync Instagram saved posts |
@@ -34,7 +38,8 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/sync/following` | Bulk sync from following list |
 | `POST` | `/api/sync/cancel` | Cooperative cancel of running IG job |
 | `GET` | `/api/sync/status` | Sync job progress / abort / `creator_queue` summary |
-| `POST` | `/api/scrape/enqueue` | Enqueue serial full/bounded creator scrape |
+| `POST` | `/api/scrape/enqueue` | Enqueue serial full/bounded scrape (Instagram / X / Reddit) |
+| `GET` | `/api/sources` | Available scrape sources |
 | `GET` | `/api/scrape/status` | Creator scrape queue + embedded sync status |
 | `POST` | `/api/scrape/cancel` | Cancel pending job or all pending (`scope`) |
 | `POST` | `/api/scrape/pause` | Pause queue drain |
@@ -52,8 +57,29 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 ### `GET /api/stats`
 
 ```json
-{ "total_photos": 1134, "total_creators": 147, "prompts_ready": 420 }
+{ "total_photos": 1134, "total_creators": 147, "prompts_ready": 420,
+  "trash_enabled": true, "trash_count": 3 }
 ```
+
+All three counters are single indexed SQL aggregates. `prompts_ready` reads the
+`has_prompt` column (maintained write-through by `PromptCache`) rather than
+walking the archive and loading the prompt cache, which is what it used to do on
+every call — and `/api/stats` runs on every app init.
+
+### `GET /api/prompt/batch/status`
+
+```json
+{ "running": true, "total": 540, "completed": 128, "failed": 3,
+  "current": "creator/IMG_9.jpg", "pending": 409,
+  "cancelled": false, "cancel_requested": false,
+  "started_at": "…", "finished_at": null, "error": null }
+```
+
+`pending` is a snapshot taken at job start and decremented as work completes —
+never recomputed per request. `cancel_requested` flips as soon as
+`POST /api/prompt/batch/cancel` lands; `cancelled` is set once the runner
+actually stops, which happens after the in-flight photo finishes (the Ollama
+call isn't interruptible, and a partial write would poison the prompt cache).
 
 `GET /api/creators` includes `last_synced_at` and `synced_count` from `sync_state.json` when available.
 
@@ -273,11 +299,13 @@ or `{ "status": "idle" }` when nothing is running.
 
 ### `POST /api/scrape/enqueue`
 
-Serial creator scrape queue (never parallel with other IG jobs). Creates folder + enqueues.
+Serial creator scrape queue (never parallel with any other scrape job). Creates
+folder + enqueues.
 
 ```json
 {
   "username": "roxeuoon",
+  "source": "instagram",
   "mode": "full",
   "deep": true,
   "max_posts": null,
@@ -286,7 +314,41 @@ Serial creator scrape queue (never parallel with other IG jobs). Creates folder 
 }
 ```
 
-Defaults: `mode=full`, `deep=true`. Status: `started` | `queued` | `already_pending` | `already_running`.
+Defaults: `source=instagram`, `mode=full`, `deep=true`. Status: `started` |
+`queued` | `already_pending` | `already_running`.
+
+`source` accepts `instagram` (default), `x` (aliases: `twitter`), `reddit`.
+Omitting it preserves the pre-multi-source behaviour exactly.
+
+`username` is interpreted per source, and the response echoes what was resolved:
+
+| Source | Accepted input | Fetches | Archive folder |
+|--------|----------------|---------|----------------|
+| `instagram` | `handle`, `@handle` | profile feed | `handle` |
+| `x` | `handle`, `@handle`, `x.com/handle` | `/media` timeline | `handle__x` |
+| `reddit` | `r/sub`, `sub`, `u/user`, full URL | subreddit or user submissions | `r_sub__reddit` / `u_user__reddit` |
+
+Response adds `source`, `target_url`, `folder`, `folder_created`.
+
+Queue identity is `(source, username)`, so the same handle can be queued for
+Instagram and X simultaneously without one being rejected as a duplicate.
+
+Errors: `400` for an unknown source or a handle that is invalid for its platform.
+
+### `GET /api/sources`
+
+Available scrape sources, for populating a picker.
+
+```json
+{
+  "sources": [
+    { "name": "instagram", "label": "Instagram" },
+    { "name": "x", "label": "X / Twitter" },
+    { "name": "reddit", "label": "Reddit" }
+  ],
+  "default": "instagram"
+}
+```
 
 `mode` values:
 
@@ -296,7 +358,51 @@ Defaults: `mode=full`, `deep=true`. Status: `started` | `queued` | `already_pend
 | `latest` | Catch-up only for existing folders; never glam-rank; respects tombstones |
 | `bounded` | Glam rank + top-N (following bulk style) |
 
-**Deletes:** `DELETE /api/photo` records a tombstone (`deleted_posts` in `archive.db`) so future sync never re-downloads that shortcode/post_id.
+**Deletes:** `DELETE /api/photo` records a tombstone (`deleted_posts` in `archive.db`) so future sync never re-downloads that shortcode/post_id. Restoring from the Trash clears that tombstone again.
+
+---
+
+## Trash (soft delete)
+
+`DELETE /api/photo?path=<rel>` moves media to `_trash/<entry_id>/` unless `PROMPTSTUDIO_TRASH=0` or `permanent=1` is passed.
+
+```json
+{ "status": "trashed", "filename": "IMG_1.jpg",
+  "rel_path": "creator/IMG_1.jpg", "trash_id": "20260808T191204Z-a1b2c3" }
+```
+
+`status` is `"deleted"` and `trash_id` is `null` for a permanent delete. The UI uses `trash_id` to offer **Undo**.
+
+Each entry directory holds the media file, its `.meta.json` sidecar, and an `entry.json` manifest capturing `favorite`, `prompt_bundle`, `post_id`/`shortcode`, `tombstoned`, and `taken_at` — so `POST /api/trash/restore` puts back the file, sidecar, prompt bundle, favorite flag, and index row, and clears the tombstone.
+
+### `GET /api/trash`
+
+```json
+{ "entries": [ { "id": "20260808T191204Z-a1b2c3", "rel_path": "creator/IMG_1.jpg",
+                 "creator": "creator", "filename": "IMG_1.jpg",
+                 "deleted_at": "2026-08-08T19:12:04+00:00", "file_size": 244118,
+                 "favorite": false, "prompt_bundle": null, "tombstoned": true,
+                 "media_present": true } ],
+  "total": 1, "offset": 0, "limit": 100,
+  "count": 1, "bytes": 244118, "retention_days": 30 }
+```
+
+### `POST /api/trash/restore`
+
+Body: `{"id": "<entry_id>"}` or `{"ids": ["<id>", …]}`.
+
+```json
+{ "status": "ok", "restored": 1, "failed": 0,
+  "results": [ { "status": "restored", "id": "…", "rel_path": "creator/IMG_1.jpg" } ] }
+```
+
+Per-entry `status`: `restored` · `not_found` · `conflict` (a file already occupies the target path — the trash entry is kept, never overwritten) · `error`.
+
+### `POST /api/trash/purge`
+
+Body: `{"id"}` / `{"ids"}` / `{"all": true}` / `{"expired": true, "days": 30}`. Returns `{"status": "ok", "purged": N}`. Purging is irreversible.
+
+`GET /api/stats` also reports `trash_enabled` and `trash_count`.
 
 ### `GET /api/scrape/status`
 

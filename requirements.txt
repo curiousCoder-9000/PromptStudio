@@ -2,3 +2,6 @@ instaloader>=4.12
 opencv-python-headless>=4.8
 Pillow>=10.0
 python-dotenv>=1.0
+# X / Reddit scraping. Invoked as a subprocess, not imported — gallery-dl has no
+# supported Python API. Active development is on Codeberg; PyPI still publishes.
+gallery-dl>=1.32

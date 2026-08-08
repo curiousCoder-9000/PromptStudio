@@ -21,10 +21,12 @@ from promptstudio.config import (
     PORT,
     PROMPT_PIPELINE_VERSION,
     SAVED_DIR,
+    TRASH_ENABLED,
 )
-from promptstudio.prompts.batch import BatchPromptManager, count_prompts_ready
+from promptstudio.prompts.batch import BatchPromptManager
 from promptstudio.prompts.cache import PromptCache
 from promptstudio.prompts.engine import ENGINE_ID, build_export_variants, get_prompt_for_image
+from promptstudio.prompts.styles import CreatorStyleStore
 from promptstudio.scraping.classify_job import ClassifyJobManager
 from promptstudio.scraping.creator_queue import CreatorScrapeQueue
 from promptstudio.scraping.downloader import InstagramDownloader
@@ -32,8 +34,7 @@ from promptstudio.scraping.sync_manager import SyncManager
 from promptstudio.server.multipart import parse_multipart_data
 from promptstudio.storage.archive import ArchiveStore, ensure_creator_folder
 from promptstudio.storage.favorites import FavoritesStore
-from promptstudio.storage.metadata import delete_metadata_for_image
-from promptstudio.prompts.styles import CreatorStyleStore
+from promptstudio.storage.trash import TrashStore
 
 _archive = ArchiveStore()
 _prompt_cache = PromptCache()
@@ -42,6 +43,7 @@ _sync = SyncManager.get()
 _batch = BatchPromptManager.get()
 _classify = ClassifyJobManager.get()
 _styles = CreatorStyleStore()
+_trash = TrashStore()
 _comfy = ComfyJobManager.get()
 _scrape_queue = CreatorScrapeQueue.get() if CREATOR_SCRAPE_QUEUE_ENABLED else None
 
@@ -277,18 +279,32 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
     def do_DELETE(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/photo":
-            rel_path = urllib.parse.parse_qs(parsed.query).get("path", [None])[0]
+            query = urllib.parse.parse_qs(parsed.query)
+            rel_path = query.get("path", [None])[0]
+            permanent = (query.get("permanent", ["0"])[0] or "").lower() in (
+                "1",
+                "true",
+                "yes",
+            )
             if rel_path:
                 rel_path = urllib.parse.unquote(rel_path)
                 full_path = _archive.resolve_path(rel_path)
                 if full_path:
                     try:
-                        filename = _archive.delete_photo(rel_path)
-                        _prompt_cache.delete(rel_path, filename)
-                        # Tombstone recorded in ArchiveStore.delete_photo → never re-download
-                        delete_metadata_for_image(full_path)
-                        _favorites.set_favorite(rel_path, False)
-                        self._send_json({"status": "deleted", "filename": filename})
+                        # delete_photo owns cache/favorite/tombstone bookkeeping so
+                        # restorable state is captured before it is cleared.
+                        result = _archive.delete_photo(rel_path, permanent=permanent)
+                        if not result:
+                            self.send_error(404, "Photo not found")
+                            return
+                        self._send_json(
+                            {
+                                "status": "deleted" if result["permanent"] else "trashed",
+                                "filename": result["filename"],
+                                "rel_path": result["rel_path"],
+                                "trash_id": result["trash_id"],
+                            }
+                        )
                         return
                     except OSError as e:
                         self.send_error(500, f"Error deleting file: {e}")
@@ -395,6 +411,61 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
+        if path == "/api/trash/restore":
+            try:
+                data = self._read_json_body()
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON body")
+                return
+            ids = data.get("ids")
+            if not isinstance(ids, list):
+                ids = [data.get("id")] if data.get("id") else []
+            ids = [str(i).strip() for i in ids if str(i or "").strip()]
+            if not ids:
+                self.send_error(400, "id or ids required")
+                return
+            results = [_trash.restore(entry_id) for entry_id in ids]
+            restored = [r for r in results if r.get("status") == "restored"]
+            self._send_json(
+                {
+                    "status": "ok",
+                    "restored": len(restored),
+                    "failed": len(results) - len(restored),
+                    "results": results,
+                }
+            )
+            return
+
+        if path == "/api/trash/purge":
+            try:
+                data = self._read_json_body()
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON body")
+                return
+            if data.get("all"):
+                self._send_json({"status": "ok", "purged": _trash.empty()})
+                return
+            if data.get("expired"):
+                days = data.get("days")
+                try:
+                    days = int(days) if days is not None else None
+                except (TypeError, ValueError):
+                    days = None
+                self._send_json({"status": "ok", "purged": _trash.purge_expired(days)})
+                return
+            ids = data.get("ids")
+            if not isinstance(ids, list):
+                ids = [data.get("id")] if data.get("id") else []
+            ids = [str(i).strip() for i in ids if str(i or "").strip()]
+            if not ids:
+                self.send_error(400, "id, ids, all, or expired required")
+                return
+            purged = sum(1 for entry_id in ids if _trash.purge(entry_id))
+            self._send_json(
+                {"status": "ok", "purged": purged, "failed": len(ids) - purged}
+            )
+            return
+
         if path == "/api/creator/create":
             try:
                 data = self._read_json_body()
@@ -441,6 +512,8 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 if not username:
                     self.send_error(400, "username required")
                     return
+                # Defaults to instagram so existing clients are unaffected.
+                source_name = (data.get("source") or "instagram").strip().lower()
                 mode = (data.get("mode") or "full").strip().lower()
                 if mode not in ("full", "bounded", "latest"):
                     self.send_error(400, "mode must be full, bounded, or latest")
@@ -478,7 +551,13 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 else:
                     include_videos = INCLUDE_VIDEOS_DEFAULT
                 priority = int(data.get("priority") or 0)
-                folder = ensure_creator_folder(username)
+                # Resolving the target here (rather than in the queue) validates
+                # the handle for its platform and yields the real archive folder,
+                # which for non-Instagram sources is suffixed (e.g. nina__x).
+                from promptstudio.scraping.sources import get_source
+
+                target = get_source(source_name).parse_target(username)
+                folder = ensure_creator_folder(target.folder)
                 q = CreatorScrapeQueue.get()
                 out = q.enqueue(
                     username,
@@ -490,6 +569,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     folder_name=folder["name"],
                     folder_created=folder["created"],
                     catch_up_only=catch_up_only,
+                    source=target.source,
                 )
                 started = False
                 if out["status"] == "queued":
@@ -499,6 +579,8 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json(
                     {
                         **out,
+                        "source": target.source,
+                        "target_url": target.url,
                         "folder": folder["name"],
                         "folder_created": folder["created"],
                     }
@@ -820,6 +902,13 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     self._send_json({"status": "busy"}, 409)
             except (ValueError, json.JSONDecodeError):
                 self.send_error(400, "Invalid JSON body")
+            return
+
+        if path == "/api/prompt/batch/cancel":
+            if _batch.cancel():
+                self._send_json({"status": "cancelling"})
+            else:
+                self._send_json({"status": "idle", "message": "No batch job running"})
             return
 
         if path == "/api/classify/start":
@@ -1272,6 +1361,28 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(_archive.list_creators())
             return
 
+        if path == "/api/trash":
+            try:
+                limit = int(query.get("limit", ["100"])[0] or 100)
+            except ValueError:
+                limit = 100
+            limit = max(1, min(limit, 500))
+            try:
+                offset = int(query.get("offset", ["0"])[0] or 0)
+            except ValueError:
+                offset = 0
+            entries, total = _trash.list_entries(limit=limit, offset=max(0, offset))
+            self._send_json(
+                {
+                    "entries": entries,
+                    "total": total,
+                    "offset": max(0, offset),
+                    "limit": limit,
+                    **_trash.stats(),
+                }
+            )
+            return
+
         if path == "/api/following":
             search = (query.get("search", [""])[0] or "").strip().lower()
             try:
@@ -1401,6 +1512,12 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(_check_ollama_health())
             return
 
+        if path == "/api/sources":
+            from promptstudio.scraping.sources import source_info
+
+            self._send_json({"sources": source_info(), "default": "instagram"})
+            return
+
         if path == "/api/prompt":
             rel_path = query.get("path", [None])[0]
             force_refresh = query.get("refresh", ["false"])[0].lower() in ("true", "1", "yes")
@@ -1418,8 +1535,12 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path == "/api/stats":
+            # prompts_ready comes from the indexed has_prompt column now — see
+            # ArchiveIndex.stats(). count_prompts_ready() remains as an exact
+            # cache-derived fallback for CLIs and index repair.
             stats = _archive.stats()
-            stats["prompts_ready"] = count_prompts_ready()
+            stats["trash_enabled"] = TRASH_ENABLED
+            stats["trash_count"] = _trash.count_entries()
             self._send_json(stats)
             return
 
@@ -1438,9 +1559,10 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path == "/api/prompt/batch/status":
-            status = _batch.get_status()
-            status["pending"] = len(_batch.list_uncached())
-            self._send_json(status)
+            # `pending` comes from the job's own snapshot. It used to call
+            # list_uncached(), a full archive query + prompt-cache load, on
+            # every 4s poll for the whole run.
+            self._send_json(_batch.get_status())
             return
 
         if path == "/api/classify/status":

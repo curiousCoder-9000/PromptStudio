@@ -107,7 +107,7 @@ def main() -> None:
         json.dump(false_doc, f, indent=2, ensure_ascii=False)
 
     print("==========================================")
-    print(f"Re-classification Complete!")
+    print("Re-classification Complete!")
     print(f"Re-processed: {reclassified_count} photos")
     print(f"Now Flagged to KEEP: {flagged_now} / {reclassified_count}")
     print(f"Remaining Non-Matches in {os.path.basename(FALSE_JSON)}: {len(false_photos_new)}")

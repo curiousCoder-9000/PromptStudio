@@ -2,11 +2,9 @@
 
 import os
 import threading
-import traceback
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from promptstudio.config import PROMPT_CACHE_FILE
 from promptstudio.prompts.cache import PromptCache
 from promptstudio.prompts.engine import ENGINE_ID, get_prompt_for_image
 from promptstudio.storage.archive import ArchiveStore
@@ -20,7 +18,12 @@ class BatchPromptManager:
 
     def __init__(self) -> None:
         self._job_lock = threading.Lock()
-        self._status: Dict[str, Any] = {
+        self._cancel = threading.Event()
+        self._status: Dict[str, Any] = self._idle_status()
+
+    @staticmethod
+    def _idle_status() -> Dict[str, Any]:
+        return {
             "running": False,
             "total": 0,
             "completed": 0,
@@ -29,6 +32,11 @@ class BatchPromptManager:
             "started_at": None,
             "finished_at": None,
             "error": None,
+            "cancelled": False,
+            "cancel_requested": False,
+            # Snapshot taken once at job start — listing pending work is a full
+            # archive scan, far too expensive to redo on every status poll.
+            "pending": 0,
         }
 
     @classmethod
@@ -41,10 +49,25 @@ class BatchPromptManager:
 
     def get_status(self) -> Dict[str, Any]:
         with self._job_lock:
-            return dict(self._status)
+            status = dict(self._status)
+        status["cancel_requested"] = self._cancel.is_set()
+        return status
 
     def is_running(self) -> bool:
         return self.get_status().get("running", False)
+
+    def cancel(self) -> bool:
+        """Request cooperative cancel; True if a job was running.
+
+        Checked between items, so the in-flight image finishes first — the
+        Ollama call is not interruptible and a partial write would poison the
+        prompt cache.
+        """
+        with self._job_lock:
+            if not self._status.get("running"):
+                return False
+        self._cancel.set()
+        return True
 
     def list_uncached(
         self,
@@ -109,19 +132,23 @@ class BatchPromptManager:
         with self._job_lock:
             if self._status.get("running"):
                 return False
-            self._status = {
-                "running": True,
-                "total": len(pending),
-                "completed": 0,
-                "failed": 0,
-                "current": "",
-                "started_at": datetime.now(timezone.utc).isoformat(),
-                "finished_at": None,
-                "error": None,
-            }
+            self._cancel.clear()
+            self._status = self._idle_status()
+            self._status.update(
+                {
+                    "running": True,
+                    "total": len(pending),
+                    "pending": len(pending),
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
 
         def runner() -> None:
             for photo in pending:
+                if self._cancel.is_set():
+                    with self._job_lock:
+                        self._status["cancelled"] = True
+                    break
                 rel = photo["rel_path"]
                 with self._job_lock:
                     self._status["current"] = rel
@@ -138,10 +165,27 @@ class BatchPromptManager:
                     print(f"Batch prompt error {rel}: {exc}")
                     with self._job_lock:
                         self._status["failed"] += 1
+                with self._job_lock:
+                    self._status["pending"] = max(
+                        0,
+                        self._status["total"]
+                        - self._status["completed"]
+                        - self._status["failed"],
+                    )
             with self._job_lock:
                 self._status["running"] = False
                 self._status["finished_at"] = datetime.now(timezone.utc).isoformat()
                 self._status["current"] = ""
+                if self._status.get("cancelled"):
+                    self._status["pending"] = max(
+                        0,
+                        self._status["total"]
+                        - self._status["completed"]
+                        - self._status["failed"],
+                    )
+                else:
+                    self._status["pending"] = 0
+            self._cancel.clear()
 
         threading.Thread(target=runner, daemon=True).start()
         return True

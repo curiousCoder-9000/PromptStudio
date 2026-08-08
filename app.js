@@ -12,9 +12,14 @@ const state = {
     unscoredOnly: false,
     mediaType: 'all',
     sortMode: 'name',
+    // 'normal' | 'large' — was a bare DOM class, so it couldn't be restored
+    gridSize: 'normal',
     selectMode: false,
     selectedPaths: new Set(),
     photosToDelete: null,
+    // Soft delete: server moves media to _trash/ and returns a trash_id for Undo
+    trashEnabled: true,
+    trashCount: 0,
     ollamaOnline: null,
     comfyOnline: null,
     comfyPollTimer: null,
@@ -31,6 +36,8 @@ const state = {
     scrapeNotifiedFinished: null,
     scrapeWasActive: false,
     batchPollTimer: null,
+    // Tracks the running → stopped transition so completion is announced once
+    batchWasRunning: false,
     classifyPollTimer: null,
     classifyStatus: null,
     healthPollTimer: null,
@@ -39,6 +46,10 @@ const state = {
     photoTotal: 0,
     photoHasMore: false,
     photosLoading: false,
+    // In-flight AbortControllers — a newer request supersedes the older one
+    photosRequest: null,
+    creatorStyleRequest: null,
+    followingRequest: null,
     // Creator sidebar action panel (Sync / Classify / Style) — independent of filter selection
     creatorPanelOpen: false,
     // Video player
@@ -77,6 +88,16 @@ const elements = {
     gridLarge: document.getElementById('gridLarge'),
     newCreatorBtn: document.getElementById('newCreatorBtn'),
     uploadPhotoBtn: document.getElementById('uploadPhotoBtn'),
+    // Trash (soft delete)
+    trashBtn: document.getElementById('trashBtn'),
+    trashCountBadge: document.getElementById('trashCountBadge'),
+    trashModal: document.getElementById('trashModal'),
+    trashList: document.getElementById('trashList'),
+    trashEmpty: document.getElementById('trashEmpty'),
+    trashSummary: document.getElementById('trashSummary'),
+    trashEmptyBtn: document.getElementById('trashEmptyBtn'),
+    trashPurgeExpiredBtn: document.getElementById('trashPurgeExpiredBtn'),
+    closeTrashModalBtn: document.getElementById('closeTrashModalBtn'),
     // Lightbox Modal
     lightboxModal: document.getElementById('lightboxModal'),
     lightboxOverlay: document.getElementById('lightboxOverlay'),
@@ -175,11 +196,12 @@ const elements = {
     closeSyncModalBtn: document.getElementById('closeSyncModalBtn'),
     syncInstagramBtn: document.getElementById('syncInstagramBtn'),
     scrapeCreatorInput: document.getElementById('scrapeCreatorInput'),
+    scrapeSourceSelect: document.getElementById('scrapeSourceSelect'),
+    scrapeSourceHint: document.getElementById('scrapeSourceHint'),
     scrapeEnqueueBtn: document.getElementById('scrapeEnqueueBtn'),
-    scrapeLatestMode: document.getElementById('scrapeLatestMode'),
-    scrapeFullDeep: document.getElementById('scrapeFullDeep'),
-    scrapeBoundedMode: document.getElementById('scrapeBoundedMode'),
+    scrapeModeGroup: document.getElementById('scrapeModeGroup'),
     scrapeMaxPosts: document.getElementById('scrapeMaxPosts'),
+    scrapeMaxPostsRow: document.getElementById('scrapeMaxPostsRow'),
     syncLatestCreatorBtn: document.getElementById('syncLatestCreatorBtn'),
     scrapePauseBtn: document.getElementById('scrapePauseBtn'),
     scrapeResumeBtn: document.getElementById('scrapeResumeBtn'),
@@ -193,6 +215,20 @@ const elements = {
     scrapeJobChipSub: document.getElementById('scrapeJobChipSub'),
     scrapeJobChipCancel: document.getElementById('scrapeJobChipCancel'),
     scrapeJobChipDismiss: document.getElementById('scrapeJobChipDismiss'),
+    // Batch + classify job chips (same shape as the scrape chip)
+    jobChipStack: document.getElementById('jobChipStack'),
+    batchJobChip: document.getElementById('batchJobChip'),
+    batchJobChipIcon: document.getElementById('batchJobChipIcon'),
+    batchJobChipTitle: document.getElementById('batchJobChipTitle'),
+    batchJobChipSub: document.getElementById('batchJobChipSub'),
+    batchJobChipFill: document.getElementById('batchJobChipFill'),
+    batchJobChipCancel: document.getElementById('batchJobChipCancel'),
+    classifyJobChip: document.getElementById('classifyJobChip'),
+    classifyJobChipIcon: document.getElementById('classifyJobChipIcon'),
+    classifyJobChipTitle: document.getElementById('classifyJobChipTitle'),
+    classifyJobChipSub: document.getElementById('classifyJobChipSub'),
+    classifyJobChipFill: document.getElementById('classifyJobChipFill'),
+    classifyJobChipCancel: document.getElementById('classifyJobChipCancel'),
     batchPromptBtn: document.getElementById('batchPromptBtn'),
     unanalyzedFilterBtn: document.getElementById('unanalyzedFilterBtn'),
     favoritesFilterBtn: document.getElementById('favoritesFilterBtn'),
@@ -250,8 +286,112 @@ const elements = {
     toastContainer: document.getElementById('toastContainer')
 };
 
+/**
+ * Escape a value before interpolating it into innerHTML.
+ *
+ * Nearly everything this UI renders is third-party text: Instagram handles,
+ * captions, full names, bios, filenames, and Ollama-generated tags. Any of
+ * those can contain a quote or an angle bracket, which breaks the surrounding
+ * markup at best and injects at worst. Prefer textContent where practical;
+ * use this wherever a template literal builds HTML.
+ */
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+/** Debounce a function by `wait` ms, keeping the latest call's arguments. */
+function debounce(fn, wait) {
+    let timer = null;
+    return function debounced(...args) {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn.apply(this, args), wait);
+    };
+}
+
+// ── View preferences ─────────────────────────────────────────────────
+// How you're looking at the archive should survive a reload; *where* you are
+// (creator, review mode, selection) should not — those are navigation, and
+// silently restoring them is disorienting. Reject review in particular is a
+// destructive mode nobody should land in from a refresh.
+const PREFS_KEY = 'promptstudio.viewPrefs.v1';
+const PREF_FIELDS = [
+    'sortMode',
+    'mediaType',
+    'gridSize',
+    'favoritesOnly',
+    'sexyOnly',
+    'unscoredOnly',
+    'unanalyzedOnly'
+];
+
+function loadViewPrefs() {
+    let saved = null;
+    try {
+        saved = JSON.parse(localStorage.getItem(PREFS_KEY) || 'null');
+    } catch (err) {
+        saved = null; // corrupt or storage blocked (private mode) — use defaults
+    }
+    if (!saved || typeof saved !== 'object') return;
+    PREF_FIELDS.forEach((key) => {
+        if (saved[key] === undefined) return;
+        const fallback = state[key];
+        // Only accept a value of the same type as the default, so a hand-edited
+        // or stale payload can't put state into a shape the UI can't render.
+        if (typeof fallback === 'boolean') state[key] = Boolean(saved[key]);
+        else if (typeof fallback === 'string' && typeof saved[key] === 'string') {
+            state[key] = saved[key];
+        }
+    });
+}
+
+function saveViewPrefs() {
+    try {
+        const payload = {};
+        PREF_FIELDS.forEach((key) => {
+            payload[key] = state[key];
+        });
+        localStorage.setItem(PREFS_KEY, JSON.stringify(payload));
+    } catch (err) {
+        /* storage full or blocked — preferences are a nicety, never fatal */
+    }
+}
+
+/** Push restored prefs into the controls so the UI matches state on first paint. */
+function applyViewPrefsToControls() {
+    if (elements.sortSelect) elements.sortSelect.value = state.sortMode || 'name';
+    if (elements.mediaTypeSelect) elements.mediaTypeSelect.value = state.mediaType || 'all';
+    applyGridSize(state.gridSize);
+
+    const chips = [
+        [elements.favoritesFilterBtn, state.favoritesOnly],
+        [elements.sexyFilterBtn, state.sexyOnly],
+        [elements.unscoredFilterBtn, state.unscoredOnly],
+        [elements.unanalyzedFilterBtn, state.unanalyzedOnly]
+    ];
+    chips.forEach(([btn, on]) => {
+        if (btn) btn.classList.toggle('active', Boolean(on));
+    });
+}
+
+function applyGridSize(size) {
+    const large = size === 'large';
+    state.gridSize = large ? 'large' : 'normal';
+    if (elements.galleryGrid) elements.galleryGrid.classList.toggle('large', large);
+    if (elements.gridNormal) elements.gridNormal.classList.toggle('active', !large);
+    if (elements.gridLarge) elements.gridLarge.classList.toggle('active', large);
+}
+
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
+    // Prefs must land before the first fetchPhotos() so the initial request
+    // already carries the restored sort/filters instead of re-querying.
+    loadViewPrefs();
+    applyViewPrefsToControls();
     initApp();
     setupEventListeners();
     wireLightboxVideoEvents();
@@ -262,8 +402,10 @@ async function initApp() {
     await fetchStats();
     await fetchCreators();
     await fetchPhotos();
-    // Resume classify progress UI if a job is mid-flight
+    // Resume job chips if work is mid-flight — jobs live on the server, so a
+    // browser refresh must not orphan a running batch/classify/scrape.
     pollClassifyStatus();
+    pollBatchStatus();
     // Restore scrape/sync chip after refresh (queue lives on the server)
     await hydrateScrapeUiFromServer();
     if (!state.healthPollTimer) {
@@ -437,6 +579,11 @@ async function fetchStats() {
         elements.statTotalPhotos.textContent = data.total_photos.toLocaleString();
         elements.statCreators.textContent = data.total_creators.toLocaleString();
         elements.statPersonPhotos.textContent = (data.prompts_ready ?? 0).toLocaleString();
+        if (typeof data.trash_enabled === 'boolean') {
+            state.trashEnabled = data.trash_enabled;
+        }
+        state.trashCount = data.trash_count ?? 0;
+        updateTrashButtonUi();
     } catch (err) {
         console.error('Error fetching stats:', err);
     }
@@ -455,14 +602,22 @@ async function fetchCreators() {
 }
 
 async function fetchPhotos({ append = false } = {}) {
-    if (state.photosLoading) return;
+    // Infinite-scroll appends must not stack, or the same page loads twice.
+    // A new filter/search/sort, by contrast, must never be dropped — it
+    // supersedes whatever is in flight (the old guard silently discarded it,
+    // so the grid could end up not matching the active filters).
+    if (append && state.photosLoading) return;
+    if (state.photosRequest) state.photosRequest.abort();
+    const controller = new AbortController();
+    state.photosRequest = controller;
     state.photosLoading = true;
+    // Skeletons only on a fresh query; an append keeps the real cards visible.
+    setGalleryLoading(true, { skeletons: !append });
     try {
-        const prevLen = state.photos.length;
-        if (!append) {
-            state.photoOffset = 0;
-            state.photos = [];
-        }
+        const prevLen = append ? state.photos.length : 0;
+        // Offset is only committed to state once the response lands, so an
+        // aborted request cannot corrupt paging or blank out state.photos.
+        const requestOffset = append ? state.photoOffset : 0;
 
         let url = '/api/photos';
         const params = new URLSearchParams();
@@ -490,12 +645,12 @@ async function fetchPhotos({ append = false } = {}) {
         }
         params.append('media_type', state.mediaType || 'all');
         params.append('sort', state.sortMode || 'name');
-        params.append('offset', String(state.photoOffset));
+        params.append('offset', String(requestOffset));
         params.append('limit', String(state.photoLimit));
 
         url += '?' + params.toString();
 
-        const res = await fetch(url);
+        const res = await fetch(url, { signal: controller.signal });
         const data = await res.json();
         const page = Array.isArray(data) ? data : (data.photos || []);
         state.photoTotal = Array.isArray(data) ? page.length : (data.total || page.length);
@@ -504,13 +659,59 @@ async function fetchPhotos({ append = false } = {}) {
             : Boolean(data.has_more);
         state.photos = append ? state.photos.concat(page) : page;
         state.photoOffset = state.photos.length;
-        renderGallery({ append, fromIndex: append ? prevLen : 0 });
+        renderGallery({ append, fromIndex: prevLen });
         updateReviewRejectsBar();
     } catch (err) {
+        // A superseded request is expected, not a failure — the newer one wins.
+        if (err.name === 'AbortError') return;
         console.error('Error fetching photos:', err);
+        showToast('Could not load photos');
     } finally {
-        state.photosLoading = false;
+        // Only the newest request owns the loading flag; an aborted one must
+        // not clear the state its successor just set.
+        if (state.photosRequest === controller) {
+            state.photosRequest = null;
+            state.photosLoading = false;
+            setGalleryLoading(false);
+            // renderGallery replaces them on success; on error they'd linger
+            clearGallerySkeletons();
+            if (!state.photos.length) {
+                elements.emptyState.style.display = 'flex';
+            }
+        }
     }
+}
+
+/** Visible + assistive-tech signal that a gallery fetch is in flight. */
+function setGalleryLoading(on, { skeletons = false } = {}) {
+    if (elements.galleryGrid) {
+        elements.galleryGrid.setAttribute('aria-busy', on ? 'true' : 'false');
+    }
+    const wrap = document.querySelector('.search-bar-container');
+    if (wrap) wrap.classList.toggle('is-searching', Boolean(on));
+    if (skeletons) showGallerySkeletons();
+}
+
+const SKELETON_COUNT = 12;
+
+/**
+ * Placeholder cards while the first page loads.
+ *
+ * Only for a fresh query — an infinite-scroll append keeps the real cards on
+ * screen, and replacing them with skeletons would look like a reset.
+ */
+function showGallerySkeletons() {
+    if (!elements.galleryGrid) return;
+    elements.emptyState.style.display = 'none';
+    const cards = Array.from({ length: SKELETON_COUNT })
+        .map(() => '<div class="photo-card skeleton" aria-hidden="true"></div>')
+        .join('');
+    elements.galleryGrid.innerHTML = cards;
+}
+
+function clearGallerySkeletons() {
+    if (!elements.galleryGrid) return;
+    elements.galleryGrid.querySelectorAll('.photo-card.skeleton').forEach((el) => el.remove());
 }
 
 async function loadMorePhotos() {
@@ -547,15 +748,283 @@ async function fetchPromptForPhoto(relPath, forceRefresh = false) {
     }
 }
 
+/**
+ * Drop photos from the current view without refetching.
+ *
+ * Deleting used to call initApp(), which reset photoOffset to 0 and threw away
+ * every loaded page — brutal in the reject-review loop. This splices state,
+ * removes the cards, and adjusts the counters in place so scroll position and
+ * all loaded pages survive.
+ *
+ * Returns the number of photos actually removed from the view.
+ */
+function removePhotosFromView(relPaths) {
+    const targets = new Set(relPaths || []);
+    if (!targets.size) return 0;
+
+    const removedByCreator = new Map();
+    let removed = 0;
+
+    state.photos = state.photos.filter((p) => {
+        if (!targets.has(p.rel_path)) return true;
+        removed += 1;
+        removedByCreator.set(p.creator, (removedByCreator.get(p.creator) || 0) + 1);
+        return false;
+    });
+    if (!removed) return 0;
+
+    targets.forEach((rel) => {
+        state.selectedPaths.delete(rel);
+        const card = elements.galleryGrid.querySelector(
+            `.photo-card[data-rel-path="${CSS.escape(rel)}"]`
+        );
+        if (card) card.remove();
+    });
+
+    // Paging counters: offset tracks how many rows we've consumed from the server
+    state.photoOffset = Math.max(0, state.photoOffset - removed);
+    state.photoTotal = Math.max(0, (state.photoTotal || 0) - removed);
+
+    // Sidebar + stats counters, without hitting the O(archive) /api/stats route
+    removedByCreator.forEach((n, creatorName) => {
+        const creator = state.creators.find((c) => c.name === creatorName);
+        if (!creator) return;
+        creator.photo_count = Math.max(0, (creator.photo_count || 0) - n);
+        if (typeof creator.scored_count === 'number') {
+            creator.scored_count = Math.max(0, creator.scored_count - n);
+        }
+        if (typeof creator.reject_count === 'number') {
+            creator.reject_count = Math.max(0, creator.reject_count - n);
+        }
+    });
+    if (removedByCreator.size) renderCreatorList();
+
+    const totalEl = elements.statTotalPhotos;
+    if (totalEl) {
+        const current = parseInt(String(totalEl.textContent).replace(/[^0-9]/g, ''), 10);
+        if (Number.isFinite(current)) {
+            totalEl.textContent = Math.max(0, current - removed).toLocaleString();
+        }
+    }
+
+    elements.galleryCount.textContent = `${state.photos.length}` +
+        (state.photoTotal ? ` / ${state.photoTotal}` : '') + ' photos';
+    elements.emptyState.style.display = state.photos.length === 0 ? 'flex' : 'none';
+    updateBulkBar();
+    updateReviewRejectsBar();
+    return removed;
+}
+
+/**
+ * Keep the lightbox usable after the photo it was showing disappears:
+ * slide to whatever now occupies that index, or close when nothing is left.
+ */
+function reconcileLightboxAfterRemoval(removedIndex) {
+    if (state.lightboxIndex === -1) return;
+    if (!state.photos.length) {
+        closeLightbox();
+        return;
+    }
+    if (removedIndex < 0) return;
+    const next = Math.min(removedIndex, state.photos.length - 1);
+    openLightbox(next);
+}
+
+async function restoreFromTrash(trashIds, { label = '' } = {}) {
+    const ids = (trashIds || []).filter(Boolean);
+    if (!ids.length) return;
+    try {
+        const res = await fetch('/api/trash/restore', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            showToast('Restore failed');
+            return;
+        }
+        const conflicts = (data.results || []).filter((r) => r.status === 'conflict').length;
+        if (data.restored) {
+            showToast({
+                title: `Restored ${data.restored}${label ? ` ${label}` : ''}`,
+                body: conflicts
+                    ? `${conflicts} skipped — a file already exists at that path`
+                    : 'Back in the archive with prompts and favorites intact',
+                variant: 'success'
+            });
+        } else {
+            showToast(conflicts ? 'Nothing restored — paths already occupied' : 'Nothing restored');
+        }
+        // Restored items can sort anywhere in the current filter, so resync the view.
+        await fetchStats();
+        await fetchCreators();
+        await fetchPhotos();
+    } catch (err) {
+        console.error('Restore failed:', err);
+        showToast('Restore request failed');
+    }
+}
+
+function updateTrashButtonUi() {
+    if (!elements.trashBtn) return;
+    elements.trashBtn.style.display = state.trashEnabled ? 'inline-flex' : 'none';
+    if (elements.trashCountBadge) {
+        elements.trashCountBadge.textContent = String(state.trashCount || 0);
+        elements.trashCountBadge.style.display = state.trashCount ? 'inline-flex' : 'none';
+    }
+}
+
+function formatTrashSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n <= 0) return '';
+    return ` · ${formatBytes(n)}`;
+}
+
+async function loadTrashList() {
+    if (!elements.trashList) return;
+    elements.trashList.innerHTML = '';
+    if (elements.trashEmpty) {
+        elements.trashEmpty.textContent = 'Loading…';
+        elements.trashList.appendChild(elements.trashEmpty);
+    }
+    try {
+        const res = await fetch('/api/trash?limit=200');
+        const data = await res.json();
+        const entries = data.entries || [];
+        state.trashCount = data.total ?? entries.length;
+        updateTrashButtonUi();
+
+        if (elements.trashSummary) {
+            elements.trashSummary.textContent = entries.length
+                ? `${data.total} item(s)${formatTrashSize(data.bytes)} · auto-purged after ${data.retention_days} days`
+                : 'Trash is empty. Deleted media lands here so you can put it back.';
+        }
+
+        elements.trashList.innerHTML = '';
+        if (!entries.length) {
+            const empty = document.createElement('div');
+            empty.className = 'trash-empty';
+            empty.textContent = 'Nothing in the Trash.';
+            elements.trashList.appendChild(empty);
+            return;
+        }
+
+        entries.forEach((entry) => {
+            const row = document.createElement('div');
+            row.className = 'trash-row';
+
+            const info = document.createElement('div');
+            info.className = 'trash-row-info';
+            const title = document.createElement('div');
+            title.className = 'trash-row-title';
+            title.textContent = entry.rel_path || entry.filename || entry.id;
+            const meta = document.createElement('div');
+            meta.className = 'trash-row-meta';
+            const bits = [formatRelativeTime(entry.deleted_at)];
+            if (entry.file_size) bits.push(formatBytes(entry.file_size));
+            if (entry.favorite) bits.push('★ favorite');
+            if (entry.prompt_bundle) bits.push('has prompt');
+            if (!entry.media_present) bits.push('⚠ file missing');
+            meta.textContent = bits.join(' · ');
+            info.appendChild(title);
+            info.appendChild(meta);
+
+            const actions = document.createElement('div');
+            actions.className = 'trash-row-actions';
+
+            const restoreBtn = document.createElement('button');
+            restoreBtn.type = 'button';
+            restoreBtn.className = 'btn btn-secondary btn-sm';
+            restoreBtn.innerHTML = '<i class="fa-solid fa-rotate-left"></i> Restore';
+            restoreBtn.disabled = !entry.media_present;
+            restoreBtn.addEventListener('click', async () => {
+                restoreBtn.disabled = true;
+                await restoreFromTrash([entry.id], { label: 'photo' });
+                await loadTrashList();
+            });
+
+            const purgeBtn = document.createElement('button');
+            purgeBtn.type = 'button';
+            purgeBtn.className = 'btn btn-danger btn-sm';
+            purgeBtn.innerHTML = '<i class="fa-solid fa-xmark"></i> Delete forever';
+            purgeBtn.addEventListener('click', async () => {
+                purgeBtn.disabled = true;
+                await purgeTrash({ ids: [entry.id] });
+                await loadTrashList();
+            });
+
+            actions.appendChild(restoreBtn);
+            actions.appendChild(purgeBtn);
+            row.appendChild(info);
+            row.appendChild(actions);
+            elements.trashList.appendChild(row);
+        });
+    } catch (err) {
+        console.error('Trash list failed:', err);
+        elements.trashList.innerHTML = '';
+        const failed = document.createElement('div');
+        failed.className = 'trash-empty';
+        failed.textContent = 'Could not load the Trash.';
+        elements.trashList.appendChild(failed);
+    }
+}
+
+async function purgeTrash(payload) {
+    try {
+        const res = await fetch('/api/trash/purge', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            showToast('Purge failed');
+            return;
+        }
+        showToast(
+            data.purged
+                ? `Permanently removed ${data.purged} item(s)`
+                : 'Nothing to purge'
+        );
+        await fetchStats();
+    } catch (err) {
+        console.error('Purge failed:', err);
+        showToast('Purge request failed');
+    }
+}
+
+function openTrashModal() {
+    if (!elements.trashModal) return;
+    elements.trashModal.style.display = 'flex';
+    loadTrashList();
+}
+
+function closeTrashModal() {
+    if (elements.trashModal) elements.trashModal.style.display = 'none';
+}
+
 async function deletePhoto(relPath) {
+    const removedIndex = state.photos.findIndex((p) => p.rel_path === relPath);
     try {
         const res = await fetch(`/api/photo?path=${encodeURIComponent(relPath)}`, { method: 'DELETE' });
-        if (res.ok) {
-            showToast('Photo permanently deleted');
-            closeLightbox();
-            initApp();
-        } else {
+        if (!res.ok) {
             showToast('Error deleting photo');
+            return;
+        }
+        const data = await res.json().catch(() => ({}));
+        removePhotosFromView([relPath]);
+        reconcileLightboxAfterRemoval(removedIndex);
+        if (data.trash_id) {
+            showToast({
+                title: 'Moved to Trash',
+                body: data.filename || relPath,
+                actionLabel: 'Undo',
+                onAction: () => restoreFromTrash([data.trash_id], { label: 'photo' }),
+                duration: 8000
+            });
+        } else {
+            showToast('Photo permanently deleted');
         }
     } catch (err) {
         showToast('Delete request failed');
@@ -662,7 +1131,7 @@ function renderCreatorList() {
     allItem.className = `creator-item ${!state.selectedCreator ? 'active' : ''}`;
     allItem.innerHTML = `
         <span class="creator-name"><i class="fa-solid fa-layer-group"></i> All Creators</span>
-        <span class="creator-badge">${state.creators.reduce((acc, c) => acc + c.photo_count, 0)}</span>
+        <span class="creator-badge">${state.creators.reduce((acc, c) => acc + Number(c.photo_count || 0), 0)}</span>
     `;
     allItem.addEventListener('click', () => {
         state.selectedCreator = null;
@@ -681,26 +1150,26 @@ function renderCreatorList() {
     filtered.forEach(c => {
         const item = document.createElement('div');
         item.className = `creator-item ${state.selectedCreator === c.name ? 'active' : ''}`;
-        const scored = c.scored_count != null ? c.scored_count : null;
-        const total = c.photo_count || 0;
-        const rejects = c.reject_count || 0;
+        const scored = c.scored_count != null ? Number(c.scored_count) : null;
+        const total = Number(c.photo_count) || 0;
+        const rejects = Number(c.reject_count) || 0;
         const isJob = classifyRunning && classifyCreator === c.name;
         let scorePill = '';
         if (isJob) {
             const st = state.classifyStatus;
-            scorePill = `<span class="creator-score-pill running" title="Classifying…">${st.completed || 0}/${st.total || 0}</span>`;
+            scorePill = `<span class="creator-score-pill running" title="Classifying…">${Number(st.completed) || 0}/${Number(st.total) || 0}</span>`;
         } else if (scored != null && total > 0) {
             const cls = rejects > 0 ? 'creator-score-pill has-rejects' : 'creator-score-pill';
             const title = rejects
                 ? `${scored}/${total} scored · ${rejects} rejects`
                 : `${scored}/${total} scored`;
-            scorePill = `<span class="${cls}" title="${title}">${scored}/${total}</span>`;
+            scorePill = `<span class="${cls}" title="${escapeHtml(title)}">${scored}/${total}</span>`;
         }
         item.innerHTML = `
-            <span class="creator-name">@${c.name}${syncBadgeHtml(c)}</span>
+            <span class="creator-name">@${escapeHtml(c.name)}${syncBadgeHtml(c)}</span>
             <span style="display:inline-flex;align-items:center;gap:6px;">
                 ${scorePill}
-                <span class="creator-badge">${c.photo_count}</span>
+                <span class="creator-badge">${escapeHtml(c.photo_count)}</span>
             </span>
         `;
         item.addEventListener('click', () => {
@@ -737,7 +1206,7 @@ function syncBadgeHtml(creator) {
     }
     if (!creator.last_synced_at) return html;
     const label = formatRelativeTime(creator.last_synced_at);
-    return `${html} <span class="sync-pill" title="Last synced ${creator.last_synced_at}">${label}</span>`;
+    return `${html} <span class="sync-pill" title="Last synced ${escapeHtml(creator.last_synced_at)}">${escapeHtml(label)}</span>`;
 }
 
 function updateSyncLatestButtonUi() {
@@ -824,7 +1293,7 @@ function updateClassifyPanelUi() {
             : '<i class="fa-solid fa-fire"></i> Classify unscored';
     }
     if (elements.reviewRejectsBtn) {
-        const rejects = meta && meta.reject_count != null ? meta.reject_count : 0;
+        const rejects = meta && meta.reject_count != null ? Number(meta.reject_count) || 0 : 0;
         elements.reviewRejectsBtn.disabled = !creator;
         elements.reviewRejectsBtn.innerHTML =
             `<i class="fa-solid fa-filter"></i> Review rejects${rejects ? ` (${rejects})` : ''}`;
@@ -854,7 +1323,8 @@ function isBlockingOverlayOpen() {
         isDisplayFlex(elements.lightboxModal) ||
         isDisplayFlex(elements.syncModal) ||
         isDisplayFlex(elements.newCreatorModal) ||
-        isDisplayFlex(elements.uploadModal)
+        isDisplayFlex(elements.uploadModal) ||
+        isDisplayFlex(elements.trashModal)
     );
 }
 
@@ -871,8 +1341,15 @@ async function updateCreatorStylePanel() {
     updateSyncLatestButtonUi();
     elements.creatorStylePrefix.textContent = 'Loading…';
     elements.creatorStyleTerms.innerHTML = '';
+    // Clicking through creators quickly would otherwise let a slow earlier
+    // response overwrite the panel for the creator now selected.
+    if (state.creatorStyleRequest) state.creatorStyleRequest.abort();
+    const controller = new AbortController();
+    state.creatorStyleRequest = controller;
     try {
-        const res = await fetch(`/api/creator/style?creator=${encodeURIComponent(creator)}`);
+        const res = await fetch(`/api/creator/style?creator=${encodeURIComponent(creator)}`, {
+            signal: controller.signal
+        });
         const data = await res.json();
         // Selection may have changed or panel closed while fetch was in flight
         if (state.selectedCreator !== creator || !state.creatorPanelOpen) return;
@@ -885,7 +1362,10 @@ async function updateCreatorStylePanel() {
         }
         const terms = data.top_terms || [];
         elements.creatorStyleTerms.innerHTML = terms
-            .map((t) => `<button type="button" class="tag-pill tag-clickable" data-tag="${String(t).replace(/"/g, '&quot;')}">#${t}</button>`)
+            .map((t) => {
+                const safe = escapeHtml(t);
+                return `<button type="button" class="tag-pill tag-clickable" data-tag="${safe}">#${safe}</button>`;
+            })
             .join('');
         elements.creatorStyleTerms.querySelectorAll('.tag-clickable').forEach((btn) => {
             btn.addEventListener('click', () => {
@@ -897,8 +1377,13 @@ async function updateCreatorStylePanel() {
             });
         });
     } catch (err) {
+        if (err.name === 'AbortError') return;
         if (state.selectedCreator === creator && state.creatorPanelOpen) {
             elements.creatorStylePrefix.textContent = 'Failed to load style';
+        }
+    } finally {
+        if (state.creatorStyleRequest === controller) {
+            state.creatorStyleRequest = null;
         }
     }
 }
@@ -962,7 +1447,8 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
         const favMark = p.favorite
             ? '<span class="card-fav-mark" title="Favorite"><i class="fa-solid fa-star"></i></span>'
             : '';
-        const isVideo = p.filename.toLowerCase().endsWith('.mp4') || p.filename.toLowerCase().endsWith('.webm');
+        // Single source of truth for video detection (was a divergent inline list)
+        const isVideo = isVideoFilename(p.filename);
         const videoBadge = isVideo ? '<div class="video-badge"><i class="fa-solid fa-play"></i></div>' : '';
         const glam = typeof p.glam_score === 'number' ? p.glam_score : -1;
         const glamBadge = glam >= 0
@@ -975,7 +1461,7 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
             ? `<span class="prompt-status-badge ready" title="Reel"><i class="fa-solid fa-film"></i> Reel</span>`
             : `<span class="prompt-status-badge ${status.cls}"><i class="fa-solid ${status.icon}"></i> ${status.label}</span>`;
         card.innerHTML = `
-            <img src="${imgSrc}" alt="${p.filename}" loading="lazy" data-full="${p.url}">
+            <img src="${escapeHtml(imgSrc)}" alt="${escapeHtml(p.filename)}" loading="lazy" data-full="${escapeHtml(p.url)}">
             ${videoBadge}
             ${glamBadge}
             <div class="photo-card-overlay">
@@ -987,7 +1473,7 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
                     <button class="card-trash-btn" title="Delete Photo"><i class="fa-solid fa-trash-can"></i></button>
                 </div>
                 <div class="overlay-bottom-info">
-                    <div class="photo-card-creator">@${p.creator}</div>
+                    <div class="photo-card-creator">@${escapeHtml(p.creator)}</div>
                     ${state.selectMode
                         ? topBadge
                         : bottomHint}
@@ -1044,6 +1530,9 @@ function populateUploadCreators() {
         elements.uploadCreatorSelect.appendChild(opt);
     });
 }
+
+const SEARCH_DEBOUNCE_MS = 250;
+const CREATOR_FILTER_DEBOUNCE_MS = 120;
 
 const VIDEO_SEEK_SECONDS = 5;
 const VIDEO_SEEK_HOLD_SECONDS = 2;
@@ -1649,15 +2138,15 @@ function resetPromptPanel() {
 
 function metaCard(label, value) {
     return `<div class="video-meta-card">
-        <span class="vm-label">${label}</span>
-        <span class="vm-value">${value}</span>
+        <span class="vm-label">${escapeHtml(label)}</span>
+        <span class="vm-value">${escapeHtml(value)}</span>
     </div>`;
 }
 
 function boolPill(label, on) {
     const cls = on ? 'glam-keep' : 'glam-reject';
     const mark = on ? 'yes' : 'no';
-    return `<span class="video-pill ${cls}">${label}: ${mark}</span>`;
+    return `<span class="video-pill ${cls}">${escapeHtml(label)}: ${mark}</span>`;
 }
 
 async function loadVideoDetailPanel(photo) {
@@ -1741,13 +2230,13 @@ async function loadVideoDetailPanel(photo) {
         const glamInfo = glamScoreLabel(data.glam_score);
         if (elements.videoDetailPills) {
             const pills = [
-                `<span class="video-pill ${glamInfo.cls}">${glamInfo.text}</span>`,
+                `<span class="video-pill ${glamInfo.cls}">${escapeHtml(glamInfo.text)}</span>`,
             ];
             if (data.favorite || photo.favorite) {
                 pills.push('<span class="video-pill glam-keep">Favorite</span>');
             }
             if (data.shortcode) {
-                pills.push(`<span class="video-pill">${data.shortcode}</span>`);
+                pills.push(`<span class="video-pill">${escapeHtml(data.shortcode)}</span>`);
             }
             elements.videoDetailPills.innerHTML = pills.join('');
         }
@@ -1784,10 +2273,10 @@ async function loadVideoDetailPanel(photo) {
                     );
                 }
                 if (glam.source) {
-                    row.push(`<span class="video-pill">${String(glam.source).slice(0, 24)}</span>`);
+                    row.push(`<span class="video-pill">${escapeHtml(String(glam.source).slice(0, 24))}</span>`);
                 }
                 elements.videoGlamRow.innerHTML = row.join('') ||
-                    `<span class="video-pill ${glamInfo.cls}">${glamInfo.text}</span>`;
+                    `<span class="video-pill ${glamInfo.cls}">${escapeHtml(glamInfo.text)}</span>`;
                 if (elements.videoGlamReason) {
                     elements.videoGlamReason.textContent =
                         glam.brief_reason ||
@@ -1873,7 +2362,7 @@ function applyPromptData(data) {
 
     if (data.visual_tags) {
         elements.promptTagsContainer.innerHTML = data.visual_tags.map(t => {
-            const safe = String(t).replace(/"/g, '&quot;');
+            const safe = escapeHtml(t);
             return `<button type="button" class="tag-pill tag-clickable" data-tag="${safe}">#${safe}</button>`;
         }).join('');
         elements.promptTagsContainer.querySelectorAll('.tag-clickable').forEach((btn) => {
@@ -1908,11 +2397,12 @@ function renderPromptHistory(data) {
     }
     elements.promptHistory.style.display = 'block';
     elements.promptHistoryList.innerHTML = hist.map((h, i) => {
-        const preview = (h.positive_prompt || '').slice(0, 80);
-        const when = h.saved_at ? formatRelativeTime(h.saved_at) : `#${i + 1}`;
+        const full = h.positive_prompt || '';
+        const preview = escapeHtml(full.slice(0, 80));
+        const when = escapeHtml(h.saved_at ? formatRelativeTime(h.saved_at) : `#${i + 1}`);
         return `<button type="button" class="history-item" data-index="${i}" title="Restore this version">
             <span class="history-when">${when}</span>
-            <span class="history-preview">${preview}${(h.positive_prompt || '').length > 80 ? '…' : ''}</span>
+            <span class="history-preview">${preview}${full.length > 80 ? '…' : ''}</span>
         </button>`;
     }).join('');
     elements.promptHistoryList.querySelectorAll('.history-item').forEach((btn) => {
@@ -2516,17 +3006,29 @@ function handleViewerDblClick(e) {
 }
 
 // Deletion Confirmation Modal
+/** Confirm-button label + copy depend on whether the server keeps a Trash copy. */
+function applyDeleteConfirmMode() {
+    if (!elements.confirmDeleteBtn) return;
+    elements.confirmDeleteBtn.innerHTML = state.trashEnabled
+        ? '<i class="fa-solid fa-trash-can"></i> Move to Trash'
+        : '<i class="fa-solid fa-trash-can"></i> Permanently Delete';
+}
+
 function promptDeletePhoto(photo) {
     state.photoToDelete = photo;
     state.photosToDelete = null;
     if (elements.deleteConfirmTitle) {
-        elements.deleteConfirmTitle.textContent = 'Delete Photo?';
+        elements.deleteConfirmTitle.textContent = state.trashEnabled
+            ? 'Move Photo to Trash?'
+            : 'Delete Photo?';
     }
     if (elements.deleteConfirmBody) {
-        elements.deleteConfirmBody.textContent =
-            'Are you sure you want to permanently delete this photo from your storage folder?';
+        elements.deleteConfirmBody.textContent = state.trashEnabled
+            ? 'This photo moves to the archive Trash folder. You can undo right after, or restore it later.'
+            : 'Are you sure you want to permanently delete this photo from your storage folder?';
     }
     elements.deleteFilenamePreview.textContent = `${photo.creator}/${photo.filename}`;
+    applyDeleteConfirmMode();
     elements.deleteConfirmModal.style.display = 'flex';
 }
 
@@ -2538,18 +3040,27 @@ function promptBulkDelete() {
     const names = paths.map((p) => p.split('/').pop());
     const preview = names.slice(0, 5).join('\n') +
         (names.length > 5 ? `\nand ${names.length - 5} more` : '');
+    const favCount = state.photos.filter(
+        (p) => state.selectedPaths.has(p.rel_path) && p.favorite
+    ).length;
     if (elements.deleteConfirmTitle) {
-        elements.deleteConfirmTitle.textContent = state.rejectOnly
-            ? `Delete ${paths.length} Rejects?`
-            : `Delete ${paths.length} Photos?`;
+        const noun = state.rejectOnly ? 'Rejects' : 'Photos';
+        elements.deleteConfirmTitle.textContent = state.trashEnabled
+            ? `Move ${paths.length} ${noun} to Trash?`
+            : `Delete ${paths.length} ${noun}?`;
     }
     if (elements.deleteConfirmBody) {
         const who = state.selectedCreator ? ` for @${state.selectedCreator}` : '';
-        elements.deleteConfirmBody.textContent = state.rejectOnly
-            ? `Permanently delete ${paths.length} reject(s)${who}? This cannot be undone.`
-            : 'Are you sure you want to permanently delete these photos from your storage folder?';
+        // Favorites inside a reject sweep are the classic false-positive case — call it out.
+        const favNote = favCount
+            ? ` Includes ${favCount} favorite${favCount === 1 ? '' : 's'}.`
+            : '';
+        elements.deleteConfirmBody.textContent = state.trashEnabled
+            ? `${paths.length} item(s)${who} move to the archive Trash folder and can be restored.${favNote}`
+            : `Permanently delete ${paths.length} item(s)${who}? This cannot be undone.${favNote}`;
     }
     elements.deleteFilenamePreview.textContent = preview;
+    applyDeleteConfirmMode();
     elements.deleteConfirmModal.style.display = 'flex';
 }
 
@@ -2575,8 +3086,17 @@ function bindModalOverlayDismiss(modalEl, closeFn) {
 }
 
 async function executeBulkDelete(paths) {
+    const total = paths.length;
     let ok = 0;
     let fail = 0;
+    const deletedPaths = [];
+    const trashIds = [];
+
+    // Long bulk deletes used to run silently; keep a live count on screen.
+    const progress = total > 5
+        ? showToast({ title: `Deleting 0/${total}…`, duration: 0 })
+        : null;
+
     for (const relPath of paths) {
         try {
             const res = await fetch(`/api/photo?path=${encodeURIComponent(relPath)}`, {
@@ -2584,6 +3104,9 @@ async function executeBulkDelete(paths) {
             });
             if (res.ok) {
                 ok += 1;
+                const data = await res.json().catch(() => ({}));
+                deletedPaths.push(relPath);
+                if (data.trash_id) trashIds.push(data.trash_id);
                 state.selectedPaths.delete(relPath);
             } else {
                 fail += 1;
@@ -2591,12 +3114,28 @@ async function executeBulkDelete(paths) {
         } catch (err) {
             fail += 1;
         }
+        if (progress) {
+            progress.textContent = `Deleting ${ok + fail}/${total}…`;
+        }
     }
-    showToast(`Deleted ${ok}${fail ? `, ${fail} failed` : ''}`);
-    closeLightbox();
+    if (progress) progress.remove();
+
+    removePhotosFromView(deletedPaths);
+    if (state.lightboxIndex !== -1 && !state.photos.length) closeLightbox();
     clearSelection();
     setSelectMode(false);
-    await initApp();
+
+    if (trashIds.length) {
+        showToast({
+            title: `Moved ${ok} to Trash`,
+            body: fail ? `${fail} failed` : 'Recoverable until you empty the Trash',
+            actionLabel: `Undo all (${trashIds.length})`,
+            onAction: () => restoreFromTrash(trashIds, { label: 'photos' }),
+            duration: 12000
+        });
+    } else {
+        showToast(`Deleted ${ok}${fail ? `, ${fail} failed` : ''}`);
+    }
 }
 
 async function startBulkReanalyze() {
@@ -2635,16 +3174,27 @@ function copyToClipboard(text, message) {
 
 // Event Listeners
 function setupEventListeners() {
+    // Search hits the DB across prompt text — one request per keystroke was
+    // both wasteful and racy. Debounce, then let AbortController settle order.
+    const runSearch = debounce(() => fetchPhotos(), SEARCH_DEBOUNCE_MS);
     elements.searchInput.addEventListener('input', (e) => {
         state.searchQuery = e.target.value.trim();
         elements.clearSearch.style.display = state.searchQuery ? 'block' : 'none';
-        fetchPhotos();
+        runSearch();
+    });
+    // Enter searches immediately instead of waiting out the debounce
+    elements.searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            fetchPhotos();
+        }
     });
 
     elements.clearSearch.addEventListener('click', () => {
         elements.searchInput.value = '';
         state.searchQuery = '';
         elements.clearSearch.style.display = 'none';
+        elements.searchInput.focus();
         fetchPhotos();
     });
 
@@ -2652,6 +3202,7 @@ function setupEventListeners() {
         elements.unanalyzedFilterBtn.addEventListener('click', () => {
             state.unanalyzedOnly = !state.unanalyzedOnly;
             elements.unanalyzedFilterBtn.classList.toggle('active', state.unanalyzedOnly);
+            saveViewPrefs();
             fetchPhotos();
         });
     }
@@ -2660,6 +3211,7 @@ function setupEventListeners() {
         elements.favoritesFilterBtn.addEventListener('click', () => {
             state.favoritesOnly = !state.favoritesOnly;
             elements.favoritesFilterBtn.classList.toggle('active', state.favoritesOnly);
+            saveViewPrefs();
             fetchPhotos();
         });
     }
@@ -2680,6 +3232,7 @@ function setupEventListeners() {
                     elements.sortSelect.value = 'glam';
                 }
             }
+            saveViewPrefs();
             fetchPhotos();
         });
     }
@@ -2705,6 +3258,7 @@ function setupEventListeners() {
                 if (elements.rejectFilterBtn) elements.rejectFilterBtn.classList.remove('active');
                 updateReviewRejectsBar();
             }
+            saveViewPrefs();
             fetchPhotos();
         });
     }
@@ -2723,6 +3277,12 @@ function setupEventListeners() {
             state.scrapeChipDismissed = true;
             hideScrapeJobChip();
         });
+    }
+    if (elements.batchJobChipCancel) {
+        elements.batchJobChipCancel.addEventListener('click', cancelBatchAnalyze);
+    }
+    if (elements.classifyJobChipCancel) {
+        elements.classifyJobChipCancel.addEventListener('click', cancelCreatorClassify);
     }
     if (elements.reviewRejectsBtn) {
         elements.reviewRejectsBtn.addEventListener('click', () => {
@@ -2785,6 +3345,7 @@ function setupEventListeners() {
         elements.sortSelect.value = state.sortMode || 'name';
         elements.sortSelect.addEventListener('change', () => {
             state.sortMode = elements.sortSelect.value || 'name';
+            saveViewPrefs();
             fetchPhotos();
         });
     }
@@ -2793,6 +3354,7 @@ function setupEventListeners() {
         elements.mediaTypeSelect.value = state.mediaType || 'all';
         elements.mediaTypeSelect.addEventListener('change', () => {
             state.mediaType = elements.mediaTypeSelect.value || 'all';
+            saveViewPrefs();
             fetchPhotos();
         });
     }
@@ -2817,28 +3379,53 @@ function setupEventListeners() {
     }
 
     if (elements.creatorSearchInput) {
+        // Filtering is local, but renderCreatorList() rebuilds the whole
+        // sidebar — no need to do that on every keystroke.
+        const runCreatorFilter = debounce(renderCreatorList, CREATOR_FILTER_DEBOUNCE_MS);
         elements.creatorSearchInput.addEventListener('input', (e) => {
             state.creatorSearchQuery = e.target.value.trim();
-            renderCreatorList();
+            runCreatorFilter();
         });
     }
 
     elements.gridNormal.addEventListener('click', () => {
-        elements.galleryGrid.classList.remove('large');
-        elements.gridNormal.classList.add('active');
-        elements.gridLarge.classList.remove('active');
+        applyGridSize('normal');
+        saveViewPrefs();
     });
 
     elements.gridLarge.addEventListener('click', () => {
-        elements.galleryGrid.classList.add('large');
-        elements.gridLarge.classList.add('active');
-        elements.gridNormal.classList.remove('active');
+        applyGridSize('large');
+        saveViewPrefs();
     });
 
     elements.refreshBtn.addEventListener('click', () => {
         initApp();
         showToast('Refreshed gallery archive');
     });
+
+    if (elements.trashBtn) {
+        elements.trashBtn.addEventListener('click', openTrashModal);
+    }
+    if (elements.closeTrashModalBtn) {
+        elements.closeTrashModalBtn.addEventListener('click', closeTrashModal);
+    }
+    bindModalOverlayDismiss(elements.trashModal, closeTrashModal);
+    if (elements.trashEmptyBtn) {
+        elements.trashEmptyBtn.addEventListener('click', async () => {
+            if (!state.trashCount) {
+                showToast('Trash is already empty');
+                return;
+            }
+            await purgeTrash({ all: true });
+            await loadTrashList();
+        });
+    }
+    if (elements.trashPurgeExpiredBtn) {
+        elements.trashPurgeExpiredBtn.addEventListener('click', async () => {
+            await purgeTrash({ expired: true });
+            await loadTrashList();
+        });
+    }
 
     // Infinite scroll — load next page near bottom of window
     let scrollTick = false;
@@ -2873,38 +3460,14 @@ function setupEventListeners() {
     if (elements.scrapeClearPendingBtn) {
         elements.scrapeClearPendingBtn.addEventListener('click', clearPendingScrapeJobs);
     }
-    function updateScrapeModeUi() {
-        const latest = Boolean(elements.scrapeLatestMode?.checked);
-        const bounded = Boolean(elements.scrapeBoundedMode?.checked);
-        if (elements.scrapeMaxPosts) {
-            elements.scrapeMaxPosts.disabled = !(latest || bounded);
-        }
-        if (elements.scrapeFullDeep) {
-            elements.scrapeFullDeep.disabled = latest || bounded;
-        }
-        if (elements.scrapeBoundedMode && latest) {
-            elements.scrapeBoundedMode.checked = false;
-        }
-        if (elements.scrapeLatestMode && bounded && elements.scrapeLatestMode.checked === false) {
-            /* leave latest alone when only bounded toggled */
-        }
+    document.querySelectorAll('input[name="scrapeMode"]').forEach((radio) => {
+        radio.addEventListener('change', updateScrapeModeUi);
+    });
+    updateScrapeModeUi();
+    if (elements.scrapeSourceSelect) {
+        elements.scrapeSourceSelect.addEventListener('change', updateScrapeSourceUI);
     }
-    if (elements.scrapeBoundedMode) {
-        elements.scrapeBoundedMode.addEventListener('change', () => {
-            if (elements.scrapeBoundedMode.checked && elements.scrapeLatestMode) {
-                elements.scrapeLatestMode.checked = false;
-            }
-            updateScrapeModeUi();
-        });
-    }
-    if (elements.scrapeLatestMode) {
-        elements.scrapeLatestMode.addEventListener('change', () => {
-            if (elements.scrapeLatestMode.checked && elements.scrapeBoundedMode) {
-                elements.scrapeBoundedMode.checked = false;
-            }
-            updateScrapeModeUi();
-        });
-    }
+    updateScrapeSourceUI();
     if (elements.scrapeCreatorInput) {
         elements.scrapeCreatorInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') enqueueCreatorScrape();
@@ -2913,10 +3476,9 @@ function setupEventListeners() {
     elements.batchPromptBtn.addEventListener('click', startBatchAnalyze);
 
     if (elements.followingSearchInput) {
+        const runFollowingSearch = debounce((q) => loadFollowingPicker(q), 200);
         elements.followingSearchInput.addEventListener('input', (e) => {
-            const q = e.target.value.trim();
-            clearTimeout(followingSearchTimer);
-            followingSearchTimer = setTimeout(() => loadFollowingPicker(q), 200);
+            runFollowingSearch(e.target.value.trim());
         });
     }
 
@@ -3275,6 +3837,10 @@ function setupEventListeners() {
             closeNewCreatorModal();
             return;
         }
+        if (e.key === 'Escape' && isDisplayFlex(elements.trashModal)) {
+            closeTrashModal();
+            return;
+        }
         if (e.key === 'Escape' && state.creatorPanelOpen) {
             hideCreatorStylePanel();
             return;
@@ -3291,12 +3857,16 @@ function setupEventListeners() {
  * Toast: showToast('message') or showToast({ title, body, variant, duration })
  */
 function showToast(messageOrOpts, duration = 3000) {
-    if (!elements.toastContainer) return;
+    if (!elements.toastContainer) return null;
     const toast = document.createElement('div');
     let durationMs = duration;
+    let actionLabel = null;
+    let onAction = null;
     if (messageOrOpts && typeof messageOrOpts === 'object') {
         const { title, body, variant, duration: d } = messageOrOpts;
         durationMs = d != null ? d : 3500;
+        actionLabel = messageOrOpts.actionLabel || null;
+        onAction = typeof messageOrOpts.onAction === 'function' ? messageOrOpts.onAction : null;
         toast.className = `toast${variant ? ` ${variant}` : ''}`;
         if (title && body) {
             toast.innerHTML = `<div class="toast-title"></div><div class="toast-body"></div>`;
@@ -3309,10 +3879,33 @@ function showToast(messageOrOpts, duration = 3000) {
         toast.className = 'toast';
         toast.textContent = String(messageOrOpts ?? '');
     }
+
+    if (actionLabel && onAction) {
+        const actionRow = document.createElement('div');
+        actionRow.className = 'toast-actions';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'toast-action-btn';
+        btn.textContent = actionLabel;
+        btn.addEventListener('click', () => {
+            toast.remove();
+            onAction();
+        });
+        actionRow.appendChild(btn);
+        toast.appendChild(actionRow);
+    }
+
     elements.toastContainer.appendChild(toast);
-    setTimeout(() => {
-        toast.remove();
-    }, durationMs);
+    // Keep the stack readable — batch/classify polls can push many toasts
+    while (elements.toastContainer.children.length > 4) {
+        elements.toastContainer.firstElementChild.remove();
+    }
+    if (durationMs > 0) {
+        setTimeout(() => {
+            toast.remove();
+        }, durationMs);
+    }
+    return toast;
 }
 
 // Instagram sync helpers
@@ -3532,7 +4125,7 @@ async function refreshScrapeStatusOnce() {
                 );
             });
             elements.scrapeQueueList.innerHTML = rows.length
-                ? rows.map((r) => `<div class="scrape-queue-row">${r}</div>`).join('')
+                ? rows.map((r) => `<div class="scrape-queue-row">${escapeHtml(r)}</div>`).join('')
                 : '';
         }
 
@@ -3709,29 +4302,89 @@ async function syncLatestSelectedCreator() {
     }
 }
 
+/** Currently selected scrape mode from the segmented control. */
+function selectedScrapeMode() {
+    const checked = document.querySelector('input[name="scrapeMode"]:checked');
+    return checked ? checked.value : 'full';
+}
+
+/**
+ * Map the segmented control to the enqueue API.
+ *
+ * The API takes `mode` + `deep` + `catch_up_only`, and `mode: "latest"` is
+ * silently upgraded to full+deep unless `catch_up_only` is set — which the old
+ * checkbox UI could not send, so "Latest" never actually meant latest.
+ */
+function scrapeModePayload() {
+    const mode = selectedScrapeMode();
+    const maxPosts = parseInt(elements.scrapeMaxPosts?.value || '50', 10) || 50;
+    if (mode === 'catch_up') {
+        return { mode: 'latest', deep: false, catch_up_only: true, max_posts: maxPosts };
+    }
+    if (mode === 'bounded') {
+        return { mode: 'bounded', deep: false, max_posts: maxPosts };
+    }
+    // Full archive: no ceiling, so the server applies FULL_SCRAPE_MAX_POSTS
+    return { mode: 'full', deep: true };
+}
+
+/** Max-posts only applies to Catch-up and Bounded. */
+function updateScrapeModeUi() {
+    const mode = selectedScrapeMode();
+    if (elements.scrapeMaxPostsRow) {
+        elements.scrapeMaxPostsRow.style.display = mode === 'full' ? 'none' : '';
+    }
+    document.querySelectorAll('#scrapeModeGroup .segmented-option').forEach((opt) => {
+        const input = opt.querySelector('input[name="scrapeMode"]');
+        opt.classList.toggle('active', Boolean(input && input.checked));
+    });
+}
+
+/**
+ * Per-source input guidance. Reddit is topic-scoped (a subreddit becomes the
+ * archive folder), which is different enough from a handle to be worth saying.
+ */
+const SCRAPE_SOURCE_META = {
+    instagram: {
+        placeholder: '@creator handle',
+        hint: 'Jobs never run in parallel (Instagram rate limits).',
+    },
+    x: {
+        placeholder: '@handle  or  x.com/handle',
+        hint: 'Pulls the /media timeline. Needs X_COOKIES_FILE in .env — use a throwaway account. Lands in <handle>__x.',
+    },
+    reddit: {
+        placeholder: 'r/subreddit  or  u/username',
+        hint: 'Works without login. A subreddit becomes the folder (r_<sub>__reddit); the original poster is kept in each file’s metadata.',
+    },
+};
+
+function scrapeSourceValue() {
+    return (elements.scrapeSourceSelect?.value || 'instagram').trim().toLowerCase();
+}
+
+function updateScrapeSourceUI() {
+    const meta = SCRAPE_SOURCE_META[scrapeSourceValue()] || SCRAPE_SOURCE_META.instagram;
+    if (elements.scrapeCreatorInput) {
+        elements.scrapeCreatorInput.placeholder = meta.placeholder;
+    }
+    if (elements.scrapeSourceHint) {
+        elements.scrapeSourceHint.textContent = meta.hint;
+    }
+}
+
 async function enqueueCreatorScrape() {
     const username = (elements.scrapeCreatorInput?.value || '').trim().replace(/^@/, '');
     if (!username) {
         showToast('Enter a creator handle');
         return;
     }
-    const latest = Boolean(elements.scrapeLatestMode?.checked);
-    const bounded = Boolean(elements.scrapeBoundedMode?.checked);
-    let mode = 'full';
-    if (latest) mode = 'latest';
-    else if (bounded) mode = 'bounded';
-    // Full mode: deep defaults ON. "Latest" without catch_up_only is upgraded
-    // server-side to full+deep so partial archives still get older missing posts.
-    const deep = mode === 'full' ? Boolean(elements.scrapeFullDeep?.checked ?? true) : true;
-    const maxPosts = parseInt(elements.scrapeMaxPosts?.value || '50', 10);
     const body = {
         username,
-        mode,
-        deep,
+        source: scrapeSourceValue(),
+        ...scrapeModePayload(),
         include_videos: syncIncludeVideosValue(),
     };
-    // Only bounded keeps a low ceiling. latest is upgraded server-side unless catch_up_only.
-    if (mode === 'bounded') body.max_posts = maxPosts || 50;
     try {
         const res = await fetch('/api/scrape/enqueue', {
             method: 'POST',
@@ -3819,16 +4472,19 @@ async function clearPendingScrapeJobs() {
     }
 }
 
-let followingSearchTimer = null;
-
 async function loadFollowingPicker(search = '') {
     if (!elements.followingList) return;
     elements.followingList.innerHTML = '<div class="following-empty">Loading…</div>';
+    if (state.followingRequest) state.followingRequest.abort();
+    const controller = new AbortController();
+    state.followingRequest = controller;
     try {
         const params = new URLSearchParams();
         if (search) params.set('search', search);
         params.set('limit', '100');
-        const res = await fetch('/api/following?' + params.toString());
+        const res = await fetch('/api/following?' + params.toString(), {
+            signal: controller.signal
+        });
         const data = await res.json();
         const accounts = data.accounts || [];
         if (!accounts.length) {
@@ -3846,13 +4502,14 @@ async function loadFollowingPicker(search = '') {
             const privateBadge = acct.is_private
                 ? '<span class="following-private">Private</span>'
                 : '';
+            // full_name is arbitrary Instagram-supplied text — always escape
             row.innerHTML = `
                 <div class="following-main">
-                    <span class="following-user">@${username}</span>
-                    <span class="following-name">${acct.full_name || ''}</span>
+                    <span class="following-user">@${escapeHtml(username)}</span>
+                    <span class="following-name">${escapeHtml(acct.full_name || '')}</span>
                     ${privateBadge}
                 </div>
-                <div class="following-meta">${acct.media_count ?? '—'} posts · ${formatFollowers(acct.followers_count)}</div>
+                <div class="following-meta">${escapeHtml(acct.media_count ?? '—')} posts · ${escapeHtml(formatFollowers(acct.followers_count))}</div>
             `;
             row.addEventListener('click', () => {
                 elements.followingList.querySelectorAll('.following-row').forEach((r) => {
@@ -3868,8 +4525,13 @@ async function loadFollowingPicker(search = '') {
             elements.followingList.appendChild(row);
         });
     } catch (err) {
+        if (err.name === 'AbortError') return;
         elements.followingList.innerHTML =
             '<div class="following-empty">Failed to load following list</div>';
+    } finally {
+        if (state.followingRequest === controller) {
+            state.followingRequest = null;
+        }
     }
 }
 
@@ -4065,13 +4727,60 @@ async function startSyncFollowing() {
     }
 }
 
+/**
+ * Render one job chip. Long jobs used to report progress by firing a toast
+ * every 3–4 seconds for their whole run — hours, for a big batch. A persistent
+ * chip shows the same information without the spam, and gives cancel a home.
+ */
+function renderJobChip(kind, { active, title, sub, completed, total, cancellable, cancelled }) {
+    const chip = elements[`${kind}JobChip`];
+    if (!chip) return;
+    if (!active) {
+        chip.style.display = 'none';
+        return;
+    }
+    chip.style.display = 'flex';
+
+    const titleEl = elements[`${kind}JobChipTitle`];
+    const subEl = elements[`${kind}JobChipSub`];
+    const fillEl = elements[`${kind}JobChipFill`];
+    const iconEl = elements[`${kind}JobChipIcon`];
+    const cancelEl = elements[`${kind}JobChipCancel`];
+
+    if (titleEl) titleEl.textContent = title;
+    if (subEl) subEl.textContent = sub || '';
+    if (fillEl) {
+        const pct = total ? Math.min(100, Math.round((completed / total) * 100)) : 0;
+        fillEl.style.width = `${pct}%`;
+    }
+    if (iconEl) iconEl.classList.toggle('spinning', !cancelled);
+    if (cancelEl) {
+        cancelEl.style.display = cancellable ? '' : 'none';
+        cancelEl.disabled = Boolean(cancelled);
+        cancelEl.textContent = cancelled ? 'Stopping…' : 'Cancel';
+    }
+}
+
+function jobPct(completed, total) {
+    return total ? Math.round((completed / total) * 100) : 0;
+}
+
 async function pollBatchStatus() {
     try {
         const res = await fetch('/api/prompt/batch/status');
         const data = await res.json();
         if (data.running) {
-            const pct = data.total ? Math.round((data.completed / data.total) * 100) : 0;
-            showToast(`Batch analyze: ${data.completed}/${data.total} (${pct}%)`, 1200);
+            const done = data.completed + (data.failed || 0);
+            renderJobChip('batch', {
+                active: true,
+                title: data.cancel_requested ? 'Batch analyze — stopping' : 'Batch analyze',
+                sub: `${done}/${data.total} (${jobPct(done, data.total)}%)` +
+                    (data.failed ? ` · ${data.failed} failed` : ''),
+                completed: done,
+                total: data.total,
+                cancellable: true,
+                cancelled: Boolean(data.cancel_requested)
+            });
             if (!state.batchPollTimer) {
                 state.batchPollTimer = setInterval(pollBatchStatus, 4000);
             }
@@ -4080,14 +4789,43 @@ async function pollBatchStatus() {
                 clearInterval(state.batchPollTimer);
                 state.batchPollTimer = null;
             }
-            if (data.completed > 0) {
-                showToast(`Batch done — ${data.completed} analyzed, ${data.failed} failed`);
+            renderJobChip('batch', { active: false });
+            // Only announce on a running → stopped transition we observed
+            if (state.batchWasRunning) {
+                if (data.cancelled) {
+                    showToast({
+                        title: 'Batch cancelled',
+                        body: `${data.completed} analyzed · ${data.pending || 0} left unanalyzed`
+                    });
+                } else {
+                    showToast({
+                        title: 'Batch complete',
+                        body: `${data.completed} analyzed` + (data.failed ? ` · ${data.failed} failed` : ''),
+                        variant: 'success'
+                    });
+                }
                 await fetchStats();
                 await fetchPhotos();
             }
         }
+        state.batchWasRunning = Boolean(data.running);
     } catch (err) {
         console.error('Batch status error:', err);
+    }
+}
+
+async function cancelBatchAnalyze() {
+    try {
+        const res = await fetch('/api/prompt/batch/cancel', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        showToast(
+            data.status === 'cancelling'
+                ? 'Stopping after the current photo…'
+                : 'No batch job running'
+        );
+        pollBatchStatus();
+    } catch (err) {
+        showToast('Cancel failed');
     }
 }
 
@@ -4103,7 +4841,12 @@ async function startBatchAnalyze() {
         });
         const data = await res.json();
         if (res.ok && data.status === 'started') {
-            showToast(`Batch started — ${data.pending} photos queued`);
+            // Mark so the completion toast fires even for the first job this session
+            state.batchWasRunning = true;
+            showToast({
+                title: 'Batch analyze started',
+                body: `${data.pending} photo(s) queued — progress in the corner chip`
+            });
             pollBatchStatus();
         } else if (data.status === 'nothing_to_do') {
             showToast('All photos already analyzed');
@@ -4124,11 +4867,19 @@ async function pollClassifyStatus() {
         updateClassifyPanelUi();
 
         if (data.running) {
-            const pct = data.total ? Math.round((data.completed / data.total) * 100) : 0;
-            showToast(
-                `Classify @${data.creator}: ${data.completed}/${data.total} (${pct}%) · keep ${data.kept || 0} · reject ${data.rejected || 0}`,
-                1200
-            );
+            renderJobChip('classify', {
+                active: true,
+                title: data.cancel_requested
+                    ? `Classifying @${data.creator} — stopping`
+                    : `Classifying @${data.creator}`,
+                sub: `${data.completed}/${data.total} (${jobPct(data.completed, data.total)}%)` +
+                    ` · keep ${data.kept || 0} · reject ${data.rejected || 0}` +
+                    (data.failed ? ` · err ${data.failed}` : ''),
+                completed: data.completed,
+                total: data.total,
+                cancellable: true,
+                cancelled: Boolean(data.cancel_requested)
+            });
             if (!state.classifyPollTimer) {
                 state.classifyPollTimer = setInterval(pollClassifyStatus, 3000);
             }
@@ -4139,6 +4890,7 @@ async function pollClassifyStatus() {
                 clearInterval(state.classifyPollTimer);
                 state.classifyPollTimer = null;
             }
+            renderJobChip('classify', { active: false });
             // Only celebrate completion when we observed a running → stopped transition
             if (wasRunning) {
                 const who = data.creator || 'creator';

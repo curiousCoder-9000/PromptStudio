@@ -95,6 +95,12 @@ FAVORITES_FILE = os.path.join(SAVED_DIR, "favorites.json")
 THUMB_DIR = os.path.join(SAVED_DIR, "_thumbs")
 PROMPT_HISTORY_MAX = int(os.environ.get("PROMPT_HISTORY_MAX", "3"))
 
+# Soft delete — UI deletes move media to _trash/ so they can be restored.
+# Set PROMPTSTUDIO_TRASH=0 to go back to immediate unlink.
+TRASH_ENABLED = _env_bool("PROMPTSTUDIO_TRASH", "1")
+TRASH_DIR = os.path.join(SAVED_DIR, "_trash")
+TRASH_RETENTION_DAYS = int(os.environ.get("PROMPTSTUDIO_TRASH_DAYS", "30"))
+
 # Scraping behaviour (anti-ban pacing)
 DOWNLOAD_DELAY_SEC = float(os.environ.get("IG_DOWNLOAD_DELAY", "2.5"))
 POST_DELAY_MIN_SEC = float(os.environ.get("IG_POST_DELAY_MIN", "4"))
@@ -117,6 +123,42 @@ QUEUE_PRIORITY_UNSURE = int(os.environ.get("IG_QUEUE_PRIORITY_UNSURE", "40"))
 QUEUE_PRIORITY_DEFAULT = int(os.environ.get("IG_QUEUE_PRIORITY_DEFAULT", "10"))
 POST_RANK_ENABLED = _env_bool("IG_POST_RANK", "1")
 POST_SCAN_FACTOR = float(os.environ.get("IG_POST_SCAN_FACTOR", "3"))
+
+# ---------------------------------------------------------------------------
+# Multi-source scraping (X / Reddit via gallery-dl)
+# ---------------------------------------------------------------------------
+# Archive folders stay one level deep (storage/db.py parses creator as the first
+# path segment), so non-Instagram sources are disambiguated by folder *suffix*
+# instead of a nested <source>/<creator> path. Instagram keeps bare handles so
+# the existing archive is untouched.
+FOLDER_SUFFIX_NON_DEFAULT = _env_bool("SCRAPE_FOLDER_SUFFIX", "1")
+FOLDER_SUFFIX_SEP = os.environ.get("SCRAPE_FOLDER_SUFFIX_SEP", "__")
+
+# gallery-dl binary. Left as a bare name so a venv/PATH install just works.
+GALLERY_DL_BIN = os.environ.get("GALLERY_DL_BIN", "gallery-dl")
+GALLERY_DL_TIMEOUT_SEC = int(os.environ.get("GALLERY_DL_TIMEOUT", str(2 * 60 * 60)))
+# Optional cookie files (Netscape format). X needs one; Reddit does not.
+GALLERY_DL_COOKIES_X = os.path.expanduser(os.environ.get("X_COOKIES_FILE", ""))
+GALLERY_DL_COOKIES_REDDIT = os.path.expanduser(
+    os.environ.get("REDDIT_COOKIES_FILE", "")
+)
+# Or pull cookies straight from a browser profile: "firefox", "chrome:Default".
+GALLERY_DL_COOKIES_FROM_BROWSER = os.environ.get("SCRAPE_COOKIES_FROM_BROWSER", "")
+# Extra raw gallery-dl args, whitespace-split (escape hatch for per-site tuning).
+GALLERY_DL_EXTRA_ARGS = os.environ.get("GALLERY_DL_EXTRA_ARGS", "")
+
+# Pacing. Defaults are deliberately gentler than gallery-dl's own so a first run
+# on a cookie-authenticated account doesn't look like a scraper.
+SCRAPE_SLEEP_SEC = float(os.environ.get("SCRAPE_SLEEP", "2.0"))
+SCRAPE_SLEEP_REQUEST_SEC = float(os.environ.get("SCRAPE_SLEEP_REQUEST", "1.5"))
+SCRAPE_SLEEP_429_SEC = float(os.environ.get("SCRAPE_SLEEP_429", "90"))
+SCRAPE_RETRIES = int(os.environ.get("SCRAPE_RETRIES", "3"))
+# gallery-dl's own catch-up: stop after N consecutive already-downloaded files.
+SCRAPE_ABORT_AFTER_KNOWN = int(os.environ.get("SCRAPE_ABORT_AFTER_KNOWN", "0"))
+
+# X: pull the media timeline (photos/videos only) rather than the full timeline.
+X_MEDIA_TIMELINE_ONLY = _env_bool("X_MEDIA_TIMELINE_ONLY", "1")
+X_INCLUDE_RETWEETS = _env_bool("X_INCLUDE_RETWEETS", "0")
 
 # Public-safe fashion/model defaults — override in .env for personal filters
 DEFAULT_CAPTION_KEYWORDS = _env_csv(
@@ -144,7 +186,13 @@ CLASSIFY_REEL_UNCERTAIN_HI = float(os.environ.get("CLASSIFY_REEL_UNCERTAIN_HI", 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".webp", ".png")
 VIDEO_EXTENSIONS = (".mp4", ".webm")
 MEDIA_EXTENSIONS = IMAGE_EXTENSIONS + VIDEO_EXTENSIONS
-EXCLUDED_FOLDERS = {"_no_person_detected", "_thumbs", "_generations", "_classify"}
+EXCLUDED_FOLDERS = {
+    "_no_person_detected",
+    "_thumbs",
+    "_generations",
+    "_classify",
+    "_trash",
+}
 METADATA_SUFFIX = ".meta.json"
 MAX_PHOTOS_API_PAGE = int(os.environ.get("PROMPTSTUDIO_PHOTO_PAGE", "300"))
 THUMB_MAX_SIZE = int(os.environ.get("PROMPTSTUDIO_THUMB_SIZE", "400"))

@@ -182,7 +182,7 @@ def _own_profile(L: instaloader.Instaloader) -> instaloader.Profile:
         L.context,
         {"id": str(userid), "username": SESSION_USER, "pk": str(userid)},
     )
-    profile._has_full_metadata = True  # noqa: SLF001 — skip metadata fetch
+    profile._has_full_metadata = True
     _log(f"Own profile built from session (id={userid}, @{SESSION_USER}) — no web_profile_info")
     return profile
 

@@ -98,7 +98,7 @@ class ClassifyJobManager:
         creator = (creator or "").strip().lstrip("@")
         if not creator:
             return []
-        if creator in EXCLUDED_FOLDERS or creator.startswith(".") or creator.startswith("_"):
+        if creator in EXCLUDED_FOLDERS or creator.startswith((".", "_")):
             return []
 
         folder = os.path.join(os.path.expanduser(SAVED_DIR), creator)

@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the floor claimed by the README; 3.13 is the current release.
+        python-version: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q
+
+  ui:
+    # Browser suites: boot the server, drive headless Chrome over CDP.
+    # Slower than the unit tests, so it runs as its own job.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          # Node 22+ provides a global WebSocket, so the suites need no npm deps
+          node-version: "22"
+      - run: pip install -r requirements.txt
+      - name: Run browser UI suites
+        env:
+          PYTHON: python
+          # ubuntu-latest ships Chrome at this path via setup-chrome-less runners
+          CHROME_BIN: /usr/bin/google-chrome
+        run: ./tests/ui/run.sh

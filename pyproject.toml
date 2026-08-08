@@ -1,0 +1,59 @@
+[project]
+name = "promptstudio"
+version = "2.0.0"
+description = "Local AI Vision Prompt Studio for personal photo archives"
+requires-python = ">=3.10"
+dependencies = [
+    "instaloader>=4.12",
+    "opencv-python-headless>=4.8",
+    "Pillow>=10.0",
+    "python-dotenv>=1.0",
+    # X / Reddit scraping. Only needed for those sources, but kept a hard
+    # dependency to match requirements.txt; move to [project.optional-dependencies]
+    # if Instagram-only installs should stay lean.
+    "gallery-dl>=1.32",
+]
+
+[tool.setuptools]
+packages = ["promptstudio"]
+
+# ── pytest ───────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# tests/ui holds browser-driven suites that need a live server + Chrome
+norecursedirs = ["tests/ui", ".venv", "docs", "scripts"]
+addopts = "-q --strict-markers"
+markers = [
+    "slow: takes more than a second (deselect with '-m \"not slow\"')",
+]
+
+# ── ruff ─────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+exclude = [".venv", "venv", "env", "docs"]
+
+[tool.ruff.lint]
+# Deliberately bug-focused, not style-modernizing. The codebase uses
+# typing.Dict/Optional throughout; rewriting that to PEP 585/604 would churn
+# every file for no behavioural gain, so UP* stays off. Add rules as the
+# codebase is touched, not in one sweep.
+select = [
+    "E9",     # syntax / IO errors
+    "F",      # pyflakes: undefined names, unused imports, bad f-strings
+    "B",      # bugbear: likely bugs (mutable defaults, unused loop vars, …)
+    "I",      # import sorting
+    "PIE",    # misc lint (duplicate startswith, …)
+    "SIM118", # `k in dict` over `k in dict.keys()`
+    "RUF100", # unused noqa
+]
+ignore = [
+    "B008",  # function call in default arg — used intentionally for config defaults
+    "B904",  # raise ... from err — noisy on this codebase's broad handlers
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Thin CLI wrappers do sys.path juggling before importing the package
+"scripts/*" = ["E402"]
+"tests/conftest.py" = ["E402"]
+"tests/*" = ["E402"]

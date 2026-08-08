@@ -4,8 +4,9 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from promptstudio.config import EXCLUDED_FOLDERS, SAVED_DIR
+from promptstudio.config import EXCLUDED_FOLDERS, SAVED_DIR, TRASH_ENABLED
 from promptstudio.storage.db import (
+    DEFAULT_SOURCE,
     ArchiveIndex,
     normalize_rel_path,
     taken_at_for_image,
@@ -23,7 +24,7 @@ def ensure_creator_folder(name: str, base_dir: str = SAVED_DIR) -> Dict[str, Any
     clean = re.sub(r"[^a-zA-Z0-9_\.]", "", raw)
     if not clean:
         raise ValueError("Invalid creator handle name")
-    if clean in EXCLUDED_FOLDERS or clean.startswith("_") or clean.startswith("."):
+    if clean in EXCLUDED_FOLDERS or clean.startswith(("_", ".")):
         raise ValueError(f"Reserved or excluded creator name: {clean}")
     path = os.path.join(os.path.expanduser(base_dir), clean)
     existed = os.path.isdir(path)
@@ -155,11 +156,21 @@ class ArchiveStore:
         return int(row["c"])
 
     def resolve_path(self, rel_path: str) -> Optional[str]:
-        full = os.path.normpath(os.path.join(self.base_dir, rel_path))
+        """Resolve an archive-relative path, or None if it escapes the archive.
+
+        A plain `startswith(base)` check is not containment: with base
+        `~/Pictures/InstagramSaved`, the path `../InstagramSaved_backup/x.jpg`
+        shares the prefix and would resolve outside the archive. Every media
+        route (`/media/…`, `/api/media/detail`, `DELETE /api/photo`) goes
+        through here, and CORS is `*`, so compare on path boundaries.
+        """
         base = os.path.normpath(self.base_dir)
-        if full.startswith(base) and os.path.isfile(full):
-            return full
-        return None
+        full = os.path.normpath(os.path.join(base, rel_path))
+        if full != base and not full.startswith(base + os.sep):
+            return None
+        if not os.path.isfile(full):
+            return None
+        return full
 
     def stats(self) -> Dict[str, int]:
         return self._index.stats()
@@ -167,10 +178,20 @@ class ArchiveStore:
     def create_creator(self, name: str) -> str:
         return ensure_creator_folder(name, base_dir=self.base_dir)["name"]
 
-    def delete_photo(self, rel_path: str) -> Optional[str]:
+    def delete_photo(
+        self, rel_path: str, *, permanent: Optional[bool] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Delete a photo, moving it to `_trash/` unless permanent is requested.
+
+        Returns {"filename", "rel_path", "trash_id", "permanent"} or None when
+        the path does not resolve. Soft deletes capture the prompt bundle and
+        favorite flag into the trash manifest *before* clearing them, so a
+        restore brings back the full state.
+        """
         full = self.resolve_path(rel_path)
         if not full:
             return None
+        soft = TRASH_ENABLED if permanent is None else not permanent
         filename = os.path.basename(full)
         rel = rel_path.replace("\\", "/").lstrip("/")
         creator = os.path.basename(os.path.dirname(full))
@@ -178,6 +199,7 @@ class ArchiveStore:
         # Tombstone Instagram identity so future sync never re-downloads this post
         post_id: Optional[str] = None
         shortcode: Optional[str] = None
+        taken_at: Optional[str] = None
         try:
             c, pid, sc = self._index.get_photo_identity(rel)
             if c:
@@ -186,34 +208,86 @@ class ArchiveStore:
             shortcode = sc
         except Exception:
             pass
-        if not post_id and not shortcode:
-            try:
-                from promptstudio.storage.metadata import load_post_metadata
+        meta: Dict[str, Any] = {}
+        try:
+            from promptstudio.storage.metadata import load_post_metadata
 
-                meta = load_post_metadata(full) or {}
-                post_id = str(meta.get("post_id") or "") or None
-                shortcode = str(meta.get("shortcode") or "") or None
+            meta = load_post_metadata(full) or {}
+        except Exception:
+            meta = {}
+        if not post_id and not shortcode:
+            post_id = str(meta.get("post_id") or "") or None
+            shortcode = str(meta.get("shortcode") or "") or None
+        taken_at = str(meta.get("taken_at") or "") or None
+        # Which platform this media came from — the tombstone must be scoped to
+        # it, or an X/Reddit id can shadow an Instagram one (and vice versa).
+        platform = str(meta.get("source") or "").strip().lower()
+        if not platform:
+            try:
+                platform = self._index.get_photo_source(rel)
             except Exception:
-                pass
+                platform = ""
+
+        tombstoned = False
         if post_id or shortcode:
             try:
-                self._index.record_deleted_post(
-                    creator,
-                    shortcode=shortcode,
-                    post_id=post_id,
-                    rel_path=rel,
-                    source="ui",
+                tombstoned = bool(
+                    self._index.record_deleted_post(
+                        creator,
+                        shortcode=shortcode,
+                        post_id=post_id,
+                        rel_path=rel,
+                        source="ui",
+                        platform=platform or DEFAULT_SOURCE,
+                    )
                 )
             except Exception:
+                tombstoned = False
+
+        # Snapshot restorable state before anything is cleared
+        favorite = False
+        prompt_bundle: Optional[Dict[str, Any]] = None
+        if soft:
+            try:
+                from promptstudio.storage.favorites import FavoritesStore
+
+                favorite = bool(FavoritesStore().is_favorite(rel))
+            except Exception:
+                favorite = False
+            try:
+                from promptstudio.prompts.cache import PromptCache
+
+                prompt_bundle = PromptCache().get(rel, filename)
+            except Exception:
+                prompt_bundle = None
+
+        trash_id: Optional[str] = None
+        if soft:
+            from promptstudio.storage.trash import TrashStore
+
+            entry = TrashStore().move_to_trash(
+                full_path=full,
+                rel_path=rel,
+                creator=creator,
+                favorite=favorite,
+                prompt_bundle=prompt_bundle,
+                post_id=post_id,
+                shortcode=shortcode,
+                tombstoned=tombstoned,
+                taken_at=taken_at,
+                platform=platform or DEFAULT_SOURCE,
+            )
+            trash_id = str(entry.get("id") or "") or None
+        else:
+            os.remove(full)
+            try:
+                from promptstudio.storage.metadata import delete_metadata_for_image
+
+                delete_metadata_for_image(full)
+            except OSError:
                 pass
 
-        os.remove(full)
-        try:
-            from promptstudio.storage.metadata import delete_metadata_for_image
-
-            delete_metadata_for_image(full)
-        except OSError:
-            pass
+        # Thumbs are derived data — drop them either way; they regenerate on demand
         try:
             from promptstudio.storage.thumbs import resolve_thumb_file
 
@@ -222,8 +296,27 @@ class ArchiveStore:
                 os.remove(thumb)
         except OSError:
             pass
+
+        try:
+            from promptstudio.prompts.cache import PromptCache
+
+            PromptCache().delete(rel, filename)
+        except Exception as exc:
+            print(f"Warning: prompt cache delete failed for {rel}: {exc}")
+        try:
+            from promptstudio.storage.favorites import FavoritesStore
+
+            FavoritesStore().set_favorite(rel, False)
+        except Exception as exc:
+            print(f"Warning: favorite clear failed for {rel}: {exc}")
+
         self._index.delete_photo(rel_path)
-        return filename
+        return {
+            "filename": filename,
+            "rel_path": rel,
+            "trash_id": trash_id,
+            "permanent": not soft,
+        }
 
     def save_upload(self, creator: str, filename: str, content: bytes) -> str:
         target_dir = os.path.join(self.base_dir, creator)

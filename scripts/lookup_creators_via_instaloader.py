@@ -19,6 +19,7 @@ if sys.stdout and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import instaloader
+
 from promptstudio.config import EXCLUDED_FOLDERS, SAVED_DIR, SESSION_USER
 from promptstudio.scraping.session import create_instaloader, load_session
 
@@ -106,7 +107,7 @@ def fetch_real_profile_metadata():
             json.dump(following, f, indent=2, ensure_ascii=False)
         print(f"\nSaved {added_count} REAL Instagram profile entries to following_list.json.")
 
-    print(f"\nSummary:")
+    print("\nSummary:")
     print(f"  Successfully fetched & added: {added_count}")
     print(f"  Failed / Not found on IG: {len(failed_handles)}")
     if failed_handles:

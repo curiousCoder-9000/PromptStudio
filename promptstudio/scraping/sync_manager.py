@@ -73,6 +73,7 @@ class SyncManager:
             "cancel_requested": False,
             "scrape_job_id": None,
             "scrape_username": None,
+            "scrape_source": None,
         }
 
     def _recover_stuck_running(self) -> None:
@@ -86,6 +87,7 @@ class SyncManager:
             self._status["cancel_requested"] = False
             self._status["scrape_job_id"] = None
             self._status["scrape_username"] = None
+            self._status["scrape_source"] = None
             self._save_status()
 
     def _save_status(self) -> None:
@@ -146,16 +148,23 @@ class SyncManager:
             )
             self._save_status()
 
-    def _set_scrape_meta(self, job_id: Optional[str], username: Optional[str]) -> None:
+    def _set_scrape_meta(
+        self,
+        job_id: Optional[str],
+        username: Optional[str],
+        source: Optional[str] = None,
+    ) -> None:
         with self._job_lock:
             self._status["scrape_job_id"] = job_id
             self._status["scrape_username"] = username
+            self._status["scrape_source"] = source
             self._save_status()
 
     def _clear_scrape_meta(self) -> None:
         with self._job_lock:
             self._status["scrape_job_id"] = None
             self._status["scrape_username"] = None
+            self._status["scrape_source"] = None
             self._status["cancel_requested"] = False
             self._save_status()
 
@@ -179,6 +188,7 @@ class SyncManager:
                 "cancel_requested": False,
                 "scrape_job_id": None,
                 "scrape_username": None,
+                "scrape_source": None,
             }
             self._save_status()
 
@@ -228,6 +238,7 @@ class SyncManager:
                     self._status["cancel_requested"] = False
                     self._status["scrape_job_id"] = None
                     self._status["scrape_username"] = None
+                    self._status["scrape_source"] = None
                     self._save_status()
             except Exception as exc:
                 with self._job_lock:
@@ -239,6 +250,7 @@ class SyncManager:
                     self._status["cancel_requested"] = False
                     self._status["scrape_job_id"] = None
                     self._status["scrape_username"] = None
+                    self._status["scrape_source"] = None
                     self._save_status()
             finally:
                 self._cancel.clear()
@@ -284,7 +296,6 @@ class SyncManager:
         if not CREATOR_SCRAPE_QUEUE_ENABLED:
             return False
         from promptstudio.scraping.creator_queue import CreatorScrapeQueue
-        from promptstudio.scraping.downloader import InstagramDownloader
         from promptstudio.storage.archive import ensure_creator_folder
 
         q = CreatorScrapeQueue.get()
@@ -296,6 +307,7 @@ class SyncManager:
 
         job_id = job["id"]
         username = job.get("username") or ""
+        source_name = (job.get("source") or "instagram").strip().lower()
         mode = (job.get("mode") or "full").strip().lower()
         if mode not in ("full", "bounded", "latest"):
             mode = "full"
@@ -321,7 +333,7 @@ class SyncManager:
 
         def fn(log, on_rate_limit=None):
             q.mark_running(job_id)
-            self._set_scrape_meta(job_id, username)
+            self._set_scrape_meta(job_id, username, source_name)
             self._cancel.clear()
 
             if q.should_account_pause_before(job_id):
@@ -370,8 +382,13 @@ class SyncManager:
                         "errors": 0,
                     }
 
+            from promptstudio.config import SAVED_DIR
+            from promptstudio.scraping.sources import get_source
+            from promptstudio.scraping.sources.base import ScrapeOptions, SourceContext
+
             try:
-                ensure_creator_folder(username)
+                source = get_source(source_name)
+                target = source.parse_target(username)
             except ValueError as exc:
                 q.finalize_job(
                     job_id,
@@ -382,19 +399,34 @@ class SyncManager:
                 )
                 return {"errors": 1, "stop_reason": "error", "messages": [str(exc)]}
 
-            dl = InstagramDownloader(
+            try:
+                # Non-Instagram sources land in a suffixed folder (nina__x), so
+                # the folder must come from the target, not the raw handle.
+                ensure_creator_folder(target.folder)
+            except ValueError as exc:
+                q.finalize_job(
+                    job_id,
+                    status="error",
+                    error=str(exc),
+                    result=None,
+                    stop_reason="error",
+                )
+                return {"errors": 1, "stop_reason": "error", "messages": [str(exc)]}
+
+            ctx = SourceContext(
+                save_dir=SAVED_DIR,
                 log=log,
-                on_rate_limit=on_rate_limit,
                 should_cancel=self.is_cancel_requested,
+                on_rate_limit=on_rate_limit,
+            )
+            options = ScrapeOptions(
+                mode=mode,
+                deep=deep,
+                max_posts=max_posts,
+                include_videos=bool(include_videos),
             )
             try:
-                result = dl.sync_creator_feed(
-                    username,
-                    max_posts=max_posts,
-                    include_videos=bool(include_videos),
-                    mode=mode,
-                    deep=deep,
-                )
+                result = source.run(target, options, ctx)
             except Exception as exc:
                 from promptstudio.scraping.downloader import InstagramDownloader as IDL
 

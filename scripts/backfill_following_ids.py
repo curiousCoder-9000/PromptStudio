@@ -52,7 +52,7 @@ def main() -> None:
         L.context,
         {"id": str(own_id), "pk": str(own_id), "username": SESSION_USER},
     )
-    profile._has_full_metadata = True  # noqa: SLF001
+    profile._has_full_metadata = True
     _log(f"Walking followees as id={own_id} @{SESSION_USER}")
 
     updated = 0

@@ -47,6 +47,39 @@ def build_metadata_from_post(post, carousel_index: int = 0) -> Dict[str, Any]:
     }
 
 
+def build_metadata_from_normalized(post, carousel_index: int = 0) -> Dict[str, Any]:
+    """Build the same sidecar shape from a `NormalizedPost` (any source).
+
+    Deliberately identical in shape to `build_metadata_from_post` so the gallery,
+    prompt engine, and glam classifier read one format regardless of platform.
+    `owner_username` stays the archive folder key; the real author (which differs
+    for Reddit submissions and X retweets) goes in `author`.
+    """
+    taken_at = ""
+    if post.taken_at is not None:
+        try:
+            taken_at = post.taken_at.isoformat()
+        except Exception:
+            taken_at = str(post.taken_at)
+    meta: Dict[str, Any] = {
+        "post_id": str(post.post_id or ""),
+        "shortcode": str(post.shortcode or ""),
+        "owner_username": post.creator,
+        "taken_at": taken_at,
+        "caption": post.caption or "",
+        "post_url": post.post_url or "",
+        "is_video": bool(post.is_video),
+        "carousel_index": carousel_index,
+        "source": post.source,
+        "downloaded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if post.author and post.author != post.creator:
+        meta["author"] = post.author
+    if post.extra:
+        meta["source_extra"] = post.extra
+    return meta
+
+
 def delete_metadata_for_image(image_path: str) -> None:
     path = metadata_path_for_image(image_path)
     if os.path.isfile(path):

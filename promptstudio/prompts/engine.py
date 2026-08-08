@@ -152,7 +152,7 @@ def build_rewrite_prompt(structured: Dict[str, Any], style_prefix: str = "") -> 
             "You convert factual visual JSON into one continuous dense, sensual photorealistic "
             "image-generation prompt for Stable Diffusion / Flux. "
             "Use ONLY facts present in the JSON. Do not invent body parts, clothing, or setting. "
-            f"Intensity: high. Be descriptive about figure and outfit when supported by the JSON; stay anatomically realistic."
+            "Intensity: high. Be descriptive about figure and outfit when supported by the JSON; stay anatomically realistic."
         )
     elif rank == "low":
         tone = (

@@ -109,6 +109,104 @@ Agent map: [context.md](context.md). Phased plan: **scrape → organize → anal
 
 ---
 
+## Phase 7 — Delete safety & optimistic gallery ✅
+
+**Goal:** make the reject-review cleanup loop non-destructive and stop reloading the whole app on every mutation.
+
+| Deliverable | Status |
+|-------------|--------|
+| `promptstudio/storage/trash.py` — `_trash/<entry_id>/` + `entry.json` manifest | Done |
+| Restore returns file, sidecar, prompt bundle, favorite, index row, un-tombstones | Done |
+| APIs: `GET /api/trash`, `POST /api/trash/restore`, `POST /api/trash/purge`, `?permanent=1` | Done |
+| Trash modal (restore / delete forever / empty / purge expired) + nav count badge | Done |
+| Undo toast after single + bulk delete (`trash_id` round trip) | Done |
+| Optimistic gallery removal — no `initApp()`, scroll and loaded pages survive | Done |
+| Bulk delete progress counter; confirm copy says "Move to Trash" + flags favorites | Done |
+
+---
+
+## Phase 8 — Frontend correctness pass ✅
+
+**Goal:** stop the gallery from disagreeing with the active filters, and stop trusting third-party text.
+
+| Deliverable | Status |
+|-------------|--------|
+| `escapeHtml()` applied to every dynamic `innerHTML` site (handles, filenames, tags, prompt history, IG `full_name`, queue rows) | Done |
+| Search debounced 250 ms (`debounce()`), `Enter` bypasses it | Done |
+| `AbortController` on photos / creator-style / following fetches — newest request wins | Done |
+| Removed the `photosLoading` guard that silently dropped filter changes | Done |
+| Offset committed only on response, so aborts can't corrupt paging | Done |
+| Search spinner + `aria-busy` on the grid while fetching | Done |
+| Video detection unified on `isVideoFilename()` | Done |
+
+---
+
+## Phase 9 — Test harness & CI ✅
+
+**Goal:** stop verifying by hand. Cover the code where a silent failure is expensive.
+
+| Deliverable | Status |
+|-------------|--------|
+| `pyproject.toml` — pytest + ruff config (bug-focused rules, not style churn) | Done |
+| `requirements-dev.txt` | Done |
+| 107 unit tests: path containment, Range parsing, multipart, filters, trash | Done |
+| `tests/ui/` — 70 browser checks over CDP, no npm deps (Node 22+ `WebSocket`) | Done |
+| `.github/workflows/ci.yml` — lint + tests on 3.10/3.13 + UI job | Done |
+| **Fixed:** `resolve_path` prefix check let paths escape the archive | Done |
+
+**Found by writing the tests:** `resolve_path` used `full.startswith(base)`, which is
+not containment — with base `…/InstagramSaved`, the path `../InstagramSaved_backup/x.jpg`
+normalized to a sibling directory and resolved. Every media route
+(`/media/…`, `/api/media/detail`, `DELETE /api/photo`) goes through it, and CORS is `*`,
+so a page in the browser could read files from a prefix-sharing sibling — and with soft
+delete, move them. Now compared on path boundaries; `tests/test_paths.py` covers it.
+
+---
+
+## Phase 10 — Job feedback & control ✅
+
+**Goal:** make long jobs interruptible and stop reporting progress by toast spam.
+
+| Deliverable | Status |
+|-------------|--------|
+| Cancel for `BatchPromptManager` + `POST /api/prompt/batch/cancel` | Done |
+| `#jobChipStack` — one chip per job kind, progress bar + cancel | Done |
+| Batch + classify progress toasts dropped to start/finish only | Done |
+| `/api/prompt/batch/status` no longer calls `list_uncached()` per poll | Done |
+| Batch chip resumes after a browser refresh (jobs live server-side) | Done |
+
+Cancel is cooperative and checked *between* items: the in-flight Ollama call
+isn't interruptible, and abandoning it mid-write would poison the prompt cache.
+
+---
+
+## Phase 11 — Hot-path cost ✅
+
+| Deliverable | Status |
+|-------------|--------|
+| `prompts_ready` from the indexed `has_prompt` column in one SQL aggregate | Done |
+| `/api/stats` no longer walks the archive or loads the prompt cache | Done |
+| `count_prompts_ready()` kept as the exact reference (asserted equal in tests) | Done |
+
+---
+
+## Phase 12 — Polish ✅
+
+| Deliverable | Status |
+|-------------|--------|
+| View prefs (sort / media / grid / filter chips) persisted to `localStorage` | Done |
+| `gridSize` promoted from a bare DOM class into state so it can be restored | Done |
+| Restored prefs applied *before* the first `/api/photos` request | Done |
+| Skeleton cards + `aria-busy` while the first page loads (not on append) | Done |
+| Segmented sync-mode radio replaces 3 contradictory checkboxes | Done |
+| `catch_up_only` finally reachable from the UI | Done |
+
+Navigation state is deliberately **not** restored — selected creator, selection,
+and reject-review mode all start clean, so a refresh can't drop you into a
+destructive mode.
+
+---
+
 ## Future (optional)
 
 - CLIP embedding index for visual similarity (optional; not required for Comfy)
