@@ -251,7 +251,7 @@ def encode_image_for_classify(image_path: str, max_edge: int = CLASSIFY_MAX_EDGE
             im.save(buf, format="JPEG", quality=85, optimize=True)
             return base64.b64encode(buf.getvalue()).decode("utf-8")
     except Exception as e:
-        print(f"classify encode error for {image_path}: {e}")
+        log.warning("classify encode failed for %s: %s", image_path, e)
         return None
 
 
@@ -918,6 +918,9 @@ _GLAM_EVIDENCE_KEYS = (
     "sheet",
     "rollup_disagreement",
 )
+from promptstudio.logging_setup import get_logger
+
+log = get_logger(__name__)
 
 
 def persist_glam_score(rel_path: str, verdict: PostVerdict, full_path: str = "") -> None:
@@ -935,7 +938,7 @@ def persist_glam_score(rel_path: str, verdict: PostVerdict, full_path: str = "")
             sexy=1 if verdict.sexy_revealing_outfit else 0,
         )
     except Exception as e:
-        print(f"glam index write warning for {rel_path}: {e}")
+        log.warning("glam index write failed for %s: %s", rel_path, e)
     if full_path and os.path.isfile(full_path):
         try:
             from promptstudio.storage.metadata import load_post_metadata, save_post_metadata
@@ -966,7 +969,7 @@ def persist_glam_score(rel_path: str, verdict: PostVerdict, full_path: str = "")
             meta["glam"] = glam_block
             save_post_metadata(full_path, meta)
         except Exception as e:
-            print(f"glam sidecar write warning for {rel_path}: {e}")
+            log.warning("glam sidecar write failed for %s: %s", rel_path, e)
 
 
 def list_local_images(username: str, limit: int = 3) -> List[str]:

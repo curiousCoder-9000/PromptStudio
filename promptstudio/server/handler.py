@@ -1,5 +1,6 @@
 """PromptStudio HTTP API server."""
 
+import functools
 import http.server
 import json
 import os
@@ -23,6 +24,7 @@ from promptstudio.config import (
     SAVED_DIR,
     TRASH_ENABLED,
 )
+from promptstudio.logging_setup import get_logger
 from promptstudio.prompts.batch import BatchPromptManager
 from promptstudio.prompts.cache import PromptCache
 from promptstudio.prompts.engine import ENGINE_ID, build_export_variants, get_prompt_for_image
@@ -35,6 +37,8 @@ from promptstudio.server.multipart import parse_multipart_data
 from promptstudio.storage.archive import ArchiveStore, ensure_creator_folder
 from promptstudio.storage.favorites import FavoritesStore
 from promptstudio.storage.trash import TrashStore
+
+log = get_logger(__name__)
 
 _archive = ArchiveStore()
 _prompt_cache = PromptCache()
@@ -128,7 +132,56 @@ def _check_ollama_health(timeout: float = 1.5) -> Dict[str, Any]:
     return result
 
 
+def _error_boundary(fn):
+    """Turn an unhandled route exception into a logged JSON 500.
+
+    Without this the exception escapes to ``socketserver.handle_error``, which
+    prints a traceback and drops the socket. The browser then sees a network
+    failure indistinguishable from "server is down", so ``app.js`` reports the
+    app as offline instead of surfacing a bug.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return fn(self, *args, **kwargs)
+        except (BrokenPipeError, ConnectionResetError):
+            # Normal when a user seeks or closes a video mid-stream. Nothing to
+            # send, and it is not worth a traceback.
+            log.debug("client disconnected during %s %s", self.command, self.path)
+            self.close_connection = True
+            return None
+        except Exception:
+            log.exception("unhandled error in %s %s", self.command, self.path)
+            self._send_json_500()
+            return None
+
+    return wrapper
+
+
 class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
+    def handle_one_request(self):
+        # Handler instances are reused across keep-alive requests, so this must
+        # reset per request, not per connection.
+        self._response_started = False
+        return super().handle_one_request()
+
+    def send_response(self, code, message=None):
+        self._response_started = True
+        return super().send_response(code, message)
+
+    def _send_json_500(self) -> None:
+        """Best-effort 500. Silent if headers already went out."""
+        if getattr(self, "_response_started", False):
+            # Mid-body failure: the status line is already committed, so the
+            # only honest signal left is closing the connection.
+            self.close_connection = True
+            return
+        try:
+            self._send_json({"error": "internal server error"}, status=500)
+        except Exception:
+            self.close_connection = True
+
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -147,6 +200,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
 
+    @_error_boundary
     def do_HEAD(self):
         """Support HEAD for media (range probing); body omitted in _serve_local_file."""
         parsed = urllib.parse.urlparse(self.path)
@@ -276,6 +330,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(data)
                 remaining -= len(data)
 
+    @_error_boundary
     def do_DELETE(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/photo":
@@ -313,6 +368,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
         return super().do_DELETE()
 
+    @_error_boundary
     def do_PUT(self):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/prompt":
@@ -407,6 +463,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
         self.send_error(404, "Not found")
         return
 
+    @_error_boundary
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -1061,13 +1118,13 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     result["exports"] = (saved.get("exports") or {})
                 self._send_json(result)
             except (ValueError, json.JSONDecodeError, TypeError) as exc:
-                print(f"/api/prompt/mode-e bad request: {exc}")
+                log.warning("/api/prompt/mode-e bad request: %s", exc)
                 self.send_error(400, "Invalid JSON body")
             except Exception as exc:
                 import traceback
 
                 traceback.print_exc()
-                print(f"/api/prompt/mode-e error: {exc}")
+                log.exception("/api/prompt/mode-e failed")
                 try:
                     self._send_json({"status": "error", "message": str(exc)}, 500)
                 except Exception:
@@ -1218,7 +1275,10 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                         "denoise": denoise,
                         "steps": steps,
                         "cfg": cfg,
-                        "seed": seed,
+                        # The resolved seed, not the request's — `seed` is None
+                        # whenever the client did not pin one, which is the
+                        # default. ComfyJobManager.start() materialises it.
+                        "seed": _comfy.get_status().get("seed"),
                         "use_mode_e": use_mode_e and workflow == "pro",
                         "positive_prompt": str(positive)[:400],
                         "negative_prompt": str(negative)[:300],
@@ -1234,6 +1294,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         return super().do_POST()
 
+    @_error_boundary
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -1615,6 +1676,6 @@ def run_server(port: int = PORT, host: str = HOST):
     os.chdir(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     _archive.ensure_ready()
     with ThreadingHTTPServer((host, port), GalleryRequestHandler) as httpd:
-        print(f"PromptStudio running at http://localhost:{port} (threaded)")
-        print(f"Archive: {SAVED_DIR}")
+        log.info("PromptStudio running at http://localhost:%s (threaded)", port)
+        log.info("Archive: %s", SAVED_DIR)
         httpd.serve_forever()

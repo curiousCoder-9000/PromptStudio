@@ -219,6 +219,17 @@ EXCLUDED_FOLDERS = {
     "_trash",
 }
 METADATA_SUFFIX = ".meta.json"
+
+# ── Logging ──────────────────────────────────────────────────────
+# Lives beside the archive, not in the repo, so it survives a checkout and
+# never lands in git. Set PROMPTSTUDIO_LOG_FILE="" to disable file logging.
+LOG_LEVEL = os.environ.get("PROMPTSTUDIO_LOG_LEVEL", "INFO").strip().upper()
+LOG_FILE = os.environ.get(
+    "PROMPTSTUDIO_LOG_FILE", os.path.join(SAVED_DIR, "promptstudio.log")
+)
+LOG_MAX_BYTES = int(os.environ.get("PROMPTSTUDIO_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+LOG_BACKUPS = int(os.environ.get("PROMPTSTUDIO_LOG_BACKUPS", "3"))
+LOG_CONSOLE = _env_bool("PROMPTSTUDIO_LOG_CONSOLE", "1")
 MAX_PHOTOS_API_PAGE = int(os.environ.get("PROMPTSTUDIO_PHOTO_PAGE", "300"))
 THUMB_MAX_SIZE = int(os.environ.get("PROMPTSTUDIO_THUMB_SIZE", "400"))
 

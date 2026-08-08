@@ -6,6 +6,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from promptstudio.config import SYNC_STATE_FILE
+from promptstudio.logging_setup import get_logger
+from promptstudio.storage.atomic import atomic_write_json
+
+log = get_logger(__name__)
 
 
 class SyncCheckpoints:
@@ -26,11 +30,9 @@ class SyncCheckpoints:
 
     def save(self, state: Dict[str, Any]) -> None:
         try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2, ensure_ascii=False)
+            atomic_write_json(self.path, state)
         except OSError as e:
-            print(f"Error saving sync checkpoints: {e}")
+            log.error("saving sync checkpoints %s: %s", self.path, e)
 
     def get(self, username: str) -> Dict[str, Any]:
         return dict(self.load().get(username.lstrip("@").lower(), {}))

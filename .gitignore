@@ -32,6 +32,8 @@ favorites.json
 generations_index.json
 archive.db
 archive.db-*
+promptstudio.log
+promptstudio.log.*
 _thumbs/
 _generations/
 _no_person_detected/

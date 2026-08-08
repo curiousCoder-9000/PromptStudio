@@ -15,12 +15,15 @@ from promptstudio.config import (
     SAVED_DIR,
     VIDEO_EXTENSIONS,
 )
+from promptstudio.logging_setup import get_logger
 from promptstudio.scraping.outfit_classifier import (
     classify_media,
     ollama_reachable,
     persist_glam_score,
 )
 from promptstudio.storage.db import ArchiveIndex, normalize_rel_path
+
+log = get_logger(__name__)
 
 
 def _vision_busy_elsewhere() -> bool:
@@ -268,7 +271,7 @@ class ClassifyJobManager:
                     try:
                         verdict = classify_media(full)
                     except Exception as exc:
-                        print(f"Classify job error {rel}: {exc}")
+                        log.warning("classify failed for %s: %s", rel, exc)
                         with self._job_lock:
                             self._status["failed"] += 1
                             self._status["completed"] += 1
@@ -297,7 +300,7 @@ class ClassifyJobManager:
             except Exception as exc:
                 with self._job_lock:
                     self._status["error"] = str(exc)
-                print(f"Classify job crashed: {exc}")
+                log.exception("classify job crashed")
             finally:
                 with self._job_lock:
                     self._status["running"] = False

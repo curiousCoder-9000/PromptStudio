@@ -27,6 +27,10 @@ from promptstudio.config import (
     GENERATIONS_INDEX_FILE,
     SAVED_DIR,
 )
+from promptstudio.logging_setup import get_logger
+from promptstudio.storage.atomic import atomic_write_json
+
+log = get_logger(__name__)
 
 # Node ids in modelToimage_pro.api.json (Export API)
 PRO_NODE_LOAD_IMAGE = "4"
@@ -54,6 +58,23 @@ def check_comfy_health(timeout: float = 1.5) -> Dict[str, Any]:
             return {"comfy": False, "url": COMFYUI_URL, "detail": None}
 
 
+def resolve_seed(seed: Optional[int]) -> int:
+    """Materialise a concrete seed before it is used anywhere.
+
+    The workflow builders used to roll the random seed themselves when handed
+    ``None``. The value then existed only as a local: the graph got a real
+    number, the generation record got ``None``. Since the UI leaves the seed
+    lock off by default, that meant **every** generation made the normal way was
+    unreproducible — no regenerate, no A/B on one parameter, no seed comparison.
+
+    Resolve once, up front, and hand the same int to the graph, the job status,
+    and the saved record. Builders now require an int so this cannot regress.
+    """
+    if seed is None:
+        return random.randint(0, 2**32 - 1)
+    return int(seed)
+
+
 def aspect_to_size(aspect: str, base: int = 1024) -> Tuple[int, int]:
     aspect = (aspect or "4:5").strip()
     try:
@@ -78,16 +99,18 @@ def build_txt2img_workflow(
     positive: str,
     negative: str,
     *,
+    seed: int,
     width: int = 896,
     height: int = 1152,
     steps: int = 30,
     cfg: float = 7.0,
-    seed: Optional[int] = None,
     checkpoint: str = COMFYUI_CHECKPOINT,
 ) -> Dict[str, Any]:
-    """Minimal CheckpointLoader → KSampler API graph (legacy / txt2img fallback)."""
-    if seed is None:
-        seed = random.randint(0, 2**32 - 1)
+    """Minimal CheckpointLoader → KSampler API graph (legacy / txt2img fallback).
+
+    ``seed`` is required: see `resolve_seed`.
+    """
+    seed = int(seed)
     return {
         "3": {
             "class_type": "KSampler",
@@ -202,17 +225,18 @@ def build_pro_workflow(
     image_name: str,
     positive: str,
     negative: str,
-    seed: Optional[int] = None,
+    seed: int,
     steps: int = COMFYUI_DEFAULT_STEPS,
     cfg: float = COMFYUI_DEFAULT_CFG,
     denoise: float = COMFYUI_DEFAULT_DENOISE,
     checkpoint: Optional[str] = None,
     filename_prefix: str = "promptstudio_pro",
 ) -> Dict[str, Any]:
-    """Clone modelToimage_pro API graph and inject runtime inputs."""
+    """Clone modelToimage_pro API graph and inject runtime inputs.
+
+    ``seed`` is required: see `resolve_seed`.
+    """
     workflow = copy.deepcopy(load_pro_workflow_template())
-    if seed is None:
-        seed = random.randint(0, 2**32 - 1)
     seed = int(seed)
 
     def node(nid: str) -> Dict[str, Any]:
@@ -270,11 +294,9 @@ class GenerationsIndex:
 
     def save(self, data: Dict[str, Any]) -> None:
         try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            atomic_write_json(self.path, data)
         except OSError as e:
-            print(f"Error saving generations index: {e}")
+            log.error("saving generations index %s: %s", self.path, e)
 
     def list_for(self, rel_path: str) -> List[Dict[str, Any]]:
         key = rel_path.replace("\\", "/")
@@ -306,6 +328,7 @@ class ComfyJobManager:
             "started_at": None,
             "finished_at": None,
             "workflow": None,
+            "seed": None,
         }
         self.index = GenerationsIndex()
 
@@ -339,6 +362,9 @@ class ComfyJobManager:
         checkpoint: Optional[str] = None,
     ) -> bool:
         workflow = (workflow or "pro").lower()
+        # Resolve before the thread starts so the caller can report the seed in
+        # the HTTP response — the runner is async and would be too late.
+        resolved_seed = resolve_seed(seed)
         with self._job_lock:
             if self._status.get("running"):
                 return False
@@ -352,6 +378,7 @@ class ComfyJobManager:
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "finished_at": None,
                 "workflow": workflow,
+                "seed": resolved_seed,
             }
 
         def runner() -> None:
@@ -364,7 +391,7 @@ class ComfyJobManager:
                         steps=steps if steps is not None else COMFYUI_DEFAULT_STEPS,
                         cfg=cfg if cfg is not None else COMFYUI_DEFAULT_CFG,
                         denoise=denoise if denoise is not None else COMFYUI_DEFAULT_DENOISE,
-                        seed=seed,
+                        seed=resolved_seed,
                         checkpoint=checkpoint,
                     )
                 else:
@@ -375,11 +402,11 @@ class ComfyJobManager:
                         aspect=aspect,
                         steps=steps if steps is not None else 30,
                         cfg=cfg if cfg is not None else 7.0,
-                        seed=seed,
+                        seed=resolved_seed,
                         checkpoint=checkpoint or COMFYUI_CHECKPOINT,
                     )
             except Exception as exc:
-                print(f"ComfyUI job error: {exc}")
+                log.exception("ComfyUI job failed for %s", source_rel)
                 with self._job_lock:
                     self._status["error"] = str(exc)
                     self._status["progress"] = "Failed"
@@ -400,7 +427,7 @@ class ComfyJobManager:
         steps: int,
         cfg: float,
         denoise: float,
-        seed: Optional[int],
+        seed: int,
         checkpoint: Optional[str],
     ) -> None:
         with self._job_lock:
@@ -462,18 +489,18 @@ class ComfyJobManager:
         aspect: str,
         steps: int,
         cfg: float,
-        seed: Optional[int],
+        seed: int,
         checkpoint: str,
     ) -> None:
         w, h = aspect_to_size(aspect)
         graph = build_txt2img_workflow(
             positive,
             negative,
+            seed=seed,
             width=w,
             height=h,
             steps=steps,
             cfg=cfg,
-            seed=seed,
             checkpoint=checkpoint,
         )
         client_id = str(uuid.uuid4())

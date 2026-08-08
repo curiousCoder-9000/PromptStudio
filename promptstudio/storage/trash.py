@@ -31,7 +31,11 @@ from promptstudio.config import (
     TRASH_DIR,
     TRASH_RETENTION_DAYS,
 )
+from promptstudio.logging_setup import get_logger
+from promptstudio.storage.atomic import atomic_write_json
 from promptstudio.storage.db import DEFAULT_SOURCE
+
+log = get_logger(__name__)
 
 ENTRY_MANIFEST = "entry.json"
 
@@ -79,8 +83,9 @@ class TrashStore:
             return None
 
     def _write_manifest(self, entry_dir: str, entry: Dict[str, Any]) -> None:
-        with open(os.path.join(entry_dir, ENTRY_MANIFEST), "w", encoding="utf-8") as f:
-            json.dump(entry, f, indent=2, ensure_ascii=False)
+        # The manifest is the only record of how to restore this entry; a
+        # truncated one strands the media in _trash with no way back.
+        atomic_write_json(os.path.join(entry_dir, ENTRY_MANIFEST), entry)
 
     def _media_path(self, entry_dir: str, entry: Dict[str, Any]) -> Optional[str]:
         filename = entry.get("filename") or ""
@@ -263,7 +268,7 @@ class TrashStore:
                     platform=str(entry.get("platform") or DEFAULT_SOURCE),
                 )
             except Exception as exc:
-                print(f"Warning: could not clear tombstone for {rel_path}: {exc}")
+                log.warning("could not clear tombstone for %s: %s", rel_path, exc)
 
         # Re-index before restoring prompt/favorite state so their index sync lands
         try:
@@ -271,7 +276,7 @@ class TrashStore:
 
             ArchiveIndex.get().upsert_photo(rel_path, taken_at=entry.get("taken_at"))
         except Exception as exc:
-            print(f"Warning: could not reindex restored {rel_path}: {exc}")
+            log.warning("could not reindex restored %s: %s", rel_path, exc)
 
         bundle = entry.get("prompt_bundle")
         if isinstance(bundle, dict) and bundle:
@@ -280,7 +285,7 @@ class TrashStore:
 
                 PromptCache().set(rel_path, bundle, push_history=False)
             except Exception as exc:
-                print(f"Warning: could not restore prompt bundle for {rel_path}: {exc}")
+                log.warning("could not restore prompt bundle for %s: %s", rel_path, exc)
 
         if entry.get("favorite"):
             try:
@@ -288,7 +293,7 @@ class TrashStore:
 
                 FavoritesStore().set_favorite(rel_path, True)
             except Exception as exc:
-                print(f"Warning: could not restore favorite for {rel_path}: {exc}")
+                log.warning("could not restore favorite for %s: %s", rel_path, exc)
 
         shutil.rmtree(entry_dir, ignore_errors=True)
         return {

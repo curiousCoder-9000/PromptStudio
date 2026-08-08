@@ -5,12 +5,15 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from promptstudio.config import EXCLUDED_FOLDERS, SAVED_DIR, TRASH_ENABLED
+from promptstudio.logging_setup import get_logger
 from promptstudio.storage.db import (
     DEFAULT_SOURCE,
     ArchiveIndex,
     normalize_rel_path,
     taken_at_for_image,
 )
+
+log = get_logger(__name__)
 
 
 def ensure_creator_folder(name: str, base_dir: str = SAVED_DIR) -> Dict[str, Any]:
@@ -302,13 +305,13 @@ class ArchiveStore:
 
             PromptCache().delete(rel, filename)
         except Exception as exc:
-            print(f"Warning: prompt cache delete failed for {rel}: {exc}")
+            log.warning("prompt cache delete failed for %s: %s", rel, exc)
         try:
             from promptstudio.storage.favorites import FavoritesStore
 
             FavoritesStore().set_favorite(rel, False)
         except Exception as exc:
-            print(f"Warning: favorite clear failed for {rel}: {exc}")
+            log.warning("favorite clear failed for %s: %s", rel, exc)
 
         self._index.delete_photo(rel_path)
         return {

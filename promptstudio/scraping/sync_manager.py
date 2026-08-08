@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 import traceback
@@ -23,6 +22,10 @@ from promptstudio.config import (
     INCLUDE_VIDEOS_DEFAULT,
     SYNC_STATUS_FILE,
 )
+from promptstudio.logging_setup import get_logger
+from promptstudio.storage.atomic import atomic_write_json
+
+log = get_logger(__name__)
 
 
 class SyncManager:
@@ -92,11 +95,11 @@ class SyncManager:
 
     def _save_status(self) -> None:
         try:
-            os.makedirs(os.path.dirname(SYNC_STATUS_FILE), exist_ok=True)
-            with open(SYNC_STATUS_FILE, "w", encoding="utf-8") as f:
-                json.dump(self._status, f, indent=2)
-        except OSError:
-            pass
+            # fsync=False: status is rewritten every few seconds and is fully
+            # reconstructible, so durability is not worth the barrier.
+            atomic_write_json(SYNC_STATUS_FILE, self._status, fsync=False)
+        except OSError as e:
+            log.debug("sync status write failed: %s", e)
 
     def get_status(self) -> Dict[str, Any]:
         with self._job_lock:

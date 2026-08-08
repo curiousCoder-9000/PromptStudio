@@ -7,7 +7,11 @@ from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from promptstudio.config import CREATOR_STYLE_MIN_PROMPTS, CREATOR_STYLES_FILE
+from promptstudio.logging_setup import get_logger
 from promptstudio.prompts.cache import PromptCache
+from promptstudio.storage.atomic import atomic_write_json
+
+log = get_logger(__name__)
 
 
 def _tokenize(text: str) -> List[str]:
@@ -31,11 +35,9 @@ class CreatorStyleStore:
 
     def save(self, data: Dict[str, Any]) -> None:
         try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
+            atomic_write_json(self.path, data)
         except OSError as e:
-            print(f"Error saving creator styles: {e}")
+            log.error("saving creator styles %s: %s", self.path, e)
 
     def get_style_prefix(self, creator: str) -> str:
         entry = self.load().get(creator.lstrip("@"))
@@ -100,4 +102,4 @@ class CreatorStyleStore:
         try:
             self.rebuild_for_creator(creator)
         except Exception as e:
-            print(f"Creator style update failed for @{creator}: {e}")
+            log.warning("creator style update failed for @%s: %s", creator, e)

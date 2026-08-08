@@ -22,6 +22,10 @@ os.environ["PROMPTSTUDIO_TRASH"] = "1"
 os.environ["PROMPTSTUDIO_TRASH_DAYS"] = "30"
 os.environ["IG_AUTO_DRAIN_ON_START"] = "0"
 os.environ["INSTAGRAM_SESSION_USER"] = ""
+# No log file: clean_archive() wipes the archive between tests, and a live
+# RotatingFileHandler would keep writing to the deleted inode.
+os.environ["PROMPTSTUDIO_LOG_FILE"] = ""
+os.environ["PROMPTSTUDIO_LOG_CONSOLE"] = "0"
 
 import pytest
 from PIL import Image

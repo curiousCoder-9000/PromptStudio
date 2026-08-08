@@ -5,9 +5,12 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from promptstudio.logging_setup import get_logger
 from promptstudio.prompts.cache import PromptCache
 from promptstudio.prompts.engine import ENGINE_ID, get_prompt_for_image
 from promptstudio.storage.archive import ArchiveStore
+
+log = get_logger(__name__)
 
 LogFn = Optional[Callable[[str], None]]
 
@@ -162,7 +165,7 @@ class BatchPromptManager:
                     with self._job_lock:
                         self._status["completed"] += 1
                 except Exception as exc:
-                    print(f"Batch prompt error {rel}: {exc}")
+                    log.warning("batch prompt failed for %s: %s", rel, exc)
                     with self._job_lock:
                         self._status["failed"] += 1
                 with self._job_lock:

@@ -4,6 +4,9 @@ import os
 from typing import Optional
 
 from promptstudio.config import THUMB_DIR, THUMB_MAX_SIZE
+from promptstudio.logging_setup import get_logger
+
+log = get_logger(__name__)
 
 
 def thumb_rel_path(rel_path: str) -> str:
@@ -82,7 +85,7 @@ def ensure_thumbnail(
                 except Exception:
                     pass
         except Exception as e:
-            print(f"Video thumbnail error for {rel_path}: {e}")
+            log.warning("video thumbnail failed for %s: %s", rel_path, e)
 
         # Last resort: first frame
         try:
@@ -106,7 +109,7 @@ def ensure_thumbnail(
             cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
             return out_path
         except Exception as e:
-            print(f"Video thumbnail fallback error for {rel_path}: {e}")
+            log.warning("video thumbnail fallback failed for %s: %s", rel_path, e)
             return None
 
     try:
@@ -133,7 +136,7 @@ def ensure_thumbnail(
         cv2.imwrite(out_path, img, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
         return out_path
     except Exception as e:
-        print(f"Thumbnail error for {rel_path}: {e}")
+        log.warning("thumbnail failed for %s: %s", rel_path, e)
         return None
 
 

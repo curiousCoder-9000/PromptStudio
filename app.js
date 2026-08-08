@@ -1938,13 +1938,17 @@ async function sendToComfy(variant) {
             showToast(data.message || 'ComfyUI busy or failed');
             return;
         }
-        if (workflow === 'pro' && data.seed != null && elements.comfySeedInput) {
-            // Echo resolved seed when server used one — only if locked next time
+        if (data.seed != null && elements.comfySeedInput) {
+            // Echo the seed the server actually used. Left unlocked, so the next
+            // generate still rolls fresh — but the value is now sitting in the
+            // box, so ticking the lock reuses this exact seed.
+            elements.comfySeedInput.value = String(data.seed);
         }
+        const seedBit = data.seed != null ? ` · seed ${data.seed}` : '';
         const label = workflow === 'pro'
             ? `Pro d=${data.denoise ?? controls.denoise}${data.use_mode_e ? ' ModeE' : ''}`
             : variant.toUpperCase();
-        showToast(`ComfyUI ${label} started`);
+        showToast(`ComfyUI ${label} started${seedBit}`);
         if (elements.comfyStatusText && data.positive_prompt) {
             elements.comfyStatusText.textContent =
                 `Queued · ${(data.positive_prompt || '').slice(0, 80)}…`;

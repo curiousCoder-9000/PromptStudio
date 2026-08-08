@@ -6,6 +6,10 @@ import threading
 from typing import Any, Dict, List, Optional, Set
 
 from promptstudio.config import FAVORITES_FILE
+from promptstudio.logging_setup import get_logger
+from promptstudio.storage.atomic import atomic_write_json
+
+log = get_logger(__name__)
 
 _MEM: Dict[str, Optional[Set[str]]] = {}
 _MEM_LOCKS: Dict[str, threading.RLock] = {}
@@ -58,12 +62,9 @@ class FavoritesStore:
 
     def _write_file(self, paths: Set[str]) -> None:
         try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            ordered = sorted(paths)
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(ordered, f, indent=2, ensure_ascii=False)
+            atomic_write_json(self.path, sorted(paths))
         except OSError as e:
-            print(f"Error saving favorites: {e}")
+            log.error("saving favorites %s: %s", self.path, e)
 
     def invalidate_memory(self) -> None:
         lock = _lock_for(self.path)
@@ -84,7 +85,7 @@ class FavoritesStore:
 
             ArchiveIndex.get().set_favorite(rel_path, favorite)
         except Exception as e:
-            print(f"Warning: favorite index sync failed for {rel_path}: {e}")
+            log.warning("favorite index sync failed for %s: %s", rel_path, e)
 
     def set_favorite(self, rel_path: str, favorite: bool = True) -> bool:
         key = self.cache_key(rel_path)

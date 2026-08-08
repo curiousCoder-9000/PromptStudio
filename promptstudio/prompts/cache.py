@@ -7,6 +7,10 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from promptstudio.config import PROMPT_CACHE_FILE, PROMPT_HISTORY_MAX, PROMPT_PIPELINE_VERSION
+from promptstudio.logging_setup import get_logger
+from promptstudio.storage.atomic import atomic_write_json
+
+log = get_logger(__name__)
 
 # Shared across PromptCache instances for the same file path
 _MEM: Dict[str, Optional[dict]] = {}
@@ -56,11 +60,9 @@ class PromptCache:
 
     def _write_file(self, cache: dict) -> None:
         try:
-            os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
-            with open(self.cache_file, "w", encoding="utf-8") as f:
-                json.dump(cache, f, indent=2, ensure_ascii=False)
+            atomic_write_json(self.cache_file, cache)
         except OSError as e:
-            print(f"Error saving prompt cache: {e}")
+            log.error("saving prompt cache %s: %s", self.cache_file, e)
 
     def invalidate_memory(self) -> None:
         lock = _lock_for(self.cache_file)
@@ -99,7 +101,7 @@ class PromptCache:
 
             ArchiveIndex.get().update_prompt_flags(rel_path, entry, ENGINE_ID)
         except Exception as e:
-            print(f"Warning: prompt index sync failed for {rel_path}: {e}")
+            log.warning("prompt index sync failed for %s: %s", rel_path, e)
 
     def set(self, rel_path: str, data: Dict[str, Any], *, push_history: bool = True) -> None:
         lock = _lock_for(self.cache_file)
@@ -170,7 +172,7 @@ class PromptCache:
 
             ArchiveIndex.get().clear_prompt(rel_path)
         except Exception as e:
-            print(f"Warning: prompt index clear failed for {rel_path}: {e}")
+            log.warning("prompt index clear failed for %s: %s", rel_path, e)
 
     def count_ready(self) -> int:
         return len(self.load())

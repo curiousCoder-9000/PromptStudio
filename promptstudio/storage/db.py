@@ -19,7 +19,10 @@ from promptstudio.config import (
     SAVED_DIR,
     VIDEO_EXTENSIONS,
 )
+from promptstudio.logging_setup import get_logger
 from promptstudio.storage.thumbs import thumb_url
+
+log = get_logger(__name__)
 
 _FILENAME_TS = re.compile(
     r"_(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})_UTC",
@@ -277,9 +280,9 @@ class ArchiveIndex:
         """Rebuild if forced, empty, or env PROMPTSTUDIO_REBUILD_INDEX."""
         need = force or REBUILD_INDEX or self.count() == 0 or not os.path.isfile(self.db_path)
         if need:
-            print("Building archive SQLite index...")
+            log.info("building archive SQLite index...")
             self.rebuild()
-            print(f"Archive index ready ({self.count()} photos)")
+            log.info("archive index ready (%d photos)", self.count())
 
     def rebuild(self) -> int:
         """Full filesystem scan into photos table."""

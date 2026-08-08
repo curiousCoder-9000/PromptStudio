@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional  # Dict used by group_by_post_id
 
 from promptstudio.config import METADATA_SUFFIX, SAVED_DIR
+from promptstudio.storage.atomic import atomic_write_json
 
 
 def metadata_path_for_image(image_path: str) -> str:
@@ -15,8 +16,7 @@ def metadata_path_for_image(image_path: str) -> str:
 def save_post_metadata(image_path: str, metadata: Dict[str, Any]) -> None:
     metadata.setdefault("updated_at", datetime.now(timezone.utc).isoformat())
     path = metadata_path_for_image(image_path)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2, ensure_ascii=False)
+    atomic_write_json(path, metadata)
 
 
 def load_post_metadata(image_path: str) -> Optional[Dict[str, Any]]:

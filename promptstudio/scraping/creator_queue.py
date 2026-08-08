@@ -7,7 +7,6 @@ import json
 import os
 import random
 import string
-import tempfile
 import threading
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -17,6 +16,7 @@ from promptstudio.config import (
     CREATOR_SCRAPE_MAX_PENDING,
     CREATOR_SCRAPE_QUEUE_FILE,
 )
+from promptstudio.storage.atomic import atomic_write_json
 from promptstudio.storage.db import DEFAULT_SOURCE
 
 
@@ -121,21 +121,7 @@ class CreatorScrapeQueue:
 
     def _save(self) -> None:
         """Caller MUST hold self._lock. Atomic replace."""
-        dir_name = os.path.dirname(self.path) or "."
-        os.makedirs(dir_name, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(prefix=".csq_", suffix=".tmp", dir=dir_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, indent=2, ensure_ascii=False)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, self.path)
-        except Exception:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+        atomic_write_json(self.path, self._data)
 
     def _recover_interrupted_jobs(self) -> None:
         with self._lock:

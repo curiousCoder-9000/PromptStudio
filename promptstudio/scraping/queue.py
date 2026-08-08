@@ -8,6 +8,10 @@ from datetime import date, datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from promptstudio.config import DEFAULT_ACCOUNTS_PER_DAY, FOLLOWING_QUEUE_FILE
+from promptstudio.logging_setup import get_logger
+from promptstudio.storage.atomic import atomic_write_json
+
+log = get_logger(__name__)
 
 VALID_STATUSES = frozenset({"pending", "done", "skipped", "error"})
 
@@ -54,11 +58,9 @@ class FollowingQueue:
 
     def save(self) -> None:
         try:
-            os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, indent=2, ensure_ascii=False)
+            atomic_write_json(self.path, self._data)
         except OSError as e:
-            print(f"Error saving following queue: {e}")
+            log.error("saving following queue %s: %s", self.path, e)
 
     def _roll_day_if_needed(self) -> None:
         today = date.today().isoformat()

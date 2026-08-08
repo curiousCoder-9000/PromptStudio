@@ -24,9 +24,12 @@ from promptstudio.config import (
     REALISM_BIAS,
     REWRITE_MODEL_NAME,
 )
+from promptstudio.logging_setup import get_logger
 from promptstudio.prompts.cache import PromptCache
 from promptstudio.prompts.comfy_mode import enrich_exports
 from promptstudio.prompts.styles import CreatorStyleStore
+
+log = get_logger(__name__)
 
 # Back-compat for imports that still use EROTIC_INTENSITY
 EROTIC_INTENSITY = PROMPT_INTENSITY
@@ -69,7 +72,7 @@ def encode_image_to_base64(image_path: str) -> Optional[str]:
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode("utf-8")
     except OSError as e:
-        print(f"Base64 encoding error for {image_path}: {e}")
+        log.warning("base64 encoding failed for %s: %s", image_path, e)
         return None
 
 
@@ -207,7 +210,7 @@ def _ollama_generate(
             res_data = json.loads(response.read().decode("utf-8"))
             return (res_data.get("response") or "").strip()
     except Exception as e:
-        print(f"Ollama generate error ({model}): {e}")
+        log.warning("ollama generate failed (%s): %s", model, e)
         return None
 
 
