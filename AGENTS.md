@@ -17,7 +17,7 @@ Injected workspace rules. **Full map:** [docs/context.md](docs/context.md) (read
 
 1. **Archive safety:** never delete media without user confirm → UI `#deleteConfirmModal` → `DELETE /api/photo`.
 2. **No `cgi`:** multipart via `promptstudio.server.multipart`. Target **Python 3.14+** on Windows.
-3. **Config single source:** `promptstudio/config.py` (+ env). Do not hardcode archive/model paths elsewhere.
+3. **Config single source:** `promptstudio/config.py` (+ `.env` / env vars). Never hardcode usernames, secrets, or archive paths. Never commit `.env`, sessions, `following_list.json`, or classify dumps.
 4. **Routes live in** `promptstudio/server/handler.py`. Prefer package modules over new root files.
 5. **Do not resurrect** non-person filter UX; keep `EXCLUDED_FOLDERS` behavior.
 6. **UI:** preserve glassmorphism + keyboard lightbox (`←`/`→`/`Esc`).

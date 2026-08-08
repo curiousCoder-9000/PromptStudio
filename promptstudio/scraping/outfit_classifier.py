@@ -1,4 +1,8 @@
-"""Vision-based glam / outfit classifier (woman, sexy outfit, good breasts)."""
+"""Vision-based glam / fashion keep-filter classifier (Ollama).
+
+JSON field names are stable for the archive DB API. Tune behaviour via env
+(CLASSIFY_*, GLAM_SEXY_MIN) — do not commit personal classify dumps.
+"""
 
 from __future__ import annotations
 

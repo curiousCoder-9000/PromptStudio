@@ -8,6 +8,7 @@ from promptstudio.config import (
     MODEL_NAME,
     OLLAMA_URL,
     PROMPT_CACHE_FILE,
+    PROMPT_INTENSITY,
     REALISM_BIAS,
 )
 from promptstudio.prompts.cache import get_or_create_prompt_cache, save_prompt_cache
@@ -26,6 +27,7 @@ __all__ = [
     "MODEL_NAME",
     "PROMPT_CACHE_FILE",
     "EROTIC_INTENSITY",
+    "PROMPT_INTENSITY",
     "REALISM_BIAS",
     "get_or_create_prompt_cache",
     "save_prompt_cache",

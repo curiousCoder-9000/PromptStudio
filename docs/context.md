@@ -27,13 +27,15 @@ Local **Instagram photo archive studio**: scrape creators → store under `~/Pic
 ## Run
 
 ```powershell
+copy .env.example .env                # set PROMPTSTUDIO_ARCHIVE + INSTAGRAM_SESSION_USER
+pip install -r requirements.txt
 py server.py                          # http://localhost:5000
 py prompt_engine.py [image.jpg]       # smoke-test vision
 # Ollama: http://localhost:11434  ·  model from OLLAMA_VISION_MODEL
 # Comfy:  http://127.0.0.1:8188   ·  optional
 ```
 
-Deps: `instaloader`, `opencv-python-headless` (`requirements.txt`). Pillow optional (thumbs).
+Deps: `instaloader`, `opencv-python-headless`, `Pillow`, `python-dotenv` (`requirements.txt`).
 
 ---
 
@@ -52,7 +54,7 @@ promptstudio/
     metadata.py          # *.meta.json sidecars (post_id, shortcode)
     thumbs.py            # /media/thumb generation under _thumbs/
   prompts/
-    engine.py            # Ollama: structured vision → erotic rewrite → exports
+    engine.py            # Ollama: structured vision → rewrite → exports
     cache.py             # prompts_cache.json in-memory write-through + history
     styles.py            # creator_styles.json style prefixes
     batch.py             # background BatchPromptManager
@@ -98,7 +100,7 @@ server.py / prompt_engine.py   # shims
 
 **Repo-root (not archive):** `following_list.json` (+ `.target`/`.lock`/`.freeze` during export), classify reports `following_classify_report.json`, `local_photo_classify_*.json`.
 
-**Session:** `%LOCALAPPDATA%\Instaloader` for user `INSTAGRAM_SESSION_USER` (default `YOUR_INSTAGRAM_USERNAME`).
+**Session:** `INSTALOADER_SESSION_DIR` for user `INSTAGRAM_SESSION_USER` (required in `.env` for scrape).
 
 **Excluded folder names:** `_no_person_detected`, `_thumbs`, `_generations`, `_classify`.
 
@@ -122,7 +124,7 @@ server.py / prompt_engine.py   # shims
 | `IG_POST_RANK` | `1` | Rank feed posts by caption/reel signals |
 | `IG_POST_SCAN_FACTOR` | `3` | Scan window = max_posts × factor |
 | `GLAM_SEXY_MIN` | `2` | Gallery `sexy=1` minimum glam_score |
-| `INSTAGRAM_SESSION_USER` | `YOUR_INSTAGRAM_USERNAME` | Instaloader session name |
+| `INSTAGRAM_SESSION_USER` | _(empty)_ | Instaloader session name — set in `.env` |
 
 Pipeline id: `PROMPT_PIPELINE_VERSION = "v2-structured"`.  
 Engine id string: `Ollama ({MODEL_NAME}) {PROMPT_PIPELINE_VERSION}` — used for cache freshness.
@@ -131,7 +133,7 @@ Engine id string: `Ollama ({MODEL_NAME}) {PROMPT_PIPELINE_VERSION}` — used for
 
 ## Prompt pipeline (v2)
 
-1. **Structured vision** — Ollama image → JSON fields: face, hair, breasts, waist_hips, clothing, pose, expression, lighting, background.
+1. **Structured vision** — Ollama image → JSON fields: face, hair, body, clothing, pose, expression, lighting, background.
 2. **Erotic rewrite** — text model + optional creator style prefix → positive paragraph.
 3. **Exports** — `flux` / `sdxl` / `pony` / `negative` via `build_export_variants`.
 4. **Mode E** (`comfy_mode.py`) — strip identity; outfit/scene only for IPAdapter ref generate.

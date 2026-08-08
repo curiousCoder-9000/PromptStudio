@@ -93,6 +93,21 @@ const elements = {
     generatePromptBtn: document.getElementById('generatePromptBtn'),
     regeneratePromptBtn: document.getElementById('regeneratePromptBtn'),
     promptContent: document.getElementById('promptContent'),
+    inspectorPanelTitle: document.getElementById('inspectorPanelTitle'),
+    inspectorModelTag: document.getElementById('inspectorModelTag'),
+    videoDetailPanel: document.getElementById('videoDetailPanel'),
+    videoDetailThumb: document.getElementById('videoDetailThumb'),
+    videoDetailHandle: document.getElementById('videoDetailHandle'),
+    videoDetailFile: document.getElementById('videoDetailFile'),
+    videoDetailPills: document.getElementById('videoDetailPills'),
+    videoDetailGrid: document.getElementById('videoDetailGrid'),
+    videoGlamBlock: document.getElementById('videoGlamBlock'),
+    videoGlamRow: document.getElementById('videoGlamRow'),
+    videoGlamReason: document.getElementById('videoGlamReason'),
+    videoDetailCaption: document.getElementById('videoDetailCaption'),
+    videoOpenIgBtn: document.getElementById('videoOpenIgBtn'),
+    videoExpandFromPanelBtn: document.getElementById('videoExpandFromPanelBtn'),
+    videoCopyPathBtn: document.getElementById('videoCopyPathBtn'),
     // Inspector Controls
     promptTagsContainer: document.getElementById('promptTagsContainer'),
     positivePromptText: document.getElementById('positivePromptText'),
@@ -953,6 +968,12 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
         const glamBadge = glam >= 0
             ? `<span class="glam-score-badge g${glam}" title="Glam score ${glam}">g${glam}</span>`
             : '';
+        const bottomHint = isVideo
+            ? `<div class="photo-card-prompt-hint"><i class="fa-solid fa-clapperboard"></i> Click for reel details</div>`
+            : `<div class="photo-card-prompt-hint"><i class="fa-solid fa-wand-magic-sparkles"></i> Click for AI Prompt</div>`;
+        const topBadge = isVideo
+            ? `<span class="prompt-status-badge ready" title="Reel"><i class="fa-solid fa-film"></i> Reel</span>`
+            : `<span class="prompt-status-badge ${status.cls}"><i class="fa-solid ${status.icon}"></i> ${status.label}</span>`;
         card.innerHTML = `
             <img src="${imgSrc}" alt="${p.filename}" loading="lazy" data-full="${p.url}">
             ${videoBadge}
@@ -961,15 +982,15 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
                 <div class="overlay-top-actions">
                     ${state.selectMode
                         ? `<label class="card-select-wrap" title="Select"><input type="checkbox" class="card-select-cb" ${selected ? 'checked' : ''}></label>`
-                        : `<span class="prompt-status-badge ${status.cls}"><i class="fa-solid ${status.icon}"></i> ${status.label}</span>`}
+                        : topBadge}
                     ${favMark}
                     <button class="card-trash-btn" title="Delete Photo"><i class="fa-solid fa-trash-can"></i></button>
                 </div>
                 <div class="overlay-bottom-info">
                     <div class="photo-card-creator">@${p.creator}</div>
                     ${state.selectMode
-                        ? `<span class="prompt-status-badge ${status.cls}"><i class="fa-solid ${status.icon}"></i> ${status.label}</span>`
-                        : `<div class="photo-card-prompt-hint"><i class="fa-solid fa-wand-magic-sparkles"></i> Click for AI Prompt</div>`}
+                        ? topBadge
+                        : bottomHint}
                 </div>
             </div>
         `;
@@ -1320,12 +1341,21 @@ function openLightbox(index) {
     updateFavoriteButton(photo);
     state.compareMode = false;
     setCompareMode(false);
-    loadGenerationsForPhoto(photo.rel_path);
     elements.lightboxModal.style.display = 'flex';
 
-    // Auto-load Ready cached prompts
-    if (photo.has_prompt && !photo.prompt_stale) {
-        handleGeneratePrompt(false);
+    if (isVideo) {
+        // Reels: show metadata / glam panel — not image prompt generator
+        loadVideoDetailPanel(photo);
+        // Skip Comfy generations / prompt auto-load for videos
+        if (elements.compareToggleBtn) elements.compareToggleBtn.style.display = 'none';
+        state.currentGenerations = [];
+    } else {
+        setInspectorMode('photo');
+        loadGenerationsForPhoto(photo.rel_path);
+        // Auto-load Ready cached prompts for stills only
+        if (photo.has_prompt && !photo.prompt_stale) {
+            handleGeneratePrompt(false);
+        }
     }
 }
 
@@ -1524,29 +1554,287 @@ async function toggleFavoriteCurrent() {
     }
 }
 
+function formatBytes(n) {
+    const num = Number(n) || 0;
+    if (num < 1024) return `${num} B`;
+    if (num < 1024 * 1024) return `${(num / 1024).toFixed(1)} KB`;
+    if (num < 1024 * 1024 * 1024) return `${(num / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(num / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatTakenAt(iso) {
+    if (!iso) return '—';
+    try {
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return String(iso).slice(0, 16);
+        return d.toLocaleDateString(undefined, {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric',
+        });
+    } catch (_) {
+        return String(iso).slice(0, 16);
+    }
+}
+
+function glamScoreLabel(score) {
+    const s = Number(score);
+    if (!Number.isFinite(s) || s < 0) return { text: 'Unscored', cls: 'glam-unscored' };
+    if (s >= 2) return { text: `Keep · g${s}`, cls: 'glam-keep' };
+    return { text: `Reject · g${s}`, cls: 'glam-reject' };
+}
+
+/**
+ * Photos: prompt generator. Videos: reel metadata / glam panel
+ * (vision image prompts are unreliable on MP4s).
+ */
+function setInspectorMode(mode) {
+    const panel = document.querySelector('.inspector-panel');
+    const isVideo = mode === 'video';
+    if (panel) panel.classList.toggle('is-video-mode', isVideo);
+
+    if (elements.inspectorPanelTitle) {
+        elements.inspectorPanelTitle.innerHTML = isVideo
+            ? '<i class="fa-solid fa-clapperboard text-gradient"></i> Reel details'
+            : '<i class="fa-solid fa-wand-magic-sparkles text-gradient"></i> AI Image Prompt Generator';
+    }
+    if (elements.inspectorModelTag) {
+        elements.inspectorModelTag.textContent = isVideo ? 'Archive + Glam' : 'Ollama Vision';
+    }
+    if (elements.videoDetailPanel) {
+        elements.videoDetailPanel.style.display = isVideo ? 'flex' : 'none';
+    }
+    if (elements.generatePromptSection) {
+        elements.generatePromptSection.style.display = isVideo ? 'none' : 'flex';
+    }
+    if (elements.promptContent) {
+        if (isVideo) elements.promptContent.classList.remove('visible');
+    }
+    if (elements.regeneratePromptBtn) {
+        elements.regeneratePromptBtn.style.display = isVideo ? 'none' : '';
+    }
+}
+
 function resetPromptPanel() {
+    setInspectorMode('photo');
     // Show generate section, hide prompt content
-    elements.generatePromptSection.style.display = 'flex';
-    elements.promptContent.classList.remove('visible');
+    if (elements.generatePromptSection) elements.generatePromptSection.style.display = 'flex';
+    if (elements.promptContent) elements.promptContent.classList.remove('visible');
     state.currentPromptData = null;
     setPromptEditable(false);
     clearPromptDirty();
 
     // Reset generate button state
     const btn = elements.generatePromptBtn;
-    btn.classList.remove('loading');
-    btn.innerHTML = '<i class="fa-solid fa-bolt"></i> Generate AI Prompt';
+    if (btn) {
+        btn.classList.remove('loading');
+        btn.innerHTML = '<i class="fa-solid fa-bolt"></i> Generate AI Prompt';
+    }
 
     // Clear previous prompt data
-    elements.positivePromptText.textContent = 'Analyzing image with Ollama Vision...';
-    elements.negativePromptText.textContent = 'deformed, bad anatomy, blurry...';
-    elements.promptTagsContainer.innerHTML = '';
+    if (elements.positivePromptText) {
+        elements.positivePromptText.textContent = 'Analyzing image with Ollama Vision...';
+    }
+    if (elements.negativePromptText) {
+        elements.negativePromptText.textContent = 'deformed, bad anatomy, blurry...';
+    }
+    if (elements.promptTagsContainer) elements.promptTagsContainer.innerHTML = '';
     if (elements.promptHistory) elements.promptHistory.style.display = 'none';
     if (elements.promptHistoryList) elements.promptHistoryList.innerHTML = '';
-    elements.paramSampler.textContent = 'DPM++ 2M Karras';
-    elements.paramSteps.textContent = '30';
-    elements.paramCFG.textContent = '7.0';
-    elements.paramAspect.textContent = '4:5';
+    if (elements.paramSampler) elements.paramSampler.textContent = 'DPM++ 2M Karras';
+    if (elements.paramSteps) elements.paramSteps.textContent = '30';
+    if (elements.paramCFG) elements.paramCFG.textContent = '7.0';
+    if (elements.paramAspect) elements.paramAspect.textContent = '4:5';
+}
+
+function metaCard(label, value) {
+    return `<div class="video-meta-card">
+        <span class="vm-label">${label}</span>
+        <span class="vm-value">${value}</span>
+    </div>`;
+}
+
+function boolPill(label, on) {
+    const cls = on ? 'glam-keep' : 'glam-reject';
+    const mark = on ? 'yes' : 'no';
+    return `<span class="video-pill ${cls}">${label}: ${mark}</span>`;
+}
+
+async function loadVideoDetailPanel(photo) {
+    if (!elements.videoDetailPanel || !photo) return;
+    setInspectorMode('video');
+
+    // Immediate shell from gallery card data
+    if (elements.videoDetailHandle) {
+        elements.videoDetailHandle.textContent = `@${photo.creator || 'unknown'}`;
+    }
+    if (elements.videoDetailFile) {
+        elements.videoDetailFile.textContent = photo.filename || photo.rel_path || '';
+    }
+    if (elements.videoDetailThumb) {
+        elements.videoDetailThumb.src = photo.thumb_url || photo.url || '';
+        elements.videoDetailThumb.alt = photo.filename || 'Reel';
+    }
+    if (elements.videoDetailCaption) {
+        elements.videoDetailCaption.textContent = 'Loading metadata…';
+        elements.videoDetailCaption.classList.add('empty');
+    }
+    if (elements.videoDetailGrid) {
+        elements.videoDetailGrid.innerHTML =
+            metaCard('Type', 'Reel / video') +
+            metaCard('Glam', typeof photo.glam_score === 'number' && photo.glam_score >= 0
+                ? `g${photo.glam_score}`
+                : '—');
+    }
+    if (elements.videoGlamBlock) elements.videoGlamBlock.style.display = 'none';
+    if (elements.videoOpenIgBtn) elements.videoOpenIgBtn.style.display = 'none';
+
+    // Live duration when video element has metadata
+    const paintDuration = () => {
+        const v = elements.lightboxVideo;
+        const dur = getMediaDuration(v);
+        if (!Number.isFinite(dur) || !elements.videoDetailGrid) return;
+        const cards = elements.videoDetailGrid.querySelectorAll('.video-meta-card');
+        // Update or append duration card
+        let found = false;
+        cards.forEach((c) => {
+            const lab = c.querySelector('.vm-label');
+            if (lab && lab.textContent === 'Duration') {
+                const val = c.querySelector('.vm-value');
+                if (val) val.textContent = formatVideoTime(dur);
+                found = true;
+            }
+        });
+        if (!found) {
+            elements.videoDetailGrid.insertAdjacentHTML(
+                'beforeend',
+                metaCard('Duration', formatVideoTime(dur))
+            );
+        }
+    };
+    if (elements.lightboxVideo) {
+        if (elements.lightboxVideo.readyState >= 1) paintDuration();
+        else {
+            elements.lightboxVideo.addEventListener('loadedmetadata', paintDuration, { once: true });
+        }
+    }
+
+    try {
+        const res = await fetch(`/api/media/detail?path=${encodeURIComponent(photo.rel_path)}`);
+        if (!res.ok) throw new Error(`detail ${res.status}`);
+        const data = await res.json();
+        // Stale response if user navigated away
+        if (state.lightboxIndex === -1) return;
+        const cur = state.photos[state.lightboxIndex];
+        if (!cur || cur.rel_path !== photo.rel_path) return;
+
+        if (elements.videoDetailHandle) {
+            elements.videoDetailHandle.textContent = `@${data.creator || photo.creator || 'unknown'}`;
+        }
+        if (elements.videoDetailFile) {
+            elements.videoDetailFile.textContent = data.filename || photo.filename || '';
+        }
+        if (elements.videoDetailThumb && (data.thumb_url || photo.thumb_url)) {
+            elements.videoDetailThumb.src = data.thumb_url || photo.thumb_url;
+        }
+
+        const glamInfo = glamScoreLabel(data.glam_score);
+        if (elements.videoDetailPills) {
+            const pills = [
+                `<span class="video-pill ${glamInfo.cls}">${glamInfo.text}</span>`,
+            ];
+            if (data.favorite || photo.favorite) {
+                pills.push('<span class="video-pill glam-keep">Favorite</span>');
+            }
+            if (data.shortcode) {
+                pills.push(`<span class="video-pill">${data.shortcode}</span>`);
+            }
+            elements.videoDetailPills.innerHTML = pills.join('');
+        }
+
+        const durationLive = getMediaDuration(elements.lightboxVideo);
+        const gridParts = [
+            metaCard('Type', 'Reel / video'),
+            metaCard('Size', formatBytes(data.file_size)),
+            metaCard('Posted', formatTakenAt(data.taken_at)),
+            metaCard(
+                'Duration',
+                Number.isFinite(durationLive) ? formatVideoTime(durationLive) : '…'
+            ),
+        ];
+        if (elements.videoDetailGrid) {
+            elements.videoDetailGrid.innerHTML = gridParts.join('');
+        }
+
+        const glam = data.glam || {};
+        const hasGlamDetail =
+            glam && (glam.brief_reason || glam.confidence != null || glam.has_woman != null);
+        if (elements.videoGlamBlock && elements.videoGlamRow) {
+            if (hasGlamDetail || (typeof data.glam_score === 'number' && data.glam_score >= 0)) {
+                elements.videoGlamBlock.style.display = 'flex';
+                const row = [];
+                if (glam.has_woman != null) row.push(boolPill('Woman', !!glam.has_woman));
+                if (glam.sexy_revealing_outfit != null) {
+                    row.push(boolPill('Sexy outfit', !!glam.sexy_revealing_outfit));
+                }
+                if (glam.good_breasts != null) row.push(boolPill('Figure', !!glam.good_breasts));
+                if (glam.confidence != null) {
+                    row.push(
+                        `<span class="video-pill">conf ${(Number(glam.confidence) * 100).toFixed(0)}%</span>`
+                    );
+                }
+                if (glam.source) {
+                    row.push(`<span class="video-pill">${String(glam.source).slice(0, 24)}</span>`);
+                }
+                elements.videoGlamRow.innerHTML = row.join('') ||
+                    `<span class="video-pill ${glamInfo.cls}">${glamInfo.text}</span>`;
+                if (elements.videoGlamReason) {
+                    elements.videoGlamReason.textContent =
+                        glam.brief_reason ||
+                        (data.glam_score >= 2
+                            ? 'Classified as keep-worthy glam.'
+                            : data.glam_score >= 0
+                                ? 'Classified below keep threshold.'
+                                : '');
+                }
+            } else {
+                elements.videoGlamBlock.style.display = 'none';
+            }
+        }
+
+        const caption = (data.caption || '').trim();
+        if (elements.videoDetailCaption) {
+            if (caption) {
+                elements.videoDetailCaption.textContent = caption;
+                elements.videoDetailCaption.classList.remove('empty');
+            } else {
+                elements.videoDetailCaption.textContent =
+                    'No caption stored for this reel (metadata missing or empty).';
+                elements.videoDetailCaption.classList.add('empty');
+            }
+        }
+
+        if (elements.videoOpenIgBtn) {
+            if (data.post_url) {
+                elements.videoOpenIgBtn.href = data.post_url;
+                elements.videoOpenIgBtn.style.display = 'inline-flex';
+            } else {
+                elements.videoOpenIgBtn.style.display = 'none';
+            }
+        }
+
+        // Keep gallery card glam in sync when detail knows more
+        if (typeof data.glam_score === 'number') {
+            photo.glam_score = data.glam_score;
+        }
+    } catch (err) {
+        console.error('Video detail load failed', err);
+        if (elements.videoDetailCaption) {
+            elements.videoDetailCaption.textContent =
+                'Could not load reel metadata. File still plays on the left.';
+            elements.videoDetailCaption.classList.add('empty');
+        }
+    }
 }
 
 function setPromptEditable(enabled) {
@@ -1659,6 +1947,12 @@ async function restorePromptHistory(index) {
 async function handleGeneratePrompt(forceRefresh = false) {
     if (state.lightboxIndex === -1) return;
     const photo = state.photos[state.lightboxIndex];
+    // Vision prompt pipeline is for still photos only
+    if (isVideoPhoto(photo)) {
+        loadVideoDetailPanel(photo);
+        showToast('Reels use the details panel — image prompts are for photos');
+        return;
+    }
     if ((forceRefresh || !photo.has_prompt) && !requireOllama()) return;
 
     const btn = elements.generatePromptBtn;
@@ -2666,6 +2960,21 @@ function setupEventListeners() {
             e.preventDefault();
             e.stopPropagation();
             openPhotoViewer();
+        });
+    }
+    if (elements.videoExpandFromPanelBtn) {
+        elements.videoExpandFromPanelBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openPhotoViewer();
+        });
+    }
+    if (elements.videoCopyPathBtn) {
+        elements.videoCopyPathBtn.addEventListener('click', () => {
+            if (state.lightboxIndex === -1) return;
+            const photo = state.photos[state.lightboxIndex];
+            if (!photo) return;
+            copyToClipboard(photo.rel_path, 'Copied archive path');
         });
     }
     if (elements.lightboxVideo) {

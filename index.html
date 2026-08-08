@@ -241,12 +241,12 @@
                     </div>
                 </div>
 
-                <!-- Right: AI Prompt Generator Inspector -->
+                <!-- Right: AI Prompt (photos) or Reel details (videos) -->
                 <div class="inspector-panel">
                     <div class="panel-header">
-                        <h3><i class="fa-solid fa-wand-magic-sparkles text-gradient"></i> AI Image Prompt Generator</h3>
+                        <h3 id="inspectorPanelTitle"><i class="fa-solid fa-wand-magic-sparkles text-gradient"></i> AI Image Prompt Generator</h3>
                         <div class="inspector-header-actions">
-                            <span class="tag-model">Ollama Vision</span>
+                            <span class="tag-model" id="inspectorModelTag">Ollama Vision</span>
                             <button class="btn btn-secondary btn-sm" id="favoritePhotoBtn" title="Toggle favorite (F)">
                                 <i class="fa-regular fa-star"></i> Favorite
                             </button>
@@ -256,7 +256,54 @@
                         </div>
                     </div>
 
-                    <!-- Generate Prompt Action Button -->
+                    <!-- Video / Reel inspector (shown instead of prompt generator) -->
+                    <div class="video-detail-panel" id="videoDetailPanel" style="display:none;">
+                        <div class="video-detail-hero">
+                            <div class="video-detail-thumb-wrap">
+                                <img id="videoDetailThumb" src="" alt="Reel frame" loading="lazy">
+                                <span class="video-detail-play-badge"><i class="fa-solid fa-clapperboard"></i> Reel</span>
+                            </div>
+                            <div class="video-detail-hero-text">
+                                <div class="video-detail-handle" id="videoDetailHandle">@creator</div>
+                                <div class="video-detail-file" id="videoDetailFile">filename.mp4</div>
+                                <div class="video-detail-pills" id="videoDetailPills"></div>
+                            </div>
+                        </div>
+
+                        <div class="video-detail-grid" id="videoDetailGrid">
+                            <!-- filled by JS: duration, size, date, glam -->
+                        </div>
+
+                        <div class="video-detail-block" id="videoGlamBlock" style="display:none;">
+                            <div class="sync-status-label">Glam classify</div>
+                            <div class="video-glam-row" id="videoGlamRow"></div>
+                            <p class="video-glam-reason" id="videoGlamReason"></p>
+                        </div>
+
+                        <div class="video-detail-block">
+                            <div class="sync-status-label">Caption</div>
+                            <div class="video-caption" id="videoDetailCaption">No caption in archive metadata.</div>
+                        </div>
+
+                        <div class="video-detail-actions">
+                            <a class="btn btn-primary btn-sm" id="videoOpenIgBtn" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">
+                                <i class="fa-brands fa-instagram"></i> Open on Instagram
+                            </a>
+                            <button type="button" class="btn btn-secondary btn-sm" id="videoExpandFromPanelBtn" title="Fullscreen player">
+                                <i class="fa-solid fa-expand"></i> Fullscreen
+                            </button>
+                            <button type="button" class="btn btn-ghost btn-sm" id="videoCopyPathBtn" title="Copy archive path">
+                                <i class="fa-solid fa-link"></i> Copy path
+                            </button>
+                        </div>
+
+                        <p class="video-detail-note">
+                            <i class="fa-solid fa-circle-info"></i>
+                            AI image prompts are for still photos. Reels show archive metadata, glam score, and caption instead.
+                        </p>
+                    </div>
+
+                    <!-- Generate Prompt Action Button (photos only) -->
                     <div class="generate-prompt-section" id="generatePromptSection">
                         <div class="generate-prompt-placeholder">
                             <i class="fa-solid fa-wand-magic-sparkles generate-icon"></i>

@@ -1,4 +1,10 @@
-"""Ollama vision → structured extract → erotic SD/Flux prompt bundle."""
+"""Ollama vision → structured extract → photorealistic SD/Flux prompt bundle.
+
+Default tone is public-safe (balanced fashion / portrait). Set
+PROMPT_INTENSITY=high in `.env` for more sensual rewrites (private use).
+"""
+
+from __future__ import annotations
 
 import base64
 import json
@@ -10,10 +16,10 @@ from typing import Any, Dict, Optional
 import cv2
 
 from promptstudio.config import (
-    EROTIC_INTENSITY,
     MODEL_NAME,
     OLLAMA_TEXT_URL,
     OLLAMA_URL,
+    PROMPT_INTENSITY,
     PROMPT_PIPELINE_VERSION,
     REALISM_BIAS,
     REWRITE_MODEL_NAME,
@@ -21,6 +27,9 @@ from promptstudio.config import (
 from promptstudio.prompts.cache import PromptCache
 from promptstudio.prompts.comfy_mode import enrich_exports
 from promptstudio.prompts.styles import CreatorStyleStore
+
+# Back-compat for imports that still use EROTIC_INTENSITY
+EROTIC_INTENSITY = PROMPT_INTENSITY
 
 _cache = PromptCache()
 _styles = CreatorStyleStore()
@@ -30,14 +39,29 @@ ENGINE_ID = f"Ollama ({MODEL_NAME}) {PROMPT_PIPELINE_VERSION}"
 STRUCTURED_FIELDS = (
     "face",
     "hair",
-    "breasts",
-    "waist_hips",
+    "body",
     "clothing",
     "pose",
     "expression",
     "lighting",
     "background",
 )
+
+# Map legacy cache keys → current fields
+_LEGACY_FIELD_MAP = {
+    "breasts": "body",
+    "waist_hips": "body",
+}
+
+
+def _intensity_rank() -> str:
+    """Normalize intensity to low | balanced | high."""
+    v = (PROMPT_INTENSITY or "balanced").strip().lower()
+    if v in ("low", "mild", "conservative", "safe"):
+        return "low"
+    if v in ("high", "explicit", "sensual", "erotic"):
+        return "high"
+    return "balanced"
 
 
 def encode_image_to_base64(image_path: str) -> Optional[str]:
@@ -67,48 +91,85 @@ def clean_vision_output(text: str) -> str:
 
 def build_vision_prompt() -> str:
     """Legacy single-paragraph prompt (fallback / debugging)."""
-    base = (
-        "You are an expert photorealistic erotic image captioner for Stable Diffusion and Flux. "
-        "Describe the photo in extreme visual and sexual detail as one continuous dense paragraph. "
-        "Focus heavily on the woman's body, face, hair, clothing, pose and lighting. "
-        "Be direct, crude and highly descriptive. Large, full, heavy breasts are desirable and should be emphasized when present."
-    )
+    rank = _intensity_rank()
+    if rank == "high":
+        base = (
+            "You are an expert photorealistic image captioner for Stable Diffusion and Flux. "
+            "Describe the photo in rich visual detail as one continuous dense paragraph. "
+            "Focus on the subject’s face, hair, body shape, clothing, pose, and lighting. "
+            "Be direct and highly descriptive when body features are clearly visible."
+        )
+    elif rank == "low":
+        base = (
+            "You are an expert photorealistic fashion and portrait captioner for Stable Diffusion. "
+            "Describe the photo as one continuous paragraph focusing on clothing, pose, "
+            "expression, lighting, and background. Avoid graphic body detail."
+        )
+    else:
+        base = (
+            "You are an expert photorealistic portrait and fashion captioner for Stable Diffusion and Flux. "
+            "Describe the photo in detailed visual language as one continuous dense paragraph. "
+            "Cover face, hair, outfit, pose, expression, lighting, and setting. "
+            "Describe body proportions only when clearly visible and relevant to the outfit."
+        )
     realism = (
         " CRITICAL REALISM RULES: "
-        "Large, full, heavy, voluminous, ample breasts are allowed and preferred when they match the image. "
-        "Never use extreme words like massive, enormous, gigantic, balloon, cartoonish or inhuman. "
-        "Keep realistic body proportions and a natural waist-to-hip ratio even with big breasts. "
+        "Keep realistic body proportions. Never use extreme words like massive, enormous, "
+        "gigantic, balloon, cartoonish or inhuman. "
         "Do not invent details that are not clearly visible in the photo."
     )
-    focus = (
-        " Write only the descriptive paragraph — no lists, no numbering, no introduction."
-    )
+    focus = " Write only the descriptive paragraph — no lists, no numbering, no introduction."
     if REALISM_BIAS == "strong":
         return base + realism + focus
     return base + focus
 
 
 def build_structured_vision_prompt() -> str:
+    rank = _intensity_rank()
+    body_hint = (
+        "For body describe silhouette, proportions, and clothing interaction only if visible."
+        if rank != "high"
+        else "For body describe silhouette, proportions, figure, and clothing interaction when visible; stay anatomically realistic."
+    )
     return (
-        "Analyze this photo of a woman. Return ONLY valid JSON with these keys "
+        "Analyze this photo. Return ONLY valid JSON with these keys "
         "(use empty string if not clearly visible — never invent): "
-        "face, hair, breasts, waist_hips, clothing, pose, expression, lighting, background. "
-        "For breasts describe size/shape/firmness and clothing interaction only if visible. "
-        "Allow large full heavy breasts wording when accurate; never use massive/gigantic/balloon. "
+        "face, hair, body, clothing, pose, expression, lighting, background. "
+        f"{body_hint} "
         "Keep realistic proportions. No markdown, no code fences, JSON object only."
     )
 
 
 def build_rewrite_prompt(structured: Dict[str, Any], style_prefix: str = "") -> str:
-    intensity = EROTIC_INTENSITY
-    style_line = f" Creator style hints (optional, only if consistent): {style_prefix}." if style_prefix else ""
+    rank = _intensity_rank()
+    style_line = (
+        f" Creator style hints (optional, only if consistent): {style_prefix}."
+        if style_prefix
+        else ""
+    )
+    if rank == "high":
+        tone = (
+            "You convert factual visual JSON into one continuous dense, sensual photorealistic "
+            "image-generation prompt for Stable Diffusion / Flux. "
+            "Use ONLY facts present in the JSON. Do not invent body parts, clothing, or setting. "
+            f"Intensity: high. Be descriptive about figure and outfit when supported by the JSON; stay anatomically realistic."
+        )
+    elif rank == "low":
+        tone = (
+            "You convert factual visual JSON into one continuous photorealistic fashion/portrait "
+            "image-generation prompt for Stable Diffusion / Flux. "
+            "Use ONLY facts present in the JSON. Emphasize clothing, pose, lighting, and scene. "
+            "Avoid graphic or sensual body language."
+        )
+    else:
+        tone = (
+            "You convert factual visual JSON into one continuous dense photorealistic "
+            "image-generation prompt for Stable Diffusion / Flux. "
+            "Use ONLY facts present in the JSON. Do not invent body parts, clothing, or setting. "
+            "Tone: balanced editorial / fashion photography. Be vivid but professional."
+        )
     return (
-        "You convert factual visual JSON into one continuous dense erotic photorealistic "
-        "image-generation prompt for Stable Diffusion / Flux. "
-        "Use ONLY facts present in the JSON. Do not invent body parts, clothing, or setting. "
-        f"Erotic intensity: {intensity}. Be direct and sexual but anatomically realistic. "
-        "Prefer large full heavy breasts wording when the JSON supports it; never cartoonish exaggeration. "
-        f"{style_line} "
+        f"{tone}{style_line} "
         "Output ONLY the prompt paragraph — no intro, no JSON, no labels.\n\n"
         f"JSON:\n{json.dumps(structured, ensure_ascii=False)}"
     )
@@ -156,7 +217,6 @@ def _parse_structured_json(raw: str) -> Optional[Dict[str, Any]]:
     text = raw.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
-    # Extract first {...} block if wrapped in prose
     match = re.search(r"\{[\s\S]*\}", text)
     if match:
         text = match.group(0)
@@ -166,6 +226,15 @@ def _parse_structured_json(raw: str) -> Optional[Dict[str, Any]]:
         return None
     if not isinstance(data, dict):
         return None
+    # Merge legacy keys into body
+    if not data.get("body"):
+        parts = []
+        for legacy in ("breasts", "waist_hips", "body"):
+            val = data.get(legacy)
+            if isinstance(val, str) and val.strip():
+                parts.append(val.strip())
+        if parts:
+            data["body"] = "; ".join(parts)
     out = {}
     for key in STRUCTURED_FIELDS:
         val = data.get(key, "")
@@ -189,7 +258,6 @@ def extract_structured_vision(image_path: str) -> Optional[Dict[str, Any]]:
     parsed = _parse_structured_json(raw or "")
     if parsed:
         return parsed
-    # Fallback: free-form caption into a single field
     legacy = _ollama_generate(
         build_vision_prompt(),
         images=[b64],
@@ -201,8 +269,7 @@ def extract_structured_vision(image_path: str) -> Optional[Dict[str, Any]]:
         return {
             "face": "",
             "hair": "",
-            "breasts": "",
-            "waist_hips": "",
+            "body": "",
             "clothing": "",
             "pose": cleaned,
             "expression": "",
@@ -214,11 +281,10 @@ def extract_structured_vision(image_path: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def rewrite_erotic_prompt(structured: Dict[str, Any], style_prefix: str = "") -> Optional[str]:
+def rewrite_prompt(structured: Dict[str, Any], style_prefix: str = "") -> Optional[str]:
     if structured.get("_fallback_paragraph") and not any(
         structured.get(k) for k in STRUCTURED_FIELDS if k != "pose"
     ):
-        # Already a paragraph from legacy path
         return clean_vision_output(structured["_fallback_paragraph"])
 
     raw = _ollama_generate(
@@ -232,19 +298,22 @@ def rewrite_erotic_prompt(structured: Dict[str, Any], style_prefix: str = "") ->
     if raw:
         return clean_vision_output(raw)
 
-    # Deterministic assembly if rewrite model fails
     parts = [structured.get(k, "") for k in STRUCTURED_FIELDS if structured.get(k)]
     if style_prefix:
         parts.insert(0, style_prefix)
     return clean_vision_output(", ".join(parts)) if parts else None
 
 
+# Back-compat alias
+rewrite_erotic_prompt = rewrite_prompt
+
+
 def analyze_with_ollama_vision(image_path: str) -> Optional[str]:
-    """Backward-compatible: return erotic paragraph via two-stage pipeline."""
+    """Return a photorealistic prompt paragraph via two-stage pipeline."""
     structured = extract_structured_vision(image_path)
     if not structured:
         return None
-    return rewrite_erotic_prompt(structured)
+    return rewrite_prompt(structured)
 
 
 def get_image_aspect_ratio(image_path: str) -> str:
@@ -275,9 +344,8 @@ def build_export_variants(
     """Target-specific prompt strings for Flux / SDXL / Pony / Comfy Mode E."""
     flux = positive
     sdxl = f"{positive}, <lora:none>"
-    pony = (
-        f"score_9, score_8_up, score_7_up, source_real, rating_explicit, {positive}"
-    )
+    pony_rating = "rating_safe" if _intensity_rank() != "high" else "rating_explicit"
+    pony = f"score_9, score_8_up, score_7_up, source_real, {pony_rating}, {positive}"
     base = {
         "flux": flux,
         "sdxl": sdxl.replace(", <lora:none>", ""),
@@ -293,7 +361,7 @@ def generate_prompt_for_image(image_path: str, creator_name: str = "") -> Dict[s
     style_prefix = _styles.get_style_prefix(creator_name) if creator_name else ""
     structured = extract_structured_vision(image_path)
     vision_description = (
-        rewrite_erotic_prompt(structured, style_prefix=style_prefix) if structured else None
+        rewrite_prompt(structured, style_prefix=style_prefix) if structured else None
     )
     aspect_ratio = get_image_aspect_ratio(image_path)
     clean_creator = creator_name.replace("_", " ").replace(".", " ").strip()
@@ -304,23 +372,28 @@ def generate_prompt_for_image(image_path: str, creator_name: str = "") -> Dict[s
     if style_prefix:
         quality_prefix = f"{quality_prefix}{style_prefix}, "
 
+    rank = _intensity_rank()
     if vision_description:
-        positive_prompt = (
-            f"{quality_prefix}{vision_description}, "
-            f"ultra detailed, sharp focus, natural skin pores, realistic anatomy, large full breasts"
+        anatomy_tail = (
+            "ultra detailed, sharp focus, natural skin pores, realistic anatomy"
+            if rank != "high"
+            else "ultra detailed, sharp focus, natural skin pores, realistic anatomy, flattering figure"
         )
+        positive_prompt = f"{quality_prefix}{vision_description}, {anatomy_tail}"
         words = [w.strip(".,") for w in vision_description.lower().split() if len(w) > 3]
         visual_tags = list(dict.fromkeys(words[:12]))
     else:
         positive_prompt = (
-            f"{quality_prefix}beautiful young woman, long dark hair, large full heavy breasts, "
-            f"deep natural cleavage, hourglass figure with realistic waist-to-hip ratio, "
-            f"curvy hips, thick thighs, confident pose, {clean_creator} style, "
+            f"{quality_prefix}portrait of a person, natural expression, stylish outfit, "
+            f"confident pose, {clean_creator} style, "
             f"ultra detailed, sharp focus, realistic anatomy"
         )
         visual_tags = [
-            "beautiful face", "curvaceous", "large full breasts",
-            "hourglass figure", "photorealistic", "8k",
+            "portrait",
+            "fashion",
+            "photorealistic",
+            "cinematic lighting",
+            "8k",
         ]
 
     negative_prompt = (
@@ -328,16 +401,17 @@ def generate_prompt_for_image(image_path: str, creator_name: str = "") -> Dict[s
         "extra fingers, fused fingers, blurry, low quality, oversaturated, "
         "painting, cartoon, 3d render, illustration, anime, watermark, text, "
         "logo, username, plastic skin, doll-like, "
-        "enormous breasts, gigantic breasts, balloon breasts, cartoonish body, "
-        "inhuman proportions, exaggerated beyond realism, massive tits"
+        "inhuman proportions, exaggerated beyond realism, cartoonish body"
     )
+
+    structured_out = None
+    if structured:
+        structured_out = {k: structured.get(k, "") for k in STRUCTURED_FIELDS}
 
     exports = build_export_variants(
         positive_prompt,
         negative_prompt,
-        structured={k: structured.get(k, "") for k in STRUCTURED_FIELDS}
-        if structured
-        else None,
+        structured=structured_out,
     )
 
     parameters = {
@@ -348,7 +422,8 @@ def generate_prompt_for_image(image_path: str, creator_name: str = "") -> Dict[s
         "suggested_model": "SDXL / Flux.1 Dev / Realistic Vision / Pony Diffusion",
         "vision_engine": ENGINE_ID,
         "pipeline_version": PROMPT_PIPELINE_VERSION,
-        "erotic_intensity": EROTIC_INTENSITY,
+        "prompt_intensity": PROMPT_INTENSITY,
+        "erotic_intensity": PROMPT_INTENSITY,  # legacy key for UI/cache
         "realism_bias": REALISM_BIAS,
     }
 
@@ -358,11 +433,7 @@ def generate_prompt_for_image(image_path: str, creator_name: str = "") -> Dict[s
         "parameters": parameters,
         "visual_tags": visual_tags,
         "raw_vision_description": vision_description,
-        "structured_vision": {
-            k: structured.get(k, "") for k in STRUCTURED_FIELDS
-        }
-        if structured
-        else None,
+        "structured_vision": structured_out,
         "exports": exports,
     }
 
@@ -388,7 +459,6 @@ def get_prompt_for_image(
         and cached.get("parameters", {}).get("vision_engine") == ENGINE_ID
         and cached.get("parameters", {}).get("pipeline_version") == PROMPT_PIPELINE_VERSION
     ):
-        # Ensure exports exist / include Mode E comfy_ref on older cache entries
         structured = cached.get("structured_vision")
         exports = cached.get("exports") or {}
         if "exports" not in cached or not exports.get("comfy_ref"):

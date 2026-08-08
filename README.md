@@ -1,36 +1,98 @@
 # PromptStudio
 
-Local **AI Vision Prompt Studio** for Instagram creator photo archives.
+Local **AI Vision Prompt Studio** for personal photo archives (especially Instagram creators).
 
-Analyzes images under `~/Pictures/InstagramSaved` with **Ollama** (default `qwen2.5vl:7b`), builds photorealistic prompts for Stable Diffusion / Flux / Midjourney / ComfyUI, and manages scrape → gallery → generate in one dark glass UI.
+Analyzes images under a local archive folder with **Ollama** multimodal vision, builds photorealistic prompts for Stable Diffusion / Flux / Midjourney / ComfyUI, and manages scrape → gallery → generate in one dark glass UI.
+
+> **Privacy first.** This project is designed so **secrets, sessions, personal following lists, classify reports, and media never belong in git**. Configure everything via `.env`.
 
 ## Features
 
-- Ollama two-stage vision (`v2-structured`): structured JSON → erotic rewrite → Flux/SDXL/Pony exports
-- Glassmorphic gallery: search prompts/tags, favorites, sort, media type, infinite scroll, thumbs
-- Lightbox: edit prompts, history restore, Mode E, ComfyUI pro generate (side-by-side)
+- Ollama two-stage vision (`v2-structured`): structured JSON → rewrite → Flux/SDXL/Pony exports
+- Glassmorphic gallery: search, favorites, sort, media type, infinite scroll, thumbs
+- Lightbox: edit prompts, history restore, Mode E, optional ComfyUI generate
 - Instagram sync: saved posts, creator feed, following bulk (anti-ban pacing + resume)
-- Safe delete, upload, creator folders, batch analyze
+- Safe delete, upload, creator folders, batch analyze, reel metadata panel
 
 ## Quickstart
 
-**Prereqs:** Python 3.10+ (dev on 3.14 Windows), [Ollama](https://ollama.com) with vision model:
+### 1. Prerequisites
+
+- Python **3.10+** (developed on 3.14 Windows)
+- [Ollama](https://ollama.com) with a vision model:
 
 ```powershell
 ollama pull qwen2.5vl:7b
+```
+
+### 2. Configure environment
+
+```powershell
+copy .env.example .env
+# Edit .env — at minimum set:
+#   PROMPTSTUDIO_ARCHIVE=C:\Users\YOU\Pictures\InstagramSaved
+#   INSTAGRAM_SESSION_USER=your_instagram_username   # only if using scrape
+```
+
+### 3. Install & run
+
+```powershell
 pip install -r requirements.txt
 py server.py
 ```
 
 Open **http://localhost:5000**
 
-Optional: ComfyUI at `http://127.0.0.1:8188` for generate loop.
+Optional: ComfyUI at `http://127.0.0.1:8188` for the generate loop.
 
-## Docs (start here)
+### Instagram login (optional scrape)
+
+```powershell
+pip install instaloader
+instaloader --login YOUR_USERNAME
+```
+
+Set `INSTAGRAM_SESSION_USER` and (if needed) `INSTALOADER_SESSION_DIR` in `.env` to match where Instaloader stored `session-YOUR_USERNAME`.
+
+## Configuration
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `PROMPTSTUDIO_ARCHIVE` | Local media root | `~/Pictures/InstagramSaved` |
+| `INSTAGRAM_SESSION_USER` | IG username for Instaloader | _(empty — required for scrape)_ |
+| `OLLAMA_VISION_MODEL` | Vision model | `qwen2.5vl:7b` |
+| `PROMPT_INTENSITY` | Prompt tone: `low` / `balanced` / `high` | `balanced` |
+| `IG_CAPTION_KEYWORDS` | Caption rank keywords | fashion/model set |
+| `COMFYUI_URL` | Optional ComfyUI | `http://127.0.0.1:8188` |
+
+Full list: **[`.env.example`](.env.example)**
+
+`PROMPT_INTENSITY=high` enables more sensual rewrites for private use. The public default is balanced photorealistic fashion/portrait language.
+
+## What must stay private (gitignored)
+
+Do **not** commit:
+
+- `.env` — credentials and personal paths
+- Instaloader `session-*` files
+- `following_list.json` and classify reports
+- Your media archive (`PROMPTSTUDIO_ARCHIVE`)
+- Generated docs dumps (`docs/following_list.md`, etc.)
+
+Export helpers write local files only:
+
+```powershell
+py scripts/export_following_list.py
+py scripts/classify_following.py
+```
+
+Use `following_list.example.json` as a shape reference.
+
+## Docs
 
 | Doc | Purpose |
 |-----|---------|
-| **[docs/context.md](docs/context.md)** | **Agent/dev map** — package, data, API, task→file (read first) |
+| **[docs/context.md](docs/context.md)** | Agent/dev map — package, data, API |
 | [docs/api.md](docs/api.md) | HTTP contracts |
 | [docs/architecture.md](docs/architecture.md) | Components & flows |
 | [docs/instagram_downloader.md](docs/instagram_downloader.md) | Sync & anti-ban |
@@ -43,9 +105,22 @@ Optional: ComfyUI at `http://127.0.0.1:8188` for generate loop.
 
 ```
 server.py                 # entry
-promptstudio/             # all application logic
-  config.py server/ storage/ prompts/ scraping/ comfy/
+.env.example              # public config template
+promptstudio/             # application logic
+  config.py               # loads .env + env vars
+  server/ storage/ prompts/ scraping/ comfy/
 scripts/                  # thin CLIs
 index.html style.css app.js
 docs/
 ```
+
+## Security notes for public forks
+
+1. **Never** put Instagram passwords, session cookies, or API tokens in the repo.
+2. If a GitHub PAT or session ever lands in git remote URLs or history, **revoke it immediately** and rewrite history.
+3. Media and following lists are personal data — keep them only under `PROMPTSTUDIO_ARCHIVE` and gitignored JSON files.
+4. Respect Instagram’s terms of service and local laws when scraping; this tool is for personal archives.
+
+## License
+
+Use and modify for personal projects. You are responsible for how you use Instagram credentials, scraped content, and generated prompts.

@@ -1399,6 +1399,220 @@ body {
     border-left: 1px solid var(--border-glass);
 }
 
+/* ── Reel / video detail panel (replaces prompt generator) ── */
+.video-detail-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    flex: 1;
+    min-height: 0;
+    text-align: left;
+}
+
+.video-detail-hero {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+}
+
+.video-detail-thumb-wrap {
+    position: relative;
+    flex: 0 0 96px;
+    width: 96px;
+    height: 128px;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #0a0f1a;
+    border: 1px solid var(--border-glass);
+    box-shadow: var(--shadow-sm);
+}
+
+.video-detail-thumb-wrap img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.video-detail-play-badge {
+    position: absolute;
+    left: 6px;
+    bottom: 6px;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 3px 7px;
+    border-radius: 6px;
+    background: rgba(236, 72, 153, 0.9);
+    color: #fff;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.video-detail-hero-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.video-detail-handle {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--accent-cyan);
+}
+
+.video-detail-file {
+    font-family: var(--font-code);
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    word-break: break-all;
+    line-height: 1.35;
+}
+
+.video-detail-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 2px;
+}
+
+.video-pill {
+    font-size: 0.68rem;
+    font-weight: 600;
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid rgba(148, 163, 184, 0.3);
+    background: rgba(15, 23, 42, 0.65);
+    color: var(--text-secondary);
+}
+
+.video-pill.glam-keep {
+    border-color: rgba(34, 197, 94, 0.5);
+    color: #86efac;
+    background: rgba(34, 197, 94, 0.12);
+}
+
+.video-pill.glam-reject {
+    border-color: rgba(236, 72, 153, 0.45);
+    color: #f9a8d4;
+    background: rgba(236, 72, 153, 0.1);
+}
+
+.video-pill.glam-unscored {
+    border-color: rgba(148, 163, 184, 0.35);
+    color: #94a3b8;
+}
+
+.video-detail-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.video-meta-card {
+    padding: 10px 12px;
+    border-radius: var(--radius-md);
+    background: rgba(15, 23, 42, 0.55);
+    border: 1px solid var(--border-glass);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+
+.video-meta-card .vm-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    font-weight: 600;
+}
+
+.video-meta-card .vm-value {
+    font-size: 0.88rem;
+    color: var(--text-primary);
+    font-weight: 500;
+    word-break: break-word;
+}
+
+.video-detail-block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.video-glam-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.video-glam-reason {
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    line-height: 1.4;
+}
+
+.video-caption {
+    max-height: 160px;
+    overflow-y: auto;
+    padding: 12px 14px;
+    border-radius: var(--radius-md);
+    background: rgba(15, 23, 42, 0.55);
+    border: 1px solid var(--border-glass);
+    font-size: 0.86rem;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.video-caption.empty {
+    color: var(--text-muted);
+    font-style: italic;
+}
+
+.video-detail-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.video-detail-actions .btn {
+    text-decoration: none;
+}
+
+.video-detail-note {
+    margin: 0;
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    line-height: 1.4;
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+}
+
+.video-detail-note i {
+    margin-top: 2px;
+    color: var(--accent-cyan);
+    opacity: 0.8;
+}
+
+.inspector-panel.is-video-mode #regeneratePromptBtn {
+    display: none;
+}
+
+.inspector-panel.is-video-mode .tag-model {
+    border-color: rgba(236, 72, 153, 0.4);
+    color: #f9a8d4;
+}
+
 .panel-header {
     display: flex;
     align-items: center;

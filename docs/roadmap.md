@@ -75,7 +75,7 @@ Agent map: [context.md](context.md). Phased plan: **scrape → organize → anal
 ## Phase 4 — Prompt quality ✅
 | Deliverable | Status |
 |-------------|--------|
-| Two-stage pipeline: structured vision JSON → erotic rewrite | Done |
+| Two-stage pipeline: structured vision JSON → intensity-aware rewrite | Done |
 | Cache version bump (`pipeline_version: v2-structured`) | Done |
 | Creator style blocks (`creator_styles.json`) | Done |
 | Export variants: Flux / SDXL / Pony + UI copy buttons | Done |

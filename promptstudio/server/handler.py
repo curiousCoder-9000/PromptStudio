@@ -1150,6 +1150,80 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
 
+        if path == "/api/media/detail":
+            # Reel/photo inspector: caption, glam, Instagram link (not vision prompts)
+            rel_path = (query.get("path", [""])[0] or "").strip().replace("\\", "/")
+            if not rel_path:
+                self.send_error(400, "path required")
+                return
+            full_path = _archive.resolve_path(rel_path)
+            if not full_path:
+                self.send_error(404, "File not found")
+                return
+            from promptstudio.config import VIDEO_EXTENSIONS
+            from promptstudio.storage.metadata import load_post_metadata
+            from promptstudio.storage.thumbs import thumb_url
+
+            filename = os.path.basename(full_path)
+            creator = rel_path.split("/")[0] if "/" in rel_path else ""
+            ext = os.path.splitext(filename)[1].lower()
+            is_video = ext in VIDEO_EXTENSIONS or ext == ".mov"
+            meta = load_post_metadata(full_path) or {}
+            try:
+                file_size = os.path.getsize(full_path)
+            except OSError:
+                file_size = 0
+            glam_score = meta.get("glam_score")
+            if glam_score is None:
+                try:
+                    from promptstudio.storage.db import ArchiveIndex
+
+                    glam_score = ArchiveIndex.get().get_glam_score(rel_path)
+                except Exception:
+                    glam_score = -1
+            try:
+                glam_score = int(glam_score)
+            except (TypeError, ValueError):
+                glam_score = -1
+            glam_block = meta.get("glam") if isinstance(meta.get("glam"), dict) else {}
+            if not glam_block and isinstance(meta.get("glam_classify"), dict):
+                glam_block = meta.get("glam_classify") or {}
+            fav = False
+            try:
+                fav = bool(_favorites.is_favorite(rel_path))
+            except Exception:
+                fav = False
+            shortcode = meta.get("shortcode") or ""
+            post_url = meta.get("post_url") or (
+                f"https://www.instagram.com/p/{shortcode}/" if shortcode else ""
+            )
+            # Prefer reel URL shape when video + shortcode
+            if is_video and shortcode and "/p/" in post_url:
+                post_url = f"https://www.instagram.com/reel/{shortcode}/"
+            self._send_json(
+                {
+                    "rel_path": rel_path,
+                    "filename": filename,
+                    "creator": creator or meta.get("owner_username") or "",
+                    "is_video": is_video,
+                    "url": f"/media/{urllib.parse.quote(rel_path)}",
+                    "thumb_url": thumb_url(rel_path),
+                    "file_size": file_size,
+                    "glam_score": glam_score,
+                    "favorite": fav,
+                    "caption": meta.get("caption") or "",
+                    "shortcode": shortcode,
+                    "post_url": post_url,
+                    "post_id": meta.get("post_id") or "",
+                    "taken_at": meta.get("taken_at") or "",
+                    "downloaded_at": meta.get("downloaded_at") or "",
+                    "carousel_index": meta.get("carousel_index", 0),
+                    "source": meta.get("source") or "",
+                    "glam": glam_block or None,
+                }
+            )
+            return
+
         if path.startswith("/media/thumb/"):
             rel_path = urllib.parse.unquote(path[len("/media/thumb/") :])
             full_path = _archive.resolve_path(rel_path)

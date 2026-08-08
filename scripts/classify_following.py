@@ -268,7 +268,7 @@ def classify_one(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Dry-run: classify following for woman+sexy outfit+good breasts (no unfollow)"
+        description="Dry-run: classify following with glam/fashion keep filter (no unfollow)"
     )
     parser.add_argument(
         "--start-index",

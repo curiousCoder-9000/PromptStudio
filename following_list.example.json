@@ -1,0 +1,7 @@
+{
+  "_comment": "Copy to following_list.json after export, or generate via: py scripts/export_following_list.py",
+  "username": "YOUR_INSTAGRAM_USERNAME",
+  "exported_at": null,
+  "total": 0,
+  "accounts": []
+}

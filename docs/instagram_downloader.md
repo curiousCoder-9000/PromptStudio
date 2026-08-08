@@ -3,7 +3,7 @@
 Agent map: [context.md](context.md).
 
 Local archive: `~/Pictures/InstagramSaved` (`PROMPTSTUDIO_ARCHIVE`)  
-Session user: `promptstudio.config.SESSION_USER` (default `YOUR_INSTAGRAM_USERNAME`)
+Session user: `promptstudio.config.SESSION_USER` from `INSTAGRAM_SESSION_USER` in `.env` (required for scrape)
 
 ---
 

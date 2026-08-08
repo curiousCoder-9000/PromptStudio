@@ -1,22 +1,85 @@
-# Binaries
+# ── Secrets & local env ──────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ── Instagram / Instaloader sessions (never commit) ──────────────
+**/session-*
+*.session
+cookies*.txt
+instaloader/
+
+# ── Personal following / classify dumps (generated locally) ──────
+# docs/following_*.md stubs stay tracked; only data dumps are ignored
+following_list.json
+following_list.json.*
+following_classify_report.json
+local_photo_classify_*.json
+
+# ── Local archive data (lives under PROMPTSTUDIO_ARCHIVE) ────────
+# If someone points the archive at the repo root by mistake:
+prompts_cache.json
+sync_status.json
+sync_state.json
+following_queue.json
+creator_scrape_queue.json
+creator_styles.json
+favorites.json
+generations_index.json
+archive.db
+archive.db-*
+_thumbs/
+_generations/
+_no_person_detected/
+_classify/
+
+# ── Python ───────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.out
+coverage.*
+
+# ── Node / frontend tooling (if added later) ─────────────────────
+node_modules/
+npm-debug.log*
+
+# ── Editors & OS ─────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Local agent / tooling state ──────────────────────────────────
+.claude/
+.grok/
+.cursor/
+
+# ── Legacy / unrelated binaries ──────────────────────────────────
 /bin/
 /server
 urlshortener
 
-# Test / coverage artifacts
-*.out
-coverage.*
-
-# Env & editor
-.env
-.env.local
-.idea/
-.vscode/
-.DS_Store
-
-# Local tooling state (Claude Code, etc.)
-.claude/
-
-# Python
-__pycache__/
-*.pyc
+# ── Media that must never land in git ────────────────────────────
+*.mp4
+*.webm
+*.mov
+# Keep sample assets out; archive photos live outside the repo
+!promptstudio/comfy/workflows/*.json

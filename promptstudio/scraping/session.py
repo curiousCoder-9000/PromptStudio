@@ -29,14 +29,21 @@ def create_instaloader(dirname_pattern: str | None = None) -> instaloader.Instal
 
 def load_session(L: instaloader.Instaloader, session_user: str = SESSION_USER) -> None:
     """Load Instaloader session file for session_user."""
-    session_file = os.path.join(INSTALOADER_SESSION_DIR, f"session-{session_user}")
+    user = (session_user or SESSION_USER or "").strip()
+    if not user:
+        raise RuntimeError(
+            "INSTAGRAM_SESSION_USER is not set. Copy .env.example to .env and set "
+            "your Instagram username, then run: instaloader --login YOUR_USERNAME"
+        )
+    session_file = os.path.join(INSTALOADER_SESSION_DIR, f"session-{user}")
     if os.path.isfile(session_file):
-        L.load_session_from_file(session_user, filename=session_file)
+        L.load_session_from_file(user, filename=session_file)
         return
     # Fall back to Instaloader's default search path
-    L.load_session_from_file(session_user)
+    L.load_session_from_file(user)
 
 
 def authenticated_profile(L: instaloader.Instaloader, session_user: str = SESSION_USER):
-    load_session(L, session_user)
-    return instaloader.Profile.from_username(L.context, session_user)
+    user = (session_user or SESSION_USER or "").strip()
+    load_session(L, user)
+    return instaloader.Profile.from_username(L.context, user)
