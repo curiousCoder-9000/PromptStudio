@@ -35,6 +35,11 @@ py scripts/prioritize_following_queue.py --requeue-keep
 # Score local images+videos for gallery Sexy filter (writes glam_score)
 py scripts/classify_local_photos.py --limit 40
 py scripts/backfill_glam_scores.py   # from existing report, no Ollama
+
+# See the contact sheet a reel classify would send to Ollama — no vision call.
+# Tune CLASSIFY_REEL_* by eye: if the reveal is not in a panel, no prompt or
+# model change can recover it.
+py scripts/preview_reel_sheet.py ~/Pictures/InstagramSaved/someone --limit 5
 ```
 
 Queue + daily budget live in `~/Pictures/InstagramSaved/following_queue.json`. On abort (rate-limit streak / abuse signal) the CLI exits with code `2`.

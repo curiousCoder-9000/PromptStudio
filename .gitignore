@@ -36,6 +36,8 @@ _thumbs/
 _generations/
 _no_person_detected/
 _classify/
+# scripts/preview_reel_sheet.py output
+_reel_sheets/
 
 # ── Python ───────────────────────────────────────────────────────
 __pycache__/

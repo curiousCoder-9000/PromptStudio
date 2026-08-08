@@ -173,14 +173,39 @@ GLAM_SEXY_MIN = int(os.environ.get("GLAM_SEXY_MIN", "2"))
 
 # Reel / video glam classify
 CLASSIFY_MAX_EDGE = int(os.environ.get("CLASSIFY_MAX_EDGE", "768"))
-CLASSIFY_REEL_CANDIDATES = int(os.environ.get("CLASSIFY_REEL_CANDIDATES", "10"))
-CLASSIFY_REEL_VISION_MAX = int(os.environ.get("CLASSIFY_REEL_VISION_MAX", "1"))
-CLASSIFY_REEL_SKIP_HEAD_FRAC = float(os.environ.get("CLASSIFY_REEL_SKIP_HEAD_FRAC", "0.08"))
-CLASSIFY_REEL_SKIP_TAIL_FRAC = float(os.environ.get("CLASSIFY_REEL_SKIP_TAIL_FRAC", "0.06"))
+# Contact sheets carry 9 panels, so they need a larger edge than a single frame.
+CLASSIFY_SHEET_MAX_EDGE = int(os.environ.get("CLASSIFY_SHEET_MAX_EDGE", "1368"))
+CLASSIFY_NUM_CTX = int(os.environ.get("CLASSIFY_NUM_CTX", "8192"))
+CLASSIFY_NUM_PREDICT = int(os.environ.get("CLASSIFY_NUM_PREDICT", "400"))
+CLASSIFY_TIMEOUT = float(os.environ.get("CLASSIFY_TIMEOUT", "180"))
+CLASSIFY_RETRIES = int(os.environ.get("CLASSIFY_RETRIES", "2"))
+CLASSIFY_KEEP_ALIVE = os.environ.get("CLASSIFY_KEEP_ALIVE", "30m")
+# JSON-schema constrained decoding (Ollama `format`). Off => legacy regex scrape.
+CLASSIFY_STRUCTURED = _env_bool("CLASSIFY_STRUCTURED", "1")
+# Opt-in: score photos with the v4 ordinal prompt too. Default off so existing
+# photo scores stay comparable — flip only after re-scoring the archive.
+CLASSIFY_PHOTO_ORDINAL = _env_bool("CLASSIFY_PHOTO_ORDINAL", "0")
+
+CLASSIFY_REEL_CANDIDATES = int(os.environ.get("CLASSIFY_REEL_CANDIDATES", "16"))
+CLASSIFY_REEL_VISION_MAX = int(os.environ.get("CLASSIFY_REEL_VISION_MAX", "2"))
+CLASSIFY_REEL_SKIP_HEAD_FRAC = float(os.environ.get("CLASSIFY_REEL_SKIP_HEAD_FRAC", "0.02"))
+# 0.0 on purpose: reels reveal the payoff outfit in the final seconds.
+CLASSIFY_REEL_SKIP_TAIL_FRAC = float(os.environ.get("CLASSIFY_REEL_SKIP_TAIL_FRAC", "0.0"))
 CLASSIFY_REEL_MIN_BRIGHT = float(os.environ.get("CLASSIFY_REEL_MIN_BRIGHT", "22"))
 CLASSIFY_REEL_MIN_SHARP = float(os.environ.get("CLASSIFY_REEL_MIN_SHARP", "35"))
+# "Sharp enough" reference — frames at/above this stop earning extra rank, so an
+# adequately sharp reveal is not beaten by a razor-sharp static intro.
+CLASSIFY_REEL_SHARP_REF = float(os.environ.get("CLASSIFY_REEL_SHARP_REF", "140"))
 CLASSIFY_REEL_UNCERTAIN_LO = float(os.environ.get("CLASSIFY_REEL_UNCERTAIN_LO", "0.45"))
 CLASSIFY_REEL_UNCERTAIN_HI = float(os.environ.get("CLASSIFY_REEL_UNCERTAIN_HI", "0.65"))
+# Whole-reel contact sheet: one vision call sees the entire timeline.
+CLASSIFY_REEL_SHEET = _env_bool("CLASSIFY_REEL_SHEET", "1")
+CLASSIFY_REEL_SHEET_PANELS = int(os.environ.get("CLASSIFY_REEL_SHEET_PANELS", "9"))
+CLASSIFY_REEL_SHEET_PANEL_W = int(os.environ.get("CLASSIFY_REEL_SHEET_PANEL_W", "256"))
+# Skin-tone fraction weight in the frame ranker. 0 disables the term.
+CLASSIFY_REEL_SKIN_WEIGHT = float(os.environ.get("CLASSIFY_REEL_SKIN_WEIGHT", "1.0"))
+# HSV histogram correlation below this between neighbouring samples => shot cut.
+CLASSIFY_REEL_CUT_THRESHOLD = float(os.environ.get("CLASSIFY_REEL_CUT_THRESHOLD", "0.45"))
 
 # Storage conventions
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".webp", ".png")

@@ -16,6 +16,18 @@ def thumb_disk_path(rel_path: str, thumb_dir: str = THUMB_DIR) -> str:
     return os.path.join(thumb_dir, thumb_rel_path(rel_path))
 
 
+def _classified_peak_time(full_path: str) -> Optional[float]:
+    """Peak-outfit timestamp the reel classifier recorded, if it has run."""
+    try:
+        from promptstudio.storage.metadata import load_post_metadata
+
+        glam = (load_post_metadata(full_path) or {}).get("glam") or {}
+        peak = glam.get("peak_time_sec")
+        return float(peak) if peak is not None and float(peak) > 0 else None
+    except Exception:
+        return None
+
+
 def ensure_thumbnail(
     full_path: str,
     rel_path: str,
@@ -44,7 +56,18 @@ def ensure_thumbnail(
                 write_best_video_frame_jpeg,
             )
 
-            # Prefer companion cover still when present (cheap, often good)
+            # The classifier already found the most interesting moment — reuse it
+            # so the grid tile shows the reveal rather than the intro title card.
+            if write_best_video_frame_jpeg(
+                full_path,
+                out_path,
+                max_edge=max_size,
+                jpeg_quality=82,
+                at_sec=_classified_peak_time(full_path),
+            ):
+                return out_path
+
+            # Companion cover still (this video's own, not a carousel sibling)
             cover = find_video_cover_image(full_path)
             if cover and os.path.isfile(cover):
                 try:
@@ -58,11 +81,6 @@ def ensure_thumbnail(
                         return out_path
                 except Exception:
                     pass
-
-            if write_best_video_frame_jpeg(
-                full_path, out_path, max_edge=max_size, jpeg_quality=82
-            ):
-                return out_path
         except Exception as e:
             print(f"Video thumbnail error for {rel_path}: {e}")
 

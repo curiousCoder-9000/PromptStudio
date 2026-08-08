@@ -1,8 +1,14 @@
 # Design: Reel / video glam classifier
 
+> **Superseded by [`design_reel_classifier_v2.md`](design_reel_classifier_v2.md)** (2026-08-09).
+> The V1 approach below — rank frames by sharpness, send the best one — is
+> structurally blind to reels that reveal the outfit in the final seconds, and
+> its prompt pushed 85% of scored videos to glam 3. Kept for history and because
+> the legacy per-frame path still runs under `CLASSIFY_REEL_SHEET=0`.
+
 | Field | Value |
 |-------|--------|
-| **Status** | PR1–PR3 implemented (smart frames, reel prompt, best-frame thumbs) |
+| **Status** | Superseded — PR1–PR3 shipped (smart frames, reel prompt, best-frame thumbs) |
 | **Date** | 2026-08-08 |
 | **Problem** | Photo-oriented glam classify fails or mis-scores Instagram reels; ~55% of local videos still unscored |
 | **Owner modules** | `outfit_classifier.py`, `classify_job.py`, `thumbs.py`, optional download cover path |
