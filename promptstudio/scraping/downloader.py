@@ -63,6 +63,7 @@ class SyncResult:
     job_type: str
     downloaded: int = 0
     skipped: int = 0
+    skipped_deleted: int = 0
     errors: int = 0
     rate_limit_hits: int = 0
     aborted: bool = False
@@ -195,11 +196,27 @@ class InstagramDownloader:
                 found.append(full)
         return found
 
-    def _post_archive_state(self, post) -> str:
-        """Return 'complete', 'incomplete', or 'missing' for local archive state."""
+    def _post_archive_state(self, post, username: str = "") -> str:
+        """Return 'complete', 'incomplete', 'missing', or 'deleted' for local archive state."""
         shortcode = getattr(post, "shortcode", "") or ""
         post_id = str(getattr(post, "mediaid", "") or "")
         creator = getattr(post, "owner_username", "") or ""
+        handle = (username or creator or "").lstrip("@").strip()
+
+        # Intentional user deletes — never re-download
+        if shortcode or post_id:
+            try:
+                from promptstudio.storage.db import ArchiveIndex
+
+                index = ArchiveIndex.get()
+                for cand in {handle.lower(), creator.lower()} if handle or creator else set():
+                    if cand and index.is_deleted_post(
+                        cand, shortcode=shortcode or None, post_id=post_id or None
+                    ):
+                        return "deleted"
+            except Exception as e:
+                self.log(f"Tombstone lookup warning: {e}")
+
         paths: list = []
         try:
             from promptstudio.storage.db import ArchiveIndex
@@ -226,8 +243,8 @@ class InstagramDownloader:
             return "complete"
         return "incomplete"
 
-    def _post_already_archived(self, post) -> bool:
-        return self._post_archive_state(post) == "complete"
+    def _post_already_archived(self, post, username: str = "") -> bool:
+        return self._post_archive_state(post, username=username) in ("complete", "deleted")
 
     def _backoff_seconds(self) -> int:
         n = max(1, self._consecutive_rate_limits)
@@ -292,7 +309,13 @@ class InstagramDownloader:
                 self._trigger_abort("Cancelled by user", result)
             return False
         creator = post.owner_username
-        state = self._post_archive_state(post)
+        state = self._post_archive_state(post, username=username)
+        if state == "deleted":
+            result.skipped += 1
+            result.skipped_deleted += 1
+            sc = getattr(post, "shortcode", "") or ""
+            self.log(f"Skip (deleted): @{username or creator} {sc}")
+            return False
         if state == "complete":
             result.skipped += 1
             sc = getattr(post, "shortcode", "") or ""
@@ -395,6 +418,7 @@ class InstagramDownloader:
         mode:
           - bounded: existing rank/scan/top-N path (default; used by following bulk)
           - full: stream entire feed; deep=True disables catch-up (true archive)
+          - latest: stream newest-first with catch-up on (existing folders; no glam rank)
         """
         result = SyncResult(job_type="creator")
         username = username.lstrip("@").strip()
@@ -404,12 +428,21 @@ class InstagramDownloader:
             return result
 
         mode = (mode or "bounded").strip().lower()
+        if mode == "latest":
+            # Alias: streaming + catch-up on + download ceiling = max_posts
+            mode = "full"
+            deep = False
+            result.messages.append("mode=latest (catch-up stream)")
         if mode not in ("bounded", "full"):
             mode = "bounded"
 
         self.log(
             f"=== Syncing feed @{username} mode={mode}"
-            + (f" deep={deep}" if mode == "full" else f" max={max_posts}")
+            + (
+                f" deep={deep}"
+                if mode == "full"
+                else f" max={max_posts}"
+            )
             + f" videos={'on' if include_videos else 'off'} ==="
         )
         try:
@@ -504,12 +537,16 @@ class InstagramDownloader:
                     result.skipped += 1
                     continue
                 scanned += 1
-                state = self._post_archive_state(post)
-                if state == "complete":
+                state = self._post_archive_state(post, username=username)
+                if state in ("complete", "deleted"):
                     result.skipped += 1
-                    consecutive_known += 1
                     sc = getattr(post, "shortcode", "") or ""
-                    self.log(f"Skip (archived): @{username} {sc}")
+                    if state == "deleted":
+                        result.skipped_deleted += 1
+                        self.log(f"Skip (deleted): @{username} {sc}")
+                    else:
+                        self.log(f"Skip (archived): @{username} {sc}")
+                    consecutive_known += 1
                     if consecutive_known >= CATCH_UP_STREAK:
                         self.log(
                             f"Catch-up streak {consecutive_known} — stop scan @{username}"
@@ -586,7 +623,9 @@ class InstagramDownloader:
                 result.stop_reason = "end_of_feed"
         self.log(
             f"Feed sync @{username}: {result.downloaded} new, "
-            f"{result.skipped} skipped, {result.errors} errors"
+            f"{result.skipped} skipped"
+            + (f" ({result.skipped_deleted} deleted)" if result.skipped_deleted else "")
+            + f", {result.errors} errors"
             + (f" [{result.stop_reason}]" if result.stop_reason else "")
             + (f" [ABORTED]" if result.aborted else "")
         )
@@ -635,12 +674,16 @@ class InstagramDownloader:
                     continue
 
                 scanned += 1
-                state = self._post_archive_state(post)
+                state = self._post_archive_state(post, username=username)
 
-                if state == "complete":
+                if state in ("complete", "deleted"):
                     result.skipped += 1
                     sc = getattr(post, "shortcode", "") or ""
-                    self.log(f"Skip (archived): @{username} {sc}")
+                    if state == "deleted":
+                        result.skipped_deleted += 1
+                        self.log(f"Skip (deleted): @{username} {sc}")
+                    else:
+                        self.log(f"Skip (archived): @{username} {sc}")
                     if use_catch_up:
                         consecutive_known += 1
                         if consecutive_known >= CATCH_UP_STREAK:
@@ -711,7 +754,9 @@ class InstagramDownloader:
             organize_root_images(self.save_dir, log=self.log)
         self.log(
             f"Full feed @{username}: {result.downloaded} new, "
-            f"{result.skipped} skipped, {result.errors} errors"
+            f"{result.skipped} skipped"
+            + (f" ({result.skipped_deleted} deleted)" if result.skipped_deleted else "")
+            + f", {result.errors} errors"
             + (f" [{result.stop_reason}]" if result.stop_reason else "")
             + (f" [ABORTED]" if result.aborted else "")
         )

@@ -296,8 +296,16 @@ class SyncManager:
 
         job_id = job["id"]
         username = job.get("username") or ""
-        mode = job.get("mode") or "full"
-        deep = bool(job.get("deep", True)) if mode == "full" else False
+        mode = (job.get("mode") or "full").strip().lower()
+        if mode not in ("full", "bounded", "latest"):
+            mode = "full"
+        # latest always catch-up; full uses deep flag; bounded ignores deep
+        if mode == "latest":
+            deep = False
+        elif mode == "full":
+            deep = bool(job.get("deep", True))
+        else:
+            deep = False
         include_videos = job.get("include_videos")
         if include_videos is None:
             include_videos = INCLUDE_VIDEOS_DEFAULT
@@ -308,6 +316,7 @@ class SyncManager:
             else:
                 max_posts = int(max_posts)
         else:
+            # bounded + latest: default 50 new downloads ceiling
             max_posts = int(max_posts or DEFAULT_MAX_POSTS_PER_CREATOR)
 
         def fn(log, on_rate_limit=None):

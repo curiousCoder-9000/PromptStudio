@@ -129,9 +129,11 @@ const elements = {
     syncInstagramBtn: document.getElementById('syncInstagramBtn'),
     scrapeCreatorInput: document.getElementById('scrapeCreatorInput'),
     scrapeEnqueueBtn: document.getElementById('scrapeEnqueueBtn'),
+    scrapeLatestMode: document.getElementById('scrapeLatestMode'),
     scrapeFullDeep: document.getElementById('scrapeFullDeep'),
     scrapeBoundedMode: document.getElementById('scrapeBoundedMode'),
     scrapeMaxPosts: document.getElementById('scrapeMaxPosts'),
+    syncLatestCreatorBtn: document.getElementById('syncLatestCreatorBtn'),
     scrapePauseBtn: document.getElementById('scrapePauseBtn'),
     scrapeResumeBtn: document.getElementById('scrapeResumeBtn'),
     scrapeCancelBtn: document.getElementById('scrapeCancelBtn'),
@@ -1603,6 +1605,9 @@ function setupEventListeners() {
     if (elements.classifyCreatorBtn) {
         elements.classifyCreatorBtn.addEventListener('click', startCreatorClassify);
     }
+    if (elements.syncLatestCreatorBtn) {
+        elements.syncLatestCreatorBtn.addEventListener('click', syncLatestSelectedCreator);
+    }
     if (elements.reviewRejectsBtn) {
         elements.reviewRejectsBtn.addEventListener('click', () => {
             if (!state.selectedCreator) {
@@ -1752,14 +1757,36 @@ function setupEventListeners() {
     if (elements.scrapeClearPendingBtn) {
         elements.scrapeClearPendingBtn.addEventListener('click', clearPendingScrapeJobs);
     }
+    function updateScrapeModeUi() {
+        const latest = Boolean(elements.scrapeLatestMode?.checked);
+        const bounded = Boolean(elements.scrapeBoundedMode?.checked);
+        if (elements.scrapeMaxPosts) {
+            elements.scrapeMaxPosts.disabled = !(latest || bounded);
+        }
+        if (elements.scrapeFullDeep) {
+            elements.scrapeFullDeep.disabled = latest || bounded;
+        }
+        if (elements.scrapeBoundedMode && latest) {
+            elements.scrapeBoundedMode.checked = false;
+        }
+        if (elements.scrapeLatestMode && bounded && elements.scrapeLatestMode.checked === false) {
+            /* leave latest alone when only bounded toggled */
+        }
+    }
     if (elements.scrapeBoundedMode) {
         elements.scrapeBoundedMode.addEventListener('change', () => {
-            if (elements.scrapeMaxPosts) {
-                elements.scrapeMaxPosts.disabled = !elements.scrapeBoundedMode.checked;
+            if (elements.scrapeBoundedMode.checked && elements.scrapeLatestMode) {
+                elements.scrapeLatestMode.checked = false;
             }
-            if (elements.scrapeFullDeep) {
-                elements.scrapeFullDeep.disabled = elements.scrapeBoundedMode.checked;
+            updateScrapeModeUi();
+        });
+    }
+    if (elements.scrapeLatestMode) {
+        elements.scrapeLatestMode.addEventListener('change', () => {
+            if (elements.scrapeLatestMode.checked && elements.scrapeBoundedMode) {
+                elements.scrapeBoundedMode.checked = false;
             }
+            updateScrapeModeUi();
         });
     }
     if (elements.scrapeCreatorInput) {
@@ -2108,15 +2135,52 @@ async function pollScrapeStatus() {
     state.scrapePollTimer = setInterval(update, 2500);
 }
 
+async function syncLatestSelectedCreator() {
+    const username = (state.selectedCreator || '').trim().replace(/^@/, '');
+    if (!username) {
+        showToast('Select a creator first');
+        return;
+    }
+    try {
+        const res = await fetch('/api/scrape/enqueue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                username,
+                mode: 'latest',
+                max_posts: 50,
+                include_videos: syncIncludeVideosValue(),
+            }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.message || data.error || `Sync failed (${res.status})`);
+            return;
+        }
+        const st = data.status || 'queued';
+        if (st === 'started') showToast(`Syncing new posts for @${username}…`);
+        else if (st === 'queued') showToast(`@${username} latest sync queued`);
+        else if (st === 'already_pending' || st === 'already_running') {
+            showToast(`@${username} already ${st.replace('already_', '')}`);
+        } else showToast(`@${username}: ${st}`);
+        openSyncModal();
+    } catch (err) {
+        showToast('Failed to start latest sync');
+    }
+}
+
 async function enqueueCreatorScrape() {
     const username = (elements.scrapeCreatorInput?.value || '').trim().replace(/^@/, '');
     if (!username) {
         showToast('Enter a creator handle');
         return;
     }
+    const latest = Boolean(elements.scrapeLatestMode?.checked);
     const bounded = Boolean(elements.scrapeBoundedMode?.checked);
-    const mode = bounded ? 'bounded' : 'full';
-    const deep = bounded ? false : Boolean(elements.scrapeFullDeep?.checked ?? true);
+    let mode = 'full';
+    if (latest) mode = 'latest';
+    else if (bounded) mode = 'bounded';
+    const deep = mode === 'full' ? Boolean(elements.scrapeFullDeep?.checked ?? true) : false;
     const maxPosts = parseInt(elements.scrapeMaxPosts?.value || '50', 10);
     const body = {
         username,
@@ -2124,7 +2188,7 @@ async function enqueueCreatorScrape() {
         deep,
         include_videos: syncIncludeVideosValue(),
     };
-    if (bounded) body.max_posts = maxPosts || 50;
+    if (mode === 'bounded' || mode === 'latest') body.max_posts = maxPosts || 50;
     try {
         const res = await fetch('/api/scrape/enqueue', {
             method: 'POST',

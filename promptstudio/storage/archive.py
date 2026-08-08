@@ -172,6 +172,41 @@ class ArchiveStore:
         if not full:
             return None
         filename = os.path.basename(full)
+        rel = rel_path.replace("\\", "/").lstrip("/")
+        creator = os.path.basename(os.path.dirname(full))
+
+        # Tombstone Instagram identity so future sync never re-downloads this post
+        post_id: Optional[str] = None
+        shortcode: Optional[str] = None
+        try:
+            c, pid, sc = self._index.get_photo_identity(rel)
+            if c:
+                creator = c
+            post_id = pid
+            shortcode = sc
+        except Exception:
+            pass
+        if not post_id and not shortcode:
+            try:
+                from promptstudio.storage.metadata import load_post_metadata
+
+                meta = load_post_metadata(full) or {}
+                post_id = str(meta.get("post_id") or "") or None
+                shortcode = str(meta.get("shortcode") or "") or None
+            except Exception:
+                pass
+        if post_id or shortcode:
+            try:
+                self._index.record_deleted_post(
+                    creator,
+                    shortcode=shortcode,
+                    post_id=post_id,
+                    rel_path=rel,
+                    source="ui",
+                )
+            except Exception:
+                pass
+
         os.remove(full)
         try:
             from promptstudio.storage.metadata import delete_metadata_for_image

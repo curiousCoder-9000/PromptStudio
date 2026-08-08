@@ -49,6 +49,16 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+CREATE TABLE IF NOT EXISTS deleted_posts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  creator TEXT NOT NULL,
+  shortcode TEXT,
+  post_id TEXT,
+  rel_path TEXT,
+  deleted_at TEXT NOT NULL,
+  source TEXT DEFAULT 'ui'
+);
+CREATE INDEX IF NOT EXISTS idx_deleted_creator ON deleted_posts(creator);
 """
 
 _IDENTITY_COLUMNS = (
@@ -57,6 +67,19 @@ _IDENTITY_COLUMNS = (
     # glam_score: -1 unscored, 0 modest/no-woman, 1 woman, 2 sexy, 3 sexy+figure
     ("glam_score", "INTEGER NOT NULL DEFAULT -1"),
 )
+
+_DELETED_POSTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS deleted_posts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  creator TEXT NOT NULL,
+  shortcode TEXT,
+  post_id TEXT,
+  rel_path TEXT,
+  deleted_at TEXT NOT NULL,
+  source TEXT DEFAULT 'ui'
+);
+CREATE INDEX IF NOT EXISTS idx_deleted_creator ON deleted_posts(creator);
+"""
 
 def is_media_file(name: str) -> bool:
     return name.lower().endswith(MEDIA_EXTENSIONS)
@@ -131,6 +154,7 @@ class ArchiveIndex:
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._migrate_identity_columns()
+            self._migrate_deleted_posts()
             self._conn.commit()
 
     def _migrate_identity_columns(self) -> None:
@@ -150,6 +174,21 @@ class ArchiveIndex:
         )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_photos_glam ON photos(glam_score)"
+        )
+
+    def _migrate_deleted_posts(self) -> None:
+        """Ensure deleted_posts tombstone table exists on older DBs."""
+        self._conn.executescript(_DELETED_POSTS_SCHEMA)
+        # Partial unique indexes (SQLite) — recreate if missing
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_deleted_shortcode "
+            "ON deleted_posts(creator, shortcode) "
+            "WHERE shortcode IS NOT NULL AND shortcode != ''"
+        )
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_deleted_post_id "
+            "ON deleted_posts(creator, post_id) "
+            "WHERE post_id IS NOT NULL AND post_id != ''"
         )
 
     @classmethod
@@ -420,6 +459,136 @@ class ArchiveIndex:
         with self._lock:
             self._conn.execute("DELETE FROM photos WHERE rel_path = ?", (rel,))
             self._conn.commit()
+
+    def get_photo_identity(self, rel_path: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Return (creator, post_id, shortcode) from index for a rel_path."""
+        rel = normalize_rel_path(rel_path)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT creator, post_id, shortcode FROM photos WHERE rel_path = ?",
+                (rel,),
+            ).fetchone()
+        if not row:
+            return None, None, None
+        return (
+            str(row["creator"] or "") or None,
+            str(row["post_id"] or "") or None,
+            str(row["shortcode"] or "") or None,
+        )
+
+    @staticmethod
+    def _norm_creator(creator: str) -> str:
+        return (creator or "").lstrip("@").strip().lower()
+
+    def record_deleted_post(
+        self,
+        creator: str,
+        *,
+        shortcode: Optional[str] = None,
+        post_id: Optional[str] = None,
+        rel_path: Optional[str] = None,
+        source: str = "ui",
+    ) -> bool:
+        """Tombstone an Instagram post so sync never re-downloads it.
+
+        Returns True if a row was written/updated.
+        """
+        from datetime import datetime, timezone
+
+        creator_key = self._norm_creator(creator)
+        sc = (shortcode or "").strip() or None
+        pid = str(post_id or "").strip() or None
+        if not creator_key or (not sc and not pid):
+            return False
+        now = datetime.now(timezone.utc).isoformat()
+        rel = normalize_rel_path(rel_path) if rel_path else None
+        with self._lock:
+            # Prefer update existing match by shortcode or post_id
+            existing = None
+            if sc:
+                existing = self._conn.execute(
+                    "SELECT id FROM deleted_posts WHERE creator = ? AND shortcode = ?",
+                    (creator_key, sc),
+                ).fetchone()
+            if not existing and pid:
+                existing = self._conn.execute(
+                    "SELECT id FROM deleted_posts WHERE creator = ? AND post_id = ?",
+                    (creator_key, pid),
+                ).fetchone()
+            if existing:
+                self._conn.execute(
+                    "UPDATE deleted_posts SET shortcode = COALESCE(?, shortcode), "
+                    "post_id = COALESCE(?, post_id), rel_path = COALESCE(?, rel_path), "
+                    "deleted_at = ?, source = ? WHERE id = ?",
+                    (sc, pid, rel, now, source or "ui", existing["id"]),
+                )
+            else:
+                self._conn.execute(
+                    "INSERT INTO deleted_posts(creator, shortcode, post_id, rel_path, deleted_at, source) "
+                    "VALUES(?, ?, ?, ?, ?, ?)",
+                    (creator_key, sc, pid, rel, now, source or "ui"),
+                )
+            self._conn.commit()
+        return True
+
+    def is_deleted_post(
+        self,
+        creator: str,
+        *,
+        shortcode: Optional[str] = None,
+        post_id: Optional[str] = None,
+    ) -> bool:
+        """True if this Instagram identity was intentionally deleted for creator."""
+        creator_key = self._norm_creator(creator)
+        sc = (shortcode or "").strip()
+        pid = str(post_id or "").strip()
+        if not creator_key or (not sc and not pid):
+            return False
+        clauses: List[str] = []
+        params: List[Any] = [creator_key]
+        if sc:
+            clauses.append("shortcode = ?")
+            params.append(sc)
+        if pid:
+            clauses.append("post_id = ?")
+            params.append(pid)
+        where_id = " OR ".join(clauses)
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT 1 FROM deleted_posts WHERE creator = ? AND ({where_id}) LIMIT 1",
+                params,
+            ).fetchone()
+        return row is not None
+
+    def clear_deleted_post(
+        self,
+        creator: str,
+        *,
+        shortcode: Optional[str] = None,
+        post_id: Optional[str] = None,
+    ) -> int:
+        """Remove tombstone(s). Returns number of rows deleted."""
+        creator_key = self._norm_creator(creator)
+        sc = (shortcode or "").strip()
+        pid = str(post_id or "").strip()
+        if not creator_key or (not sc and not pid):
+            return 0
+        clauses: List[str] = []
+        params: List[Any] = [creator_key]
+        if sc:
+            clauses.append("shortcode = ?")
+            params.append(sc)
+        if pid:
+            clauses.append("post_id = ?")
+            params.append(pid)
+        where_id = " OR ".join(clauses)
+        with self._lock:
+            cur = self._conn.execute(
+                f"DELETE FROM deleted_posts WHERE creator = ? AND ({where_id})",
+                params,
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0)
 
     def carousel_paths(
         self,

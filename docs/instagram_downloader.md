@@ -132,9 +132,24 @@ Posts are identified by Instagram `shortcode` / `post_id` in `*.meta.json` and t
 |-----------|-----------|
 | Post already on disk | Skip (`Skip (archived)`) — never re-download |
 | Deleted on Instagram after download | Keep local files forever |
-| Deleted locally (UI or disk) | Index row cleared → re-download if still in feed |
-| Incomplete carousel | Re-fetch to fill missing slides |
-| Partial / aborted run | Continue past known tip; stop after `IG_CATCH_UP_STREAK` (default **3**) consecutive already-archived posts |
+| Deleted locally **via app UI** | Tombstone in `deleted_posts` → **never re-download** on any sync mode |
+| Deleted only on disk (Explorer) | No tombstone — may re-download if still in feed (delete via app to lock out) |
+| Incomplete carousel | Re-fetch to fill missing slides (unless post is tombstoned) |
+| Partial / aborted run | Continue past known tip; stop after `IG_CATCH_UP_STREAK` (default **3**) consecutive **archived or deleted** posts |
+
+### Sync latest (existing creators)
+
+```http
+POST /api/scrape/enqueue
+{ "username": "handle", "mode": "latest", "max_posts": 50 }
+```
+
+- Streams feed newest-first (no glam rank).
+- Downloads only missing/incomplete posts.
+- Stops after catch-up streak of already-local **or tombstoned** posts.
+- UI: select creator → **Sync new posts** in the sidebar.
+
+CLI: `py scripts/download_creator_feed.py HANDLE --latest`
 
 `sync_state.json` still stores last shortcode / counts for telemetry, but is **not** used as the sole stop signal (that caused missed older posts after partial runs).
 

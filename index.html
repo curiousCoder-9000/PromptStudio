@@ -91,7 +91,13 @@
                     <!-- Dynamic Creator Items -->
                 </div>
                 <div class="creator-style-panel" id="creatorStylePanel" style="display:none;">
-                    <div class="sync-status-label">Classify &amp; clean</div>
+                    <div class="sync-status-label">Instagram</div>
+                    <div class="creator-classify-actions">
+                        <button class="btn btn-primary btn-sm full-width" id="syncLatestCreatorBtn" type="button" title="Fetch only new posts; never re-download existing or deleted">
+                            <i class="fa-solid fa-arrows-rotate"></i> Sync new posts
+                        </button>
+                    </div>
+                    <div class="sync-status-label" style="margin-top:6px;">Classify &amp; clean</div>
                     <div class="creator-classify-meta" id="creatorClassifyMeta">—</div>
                     <div class="creator-classify-actions">
                         <button class="btn btn-primary btn-sm full-width" id="classifyCreatorBtn" type="button" title="Score unscored media with glam vision filter">
@@ -436,6 +442,10 @@
                             <i class="fa-solid fa-cloud-arrow-down"></i> Enqueue
                         </button>
                     </div>
+                    <label class="sync-check-label" for="scrapeLatestMode" title="Only new posts until already-local/deleted streak">
+                        <input type="checkbox" id="scrapeLatestMode">
+                        Latest only (catch-up — existing folders)
+                    </label>
                     <label class="sync-check-label" for="scrapeFullDeep" title="Walk entire feed; fill gaps even after glam top-N pulls">
                         <input type="checkbox" id="scrapeFullDeep" checked>
                         Full archive (deep — catch-up off)

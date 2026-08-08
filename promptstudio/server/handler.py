@@ -160,7 +160,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     try:
                         filename = _archive.delete_photo(rel_path)
                         _prompt_cache.delete(rel_path, filename)
-                        # Index row cleared inside ArchiveStore.delete_photo → re-download allowed
+                        # Tombstone recorded in ArchiveStore.delete_photo → never re-download
                         delete_metadata_for_image(full_path)
                         _favorites.set_favorite(rel_path, False)
                         self._send_json({"status": "deleted", "filename": filename})
@@ -317,13 +317,18 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     self.send_error(400, "username required")
                     return
                 mode = (data.get("mode") or "full").strip().lower()
-                if mode not in ("full", "bounded"):
-                    self.send_error(400, "mode must be full or bounded")
+                if mode not in ("full", "bounded", "latest"):
+                    self.send_error(400, "mode must be full, bounded, or latest")
                     return
                 deep = data.get("deep", True)
                 if isinstance(deep, str):
                     deep = deep.lower() in ("1", "true", "yes")
-                deep = bool(deep) if mode == "full" else False
+                if mode == "latest":
+                    deep = False
+                elif mode == "full":
+                    deep = bool(deep)
+                else:
+                    deep = False
                 max_posts = data.get("max_posts")
                 if max_posts is not None and max_posts != "":
                     max_posts = int(max_posts)
@@ -463,12 +468,17 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 username = data.get("username", "").strip()
                 max_posts = int(data.get("max_posts", DEFAULT_MAX_POSTS_PER_CREATOR))
                 mode = (data.get("mode") or "bounded").strip().lower()
-                if mode not in ("bounded", "full"):
+                if mode not in ("bounded", "full", "latest"):
                     mode = "bounded"
                 deep = data.get("deep", True)
                 if isinstance(deep, str):
                     deep = deep.lower() in ("1", "true", "yes")
-                deep = bool(deep) if mode == "full" else False
+                if mode == "latest":
+                    deep = False
+                elif mode == "full":
+                    deep = bool(deep)
+                else:
+                    deep = False
                 if "include_videos" in data:
                     include_videos = bool(data.get("include_videos"))
                 else:

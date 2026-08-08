@@ -288,6 +288,16 @@ Serial creator scrape queue (never parallel with other IG jobs). Creates folder 
 
 Defaults: `mode=full`, `deep=true`. Status: `started` | `queued` | `already_pending` | `already_running`.
 
+`mode` values:
+
+| mode | Behavior |
+|------|----------|
+| `full` | Stream entire feed; `deep=true` = catch-up **off** (true archive) |
+| `latest` | Catch-up only for existing folders; never glam-rank; respects tombstones |
+| `bounded` | Glam rank + top-N (following bulk style) |
+
+**Deletes:** `DELETE /api/photo` records a tombstone (`deleted_posts` in `archive.db`) so future sync never re-downloads that shortcode/post_id.
+
 ### `GET /api/scrape/status`
 
 ```json

@@ -209,8 +209,8 @@ class CreatorScrapeQueue:
         if not key:
             raise ValueError("username required")
         mode = (mode or "full").strip().lower()
-        if mode not in ("full", "bounded"):
-            raise ValueError("mode must be full or bounded")
+        if mode not in ("full", "bounded", "latest"):
+            raise ValueError("mode must be full, bounded, or latest")
 
         with self._lock:
             existing = None
@@ -236,11 +236,13 @@ class CreatorScrapeQueue:
                     f"Queue full (max {CREATOR_SCRAPE_MAX_PENDING} pending)"
                 )
 
+            # latest = catch-up stream (deep always false)
+            job_deep = False if mode == "latest" else (bool(deep) if mode == "full" else False)
             job = {
                 "id": _new_job_id(),
                 "username": key,
                 "mode": mode,
-                "deep": bool(deep) if mode == "full" else False,
+                "deep": job_deep,
                 "max_posts": max_posts,
                 "include_videos": bool(include_videos),
                 "priority": int(priority or 0),

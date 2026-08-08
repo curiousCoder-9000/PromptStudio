@@ -28,6 +28,11 @@ def main():
         help="Stream full feed (no glam rank / top-N). Default is bounded.",
     )
     parser.add_argument(
+        "--latest",
+        action="store_true",
+        help="Catch-up only: newest posts until already-local/deleted streak (existing folders).",
+    )
+    parser.add_argument(
         "--deep",
         action="store_true",
         default=None,
@@ -58,13 +63,18 @@ def main():
     else:
         include_videos = INCLUDE_VIDEOS_DEFAULT
 
-    mode = "full" if args.full else "bounded"
+    if args.latest:
+        mode = "latest"
+    elif args.full:
+        mode = "full"
+    else:
+        mode = "bounded"
     if args.no_deep:
         deep = False
     elif args.deep:
         deep = True
     else:
-        deep = True  # default deep for full
+        deep = True  # default deep for full (ignored for latest)
 
     InstagramDownloader().sync_creator_feed(
         args.username,
