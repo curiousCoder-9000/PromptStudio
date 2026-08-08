@@ -39,11 +39,20 @@ const state = {
     photoTotal: 0,
     photoHasMore: false,
     photosLoading: false,
+    // Creator sidebar action panel (Sync / Classify / Style) — independent of filter selection
+    creatorPanelOpen: false,
+    // Video player
+    videoLoadToken: 0,
+    videoSeekHudTimer: null,
+    videoInFullscreenShell: false,
+    fsScrubbing: false,
+    fsUiWired: false,
     // Photo viewer zoom/pan state
     viewerZoom: 1,
     viewerPanX: 0,
     viewerPanY: 0,
     viewerDragging: false,
+    viewerMoved: false,
     viewerDragStartX: 0,
     viewerDragStartY: 0,
     viewerLastPanX: 0,
@@ -98,12 +107,30 @@ const elements = {
     copyFluxBtn: document.getElementById('copyFluxBtn'),
     copySdxlBtn: document.getElementById('copySdxlBtn'),
     copyPonyBtn: document.getElementById('copyPonyBtn'),
-    // Fullscreen Photo Viewer
+    // Fullscreen Photo / Video Viewer
     photoViewerOverlay: document.getElementById('photoViewerOverlay'),
     photoViewerClose: document.getElementById('photoViewerClose'),
     photoViewerContainer: document.getElementById('photoViewerContainer'),
     photoViewerImg: document.getElementById('photoViewerImg'),
     photoViewerHint: document.getElementById('photoViewerHint'),
+    videoExpandBtn: document.getElementById('videoExpandBtn'),
+    lightboxMediaPane: document.getElementById('lightboxMediaPane'),
+    videoBuffering: document.getElementById('videoBuffering'),
+    videoSeekHud: document.getElementById('videoSeekHud'),
+    fsVideoLayout: document.getElementById('fsVideoLayout'),
+    fsVideoStage: document.getElementById('fsVideoStage'),
+    fsVideoBar: document.getElementById('fsVideoBar'),
+    fsPlayPauseBtn: document.getElementById('fsPlayPauseBtn'),
+    fsPlayPauseIcon: document.getElementById('fsPlayPauseIcon'),
+    fsMuteBtn: document.getElementById('fsMuteBtn'),
+    fsMuteIcon: document.getElementById('fsMuteIcon'),
+    fsSeekWrap: document.getElementById('fsSeekWrap'),
+    fsSeekRange: document.getElementById('fsSeekRange'),
+    fsSeekPlayed: document.getElementById('fsSeekPlayed'),
+    fsSeekBuffered: document.getElementById('fsSeekBuffered'),
+    fsSeekThumb: document.getElementById('fsSeekThumb'),
+    fsTimeCurrent: document.getElementById('fsTimeCurrent'),
+    fsTimeDuration: document.getElementById('fsTimeDuration'),
     // Modals
     deleteConfirmModal: document.getElementById('deleteConfirmModal'),
     deleteFilenamePreview: document.getElementById('deleteFilenamePreview'),
@@ -212,6 +239,7 @@ const elements = {
 document.addEventListener('DOMContentLoaded', () => {
     initApp();
     setupEventListeners();
+    wireLightboxVideoEvents();
 });
 
 async function initApp() {
@@ -221,6 +249,8 @@ async function initApp() {
     await fetchPhotos();
     // Resume classify progress UI if a job is mid-flight
     pollClassifyStatus();
+    // Restore scrape/sync chip after refresh (queue lives on the server)
+    await hydrateScrapeUiFromServer();
     if (!state.healthPollTimer) {
         state.healthPollTimer = setInterval(fetchHealth, 30000);
     }
@@ -621,6 +651,7 @@ function renderCreatorList() {
     `;
     allItem.addEventListener('click', () => {
         state.selectedCreator = null;
+        state.creatorPanelOpen = false;
         elements.galleryTitle.textContent = 'All Photos';
         fetchPhotos();
         renderCreatorList();
@@ -658,9 +689,16 @@ function renderCreatorList() {
             </span>
         `;
         item.addEventListener('click', () => {
+            // Same creator + panel open → collapse options (keep gallery filter)
+            if (state.selectedCreator === c.name && state.creatorPanelOpen) {
+                hideCreatorStylePanel();
+                return;
+            }
+            const creatorChanged = state.selectedCreator !== c.name;
             state.selectedCreator = c.name;
+            state.creatorPanelOpen = true;
             elements.galleryTitle.textContent = `@${c.name}`;
-            fetchPhotos();
+            if (creatorChanged) fetchPhotos();
             renderCreatorList();
             updateCreatorStylePanel();
         });
@@ -782,10 +820,34 @@ function updateClassifyPanelUi() {
     updateSyncLatestButtonUi();
 }
 
+function hideCreatorStylePanel() {
+    state.creatorPanelOpen = false;
+    if (elements.creatorStylePanel) {
+        elements.creatorStylePanel.style.display = 'none';
+    }
+}
+
+function isDisplayFlex(el) {
+    return !!(el && el.style.display === 'flex');
+}
+
+/** True when a blocking overlay/modal is open (skip outside-click dismiss for sidebar panel). */
+function isBlockingOverlayOpen() {
+    return (
+        isDisplayFlex(elements.photoViewerOverlay) ||
+        isDisplayFlex(elements.deleteConfirmModal) ||
+        isDisplayFlex(elements.lightboxModal) ||
+        isDisplayFlex(elements.syncModal) ||
+        isDisplayFlex(elements.newCreatorModal) ||
+        isDisplayFlex(elements.uploadModal)
+    );
+}
+
 async function updateCreatorStylePanel() {
     if (!elements.creatorStylePanel) return;
     const creator = state.selectedCreator;
-    if (!creator) {
+    // Panel is dismissible chrome; gallery filter can stay while panel is closed
+    if (!creator || !state.creatorPanelOpen) {
         elements.creatorStylePanel.style.display = 'none';
         return;
     }
@@ -797,6 +859,8 @@ async function updateCreatorStylePanel() {
     try {
         const res = await fetch(`/api/creator/style?creator=${encodeURIComponent(creator)}`);
         const data = await res.json();
+        // Selection may have changed or panel closed while fetch was in flight
+        if (state.selectedCreator !== creator || !state.creatorPanelOpen) return;
         if (data.style_prefix) {
             elements.creatorStylePrefix.textContent = data.style_prefix;
         } else {
@@ -818,7 +882,9 @@ async function updateCreatorStylePanel() {
             });
         });
     } catch (err) {
-        elements.creatorStylePrefix.textContent = 'Failed to load style';
+        if (state.selectedCreator === creator && state.creatorPanelOpen) {
+            elements.creatorStylePrefix.textContent = 'Failed to load style';
+        }
     }
 }
 
@@ -958,21 +1024,291 @@ function populateUploadCreators() {
     });
 }
 
+const VIDEO_SEEK_SECONDS = 5;
+const VIDEO_SEEK_HOLD_SECONDS = 2;
+
+function isVideoFilename(name) {
+    const f = String(name || '').toLowerCase();
+    return f.endsWith('.mp4') || f.endsWith('.webm') || f.endsWith('.mov');
+}
+
+function isVideoPhoto(photo) {
+    return !!(photo && isVideoFilename(photo.filename));
+}
+
+function getInspectorMediaEl() {
+    return elements.lightboxVideo
+        ? elements.lightboxVideo.closest('.inspector-media')
+        : document.querySelector('.inspector-media');
+}
+
+function setLightboxMediaMode(isVideo) {
+    const media = getInspectorMediaEl();
+    if (media) media.classList.toggle('is-video', !!isVideo);
+}
+
+function resolveMediaUrl(url) {
+    if (!url) return '';
+    try {
+        return new URL(url, window.location.href).href;
+    } catch (_) {
+        return String(url);
+    }
+}
+
+function isLightboxVideoActive() {
+    const v = elements.lightboxVideo;
+    return !!(v && v.style.display !== 'none' && (v.currentSrc || v.src));
+}
+
+function isFullscreenVideoActive() {
+    return !!(
+        state.videoInFullscreenShell &&
+        isDisplayFlex(elements.photoViewerOverlay) &&
+        elements.photoViewerOverlay.classList.contains('is-video')
+    );
+}
+
+/** Single active player element (lightbox video is always the decoder). */
+function activeVideoEl() {
+    if (!elements.lightboxVideo) return null;
+    if (isFullscreenVideoActive() || isLightboxVideoActive()) return elements.lightboxVideo;
+    return null;
+}
+
+function setVideoBuffering(show) {
+    if (!elements.videoBuffering) return;
+    elements.videoBuffering.classList.toggle('show', !!show);
+    elements.videoBuffering.setAttribute('aria-hidden', show ? 'false' : 'true');
+}
+
+function flashSeekHud(deltaSec) {
+    const hud = elements.videoSeekHud;
+    if (!hud) return;
+    const sign = deltaSec > 0 ? '+' : '';
+    hud.textContent = `${sign}${deltaSec}s`;
+    hud.classList.add('show');
+    hud.setAttribute('aria-hidden', 'false');
+    if (state.videoSeekHudTimer) clearTimeout(state.videoSeekHudTimer);
+    state.videoSeekHudTimer = setTimeout(() => {
+        hud.classList.remove('show');
+        hud.setAttribute('aria-hidden', 'true');
+    }, 450);
+}
+
+/** Best-effort media duration (NaN/Infinity common until metadata; use seekable). */
+function getMediaDuration(video) {
+    if (!video) return NaN;
+    const d = Number(video.duration);
+    if (Number.isFinite(d) && d > 0) return d;
+    try {
+        if (video.seekable && video.seekable.length > 0) {
+            const end = video.seekable.end(video.seekable.length - 1);
+            if (Number.isFinite(end) && end > 0) return end;
+        }
+    } catch (_) { /* ignore */ }
+    return NaN;
+}
+
+/**
+ * Seek media to an absolute time. Avoids fastSeek (often inaccurate / no-op).
+ * Requires HTTP Range on the server for Chrome to honor currentTime jumps.
+ */
+function seekMediaTo(video, timeSec) {
+    if (!video) return false;
+    const dur = getMediaDuration(video);
+    let t = Number(timeSec);
+    if (!Number.isFinite(t)) return false;
+    if (Number.isFinite(dur) && dur > 0) {
+        t = Math.max(0, Math.min(dur, t));
+    } else {
+        t = Math.max(0, t);
+    }
+    try {
+        // Clamp into seekable range when available (Chrome is picky)
+        if (video.seekable && video.seekable.length > 0) {
+            const s0 = video.seekable.start(0);
+            const s1 = video.seekable.end(video.seekable.length - 1);
+            if (Number.isFinite(s0) && Number.isFinite(s1) && s1 > s0) {
+                t = Math.max(s0, Math.min(s1, t));
+            }
+        }
+        video.currentTime = t;
+        return true;
+    } catch (_) {
+        return false;
+    }
+}
+
+function seekVideoElement(video, deltaSec, { hud = true } = {}) {
+    if (!video) return;
+    const cur = Number(video.currentTime) || 0;
+    seekMediaTo(video, cur + deltaSec);
+    if (hud) flashSeekHud(deltaSec);
+    if (state.videoInFullscreenShell) updateFsSeekUi();
+}
+
+function ensureVideoAudible(video) {
+    if (!video) return;
+    // User gesture path — unmute for a real player feel
+    if (video.muted) {
+        video.muted = false;
+    }
+    if (video.volume === 0) video.volume = 1;
+}
+
+function toggleVideoPlayback(video) {
+    if (!video) return;
+    if (video.paused) {
+        ensureVideoAudible(video);
+        video.play().catch(() => {});
+    } else {
+        video.pause();
+    }
+}
+
+/**
+ * Load/play without double-decode jank:
+ * - skip reload if same URL already buffered
+ * - wait for canplay (no play() race right after src=)
+ * - cancel stale loads when user navigates quickly
+ */
+function loadAndPlayLightboxVideo(url) {
+    const v = elements.lightboxVideo;
+    if (!v || !url) return;
+    const token = ++state.videoLoadToken;
+    const abs = resolveMediaUrl(url);
+
+    elements.lightboxImg.style.display = 'none';
+    v.style.display = 'block';
+    setLightboxMediaMode(true);
+    v.preload = 'auto';
+
+    const already =
+        (v.currentSrc && v.currentSrc === abs) ||
+        (v.src && v.src === abs);
+
+    const tryPlay = () => {
+        if (token !== state.videoLoadToken) return;
+        setVideoBuffering(false);
+        v.play().catch(() => {
+            // Autoplay with sound blocked — keep muted and retry once
+            if (!v.muted) {
+                v.muted = true;
+                v.play().catch(() => {});
+            }
+        });
+    };
+
+    if (already && v.readyState >= 2) {
+        setVideoBuffering(false);
+        tryPlay();
+        return;
+    }
+
+    setVideoBuffering(true);
+    v.pause();
+    if (!already) {
+        v.src = url;
+        // Do NOT call load() after setting src — browsers load automatically;
+        // an extra load() causes a visible restart stutter.
+    }
+
+    if (v.readyState >= 3) {
+        tryPlay();
+    } else {
+        const onCanPlay = () => {
+            if (token !== state.videoLoadToken) return;
+            tryPlay();
+        };
+        v.addEventListener('canplay', onCanPlay, { once: true });
+        // Fallback if canplay already fired between checks
+        if (v.readyState >= 3) onCanPlay();
+    }
+}
+
+function stopAndClearLightboxVideo() {
+    const v = elements.lightboxVideo;
+    if (!v) return;
+    state.videoLoadToken += 1; // invalidate pending canplay handlers
+    setVideoBuffering(false);
+    v.pause();
+    v.removeAttribute('src');
+    try {
+        v.load();
+    } catch (_) { /* ignore */ }
+    v.style.display = 'none';
+    setLightboxMediaMode(false);
+}
+
+function restoreLightboxVideoHome() {
+    const v = elements.lightboxVideo;
+    if (!v) return;
+    v.classList.remove('fs-active-video');
+    // Preview always uses native controls
+    v.controls = true;
+    const home = elements.lightboxMediaPane;
+    if (home && v.parentElement !== home) {
+        // Keep expand button after the video
+        const expand = elements.videoExpandBtn;
+        if (expand && expand.parentElement === home) {
+            home.insertBefore(v, expand);
+        } else {
+            home.appendChild(v);
+        }
+    }
+    state.videoInFullscreenShell = false;
+}
+
+function wireLightboxVideoEvents() {
+    const v = elements.lightboxVideo;
+    if (!v || v.dataset.wired === '1') return;
+    v.dataset.wired = '1';
+
+    const showBuf = () => {
+        if (isLightboxVideoActive() || isFullscreenVideoActive()) setVideoBuffering(true);
+    };
+    const hideBuf = () => setVideoBuffering(false);
+
+    v.addEventListener('waiting', showBuf);
+    v.addEventListener('stalled', showBuf);
+    v.addEventListener('seeking', () => {
+        // Only show spinner if seek is slow (browser will fire seeked quickly when buffered)
+        if (v.readyState < 3) showBuf();
+    });
+    v.addEventListener('seeked', hideBuf);
+    v.addEventListener('playing', hideBuf);
+    v.addEventListener('canplay', hideBuf);
+    v.addEventListener('error', hideBuf);
+}
+
 // Lightbox
 function openLightbox(index) {
     if (index < 0 || index >= state.photos.length) return;
+
+    // Leave fullscreen shell cleanly before swapping media
+    if (state.videoInFullscreenShell) {
+        state.fsScrubbing = false;
+        if (elements.lightboxVideo) elements.lightboxVideo.controls = true;
+        restoreLightboxVideoHome();
+        if (elements.fsVideoLayout) {
+            elements.fsVideoLayout.hidden = true;
+            elements.fsVideoLayout.style.display = 'none';
+        }
+        if (elements.photoViewerOverlay) {
+            elements.photoViewerOverlay.classList.remove('is-video');
+            elements.photoViewerOverlay.style.display = 'none';
+        }
+    }
+
     state.lightboxIndex = index;
     const photo = state.photos[index];
 
-    const isVideo = photo.filename.toLowerCase().endsWith('.mp4') || photo.filename.toLowerCase().endsWith('.webm');
+    const isVideo = isVideoPhoto(photo);
     if (isVideo) {
-        elements.lightboxImg.style.display = 'none';
-        elements.lightboxVideo.style.display = 'block';
-        elements.lightboxVideo.src = photo.url;
+        loadAndPlayLightboxVideo(photo.url);
     } else {
-        elements.lightboxVideo.style.display = 'none';
-        elements.lightboxVideo.pause();
-        elements.lightboxVideo.src = '';
+        stopAndClearLightboxVideo();
         elements.lightboxImg.style.display = 'block';
         elements.lightboxImg.src = photo.url;
     }
@@ -1368,9 +1704,14 @@ async function savePromptEdits() {
 }
 
 function closeLightbox() {
+    // Collapse fullscreen shell first (moves video home), then stop media
+    if (state.videoInFullscreenShell || isDisplayFlex(elements.photoViewerOverlay)) {
+        closePhotoViewer({ keepVideoPlaying: false });
+    }
     elements.lightboxModal.style.display = 'none';
     state.lightboxIndex = -1;
     state.currentPromptData = null;
+    stopAndClearLightboxVideo();
 }
 
 function navigateLightbox(direction) {
@@ -1381,12 +1722,25 @@ function navigateLightbox(direction) {
     openLightbox(newIndex);
 }
 
-// Fullscreen Photo Viewer
+// Fullscreen Photo / Video Viewer
 function openPhotoViewer() {
     if (state.lightboxIndex === -1) return;
     const photo = state.photos[state.lightboxIndex];
+    if (isVideoPhoto(photo)) {
+        openVideoViewer();
+        return;
+    }
 
-    elements.photoViewerImg.src = photo.url;
+    // Image mode — ensure video is not stuck in the shell
+    if (state.videoInFullscreenShell) {
+        restoreLightboxVideoHome();
+    }
+
+    if (elements.photoViewerImg) {
+        elements.photoViewerImg.style.display = 'block';
+        elements.photoViewerImg.src = photo.url;
+    }
+    elements.photoViewerOverlay.classList.remove('is-video');
     elements.photoViewerOverlay.style.display = 'flex';
 
     // Reset zoom/pan state
@@ -1395,18 +1749,370 @@ function openPhotoViewer() {
     state.viewerPanY = 0;
     applyViewerTransform();
 
-    // Show hint, auto-hide after 3s
-    elements.photoViewerHint.classList.remove('hidden');
-    setTimeout(() => {
-        elements.photoViewerHint.classList.add('hidden');
-    }, 3000);
+    if (elements.photoViewerHint) {
+        elements.photoViewerHint.innerHTML =
+            '<i class="fa-solid fa-magnifying-glass-plus"></i> Scroll to zoom · Drag to pan';
+        elements.photoViewerHint.classList.remove('hidden');
+        setTimeout(() => {
+            elements.photoViewerHint.classList.add('hidden');
+        }, 3000);
+    }
 }
 
-function closePhotoViewer() {
+function formatVideoTime(sec) {
+    if (!Number.isFinite(sec) || sec < 0) return '0:00';
+    const s = Math.floor(sec % 60);
+    const m = Math.floor(sec / 60) % 60;
+    const h = Math.floor(sec / 3600);
+    const pad = (n) => String(n).padStart(2, '0');
+    if (h > 0) return `${h}:${pad(m)}:${pad(s)}`;
+    return `${m}:${pad(s)}`;
+}
+
+function updateFsPlayPauseUi() {
+    const v = elements.lightboxVideo;
+    const icon = elements.fsPlayPauseIcon;
+    if (!icon || !v) return;
+    icon.className = v.paused ? 'fa-solid fa-play' : 'fa-solid fa-pause';
+}
+
+function updateFsMuteUi() {
+    const v = elements.lightboxVideo;
+    const icon = elements.fsMuteIcon;
+    if (!icon || !v) return;
+    if (v.muted || v.volume === 0) icon.className = 'fa-solid fa-volume-xmark';
+    else if (v.volume < 0.4) icon.className = 'fa-solid fa-volume-low';
+    else icon.className = 'fa-solid fa-volume-high';
+}
+
+/** Paint custom seek bar from video currentTime / buffered ranges. */
+function updateFsSeekUi() {
+    const v = elements.lightboxVideo;
+    if (!v || !state.videoInFullscreenShell) return;
+    const dur = getMediaDuration(v);
+    const cur = Number(v.currentTime) || 0;
+    const ratio = Number.isFinite(dur) && dur > 0 ? Math.max(0, Math.min(1, cur / dur)) : 0;
+    const pct = `${(ratio * 100).toFixed(3)}%`;
+
+    if (elements.fsSeekPlayed) elements.fsSeekPlayed.style.width = pct;
+    if (elements.fsSeekThumb) elements.fsSeekThumb.style.left = pct;
+    if (elements.fsTimeCurrent) elements.fsTimeCurrent.textContent = formatVideoTime(cur);
+    if (elements.fsTimeDuration) {
+        elements.fsTimeDuration.textContent = Number.isFinite(dur) ? formatVideoTime(dur) : '0:00';
+    }
+    if (elements.fsSeekRange && !state.fsScrubbing) {
+        elements.fsSeekRange.value = String(Math.round(ratio * 1000));
+    }
+    if (elements.fsSeekWrap) {
+        elements.fsSeekWrap.setAttribute('aria-valuenow', String(Math.round(ratio * 100)));
+        if (Number.isFinite(dur)) {
+            elements.fsSeekWrap.setAttribute('aria-valuetext', `${formatVideoTime(cur)} of ${formatVideoTime(dur)}`);
+        }
+    }
+
+    // Buffered end
+    let bufRatio = 0;
+    try {
+        if (v.buffered && v.buffered.length && Number.isFinite(dur) && dur > 0) {
+            bufRatio = Math.max(0, Math.min(1, v.buffered.end(v.buffered.length - 1) / dur));
+        }
+    } catch (_) { /* ignore */ }
+    if (elements.fsSeekBuffered) {
+        elements.fsSeekBuffered.style.width = `${(bufRatio * 100).toFixed(3)}%`;
+    }
+    updateFsPlayPauseUi();
+    updateFsMuteUi();
+}
+
+/**
+ * Seek video from pointer X relative to the custom seek strip.
+ * Server must support HTTP Range (206) or Chrome will ignore currentTime.
+ */
+function seekFsFromClientX(clientX) {
+    const wrap = elements.fsSeekWrap;
+    const v = elements.lightboxVideo;
+    if (!wrap || !v) return;
+    const rect = wrap.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const dur = getMediaDuration(v);
+    if (!Number.isFinite(dur) || dur <= 0) {
+        // Metadata not ready — still paint the thumb so UI feels responsive
+        if (elements.fsSeekPlayed) elements.fsSeekPlayed.style.width = `${(ratio * 100).toFixed(3)}%`;
+        if (elements.fsSeekThumb) elements.fsSeekThumb.style.left = `${(ratio * 100).toFixed(3)}%`;
+        return;
+    }
+    const next = ratio * dur;
+    seekMediaTo(v, next);
+    if (elements.fsSeekPlayed) elements.fsSeekPlayed.style.width = `${(ratio * 100).toFixed(3)}%`;
+    if (elements.fsSeekThumb) elements.fsSeekThumb.style.left = `${(ratio * 100).toFixed(3)}%`;
+    if (elements.fsTimeCurrent) elements.fsTimeCurrent.textContent = formatVideoTime(next);
+    if (elements.fsSeekRange) elements.fsSeekRange.value = String(Math.round(ratio * 1000));
+}
+
+function seekFsFromRangeValue(rawVal) {
+    const v = elements.lightboxVideo;
+    if (!v) return;
+    const dur = getMediaDuration(v);
+    if (!Number.isFinite(dur) || dur <= 0) return;
+    const ratio = Math.max(0, Math.min(1, Number(rawVal) / 1000));
+    seekMediaTo(v, ratio * dur);
+    if (elements.fsSeekPlayed) elements.fsSeekPlayed.style.width = `${(ratio * 100).toFixed(3)}%`;
+    if (elements.fsSeekThumb) elements.fsSeekThumb.style.left = `${(ratio * 100).toFixed(3)}%`;
+    if (elements.fsTimeCurrent) elements.fsTimeCurrent.textContent = formatVideoTime(ratio * dur);
+}
+
+function endFsScrub() {
+    state.fsScrubbing = false;
+    if (elements.fsSeekWrap) elements.fsSeekWrap.classList.remove('is-scrubbing');
+    updateFsSeekUi();
+}
+
+function wireFsVideoControls() {
+    if (state.fsUiWired) return;
+    state.fsUiWired = true;
+
+    const wrap = elements.fsSeekWrap;
+    const range = elements.fsSeekRange;
+    const bar = elements.fsVideoBar;
+    const stage = elements.fsVideoStage;
+
+    // Prevent image-viewer backdrop handlers from seeing control events
+    const stopBubble = (e) => e.stopPropagation();
+    if (bar) {
+        ['mousedown', 'mouseup', 'click', 'dblclick', 'pointerdown', 'pointerup'].forEach((ev) => {
+            bar.addEventListener(ev, stopBubble);
+        });
+    }
+    if (elements.fsVideoLayout) {
+        ['mousedown', 'click', 'dblclick'].forEach((ev) => {
+            elements.fsVideoLayout.addEventListener(ev, stopBubble);
+        });
+    }
+
+    // Document-level move/up while scrubbing — survives leaving the tiny track
+    const onDocPointerMove = (e) => {
+        if (!state.fsScrubbing) return;
+        e.preventDefault();
+        seekFsFromClientX(e.clientX);
+    };
+    const onDocPointerUp = (e) => {
+        if (!state.fsScrubbing) return;
+        seekFsFromClientX(e.clientX);
+        endFsScrub();
+    };
+    document.addEventListener('pointermove', onDocPointerMove, { passive: false });
+    document.addEventListener('pointerup', onDocPointerUp);
+    document.addEventListener('pointercancel', onDocPointerUp);
+    // Mouse fallbacks (some environments synthesize inconsistently)
+    document.addEventListener('mousemove', (e) => {
+        if (!state.fsScrubbing) return;
+        seekFsFromClientX(e.clientX);
+    });
+    document.addEventListener('mouseup', (e) => {
+        if (!state.fsScrubbing) return;
+        seekFsFromClientX(e.clientX);
+        endFsScrub();
+    });
+
+    const beginScrub = (clientX, e) => {
+        if (e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+        state.fsScrubbing = true;
+        if (wrap) wrap.classList.add('is-scrubbing');
+        seekFsFromClientX(clientX);
+    };
+
+    if (wrap) {
+        wrap.addEventListener('pointerdown', (e) => {
+            if (e.button != null && e.button !== 0) return;
+            // Prefer range input when it is the target — it fires input events
+            if (e.target === range) return;
+            beginScrub(e.clientX, e);
+            try {
+                wrap.setPointerCapture(e.pointerId);
+            } catch (_) { /* ignore */ }
+        });
+        wrap.addEventListener('mousedown', (e) => {
+            if (e.button !== 0) return;
+            if (e.target === range) return;
+            beginScrub(e.clientX, e);
+        });
+        wrap.addEventListener('keydown', (e) => {
+            const v = elements.lightboxVideo;
+            if (!v) return;
+            if (e.key === 'ArrowLeft') {
+                e.preventDefault();
+                seekVideoElement(v, -VIDEO_SEEK_SECONDS);
+            } else if (e.key === 'ArrowRight') {
+                e.preventDefault();
+                seekVideoElement(v, VIDEO_SEEK_SECONDS);
+            }
+        });
+    }
+
+    if (range) {
+        range.addEventListener('pointerdown', (e) => {
+            e.stopPropagation();
+            state.fsScrubbing = true;
+            if (wrap) wrap.classList.add('is-scrubbing');
+        });
+        range.addEventListener('input', (e) => {
+            state.fsScrubbing = true;
+            if (wrap) wrap.classList.add('is-scrubbing');
+            seekFsFromRangeValue(e.target.value);
+        });
+        range.addEventListener('change', (e) => {
+            seekFsFromRangeValue(e.target.value);
+            endFsScrub();
+        });
+        range.addEventListener('pointerup', () => endFsScrub());
+    }
+
+    if (elements.fsPlayPauseBtn) {
+        elements.fsPlayPauseBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            toggleVideoPlayback(elements.lightboxVideo);
+            updateFsPlayPauseUi();
+        });
+    }
+    if (elements.fsMuteBtn) {
+        elements.fsMuteBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const vid = elements.lightboxVideo;
+            if (!vid) return;
+            vid.muted = !vid.muted;
+            if (!vid.muted && vid.volume === 0) vid.volume = 1;
+            updateFsMuteUi();
+        });
+    }
+    if (stage) {
+        stage.addEventListener('click', (e) => {
+            if (e.target.closest('.fs-video-bar')) return;
+            e.preventDefault();
+            e.stopPropagation();
+            toggleVideoPlayback(elements.lightboxVideo);
+            updateFsPlayPauseUi();
+        });
+        stage.addEventListener('dblclick', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            closePhotoViewer();
+        });
+    }
+
+    // Bind media events once (element is stable)
+    const bindMediaUi = (vid) => {
+        if (!vid || vid.dataset.fsUi === '1') return;
+        vid.dataset.fsUi = '1';
+        vid.addEventListener('timeupdate', () => {
+            if (!state.fsScrubbing) updateFsSeekUi();
+        });
+        vid.addEventListener('progress', updateFsSeekUi);
+        vid.addEventListener('loadedmetadata', updateFsSeekUi);
+        vid.addEventListener('durationchange', updateFsSeekUi);
+        vid.addEventListener('seeked', updateFsSeekUi);
+        vid.addEventListener('play', updateFsPlayPauseUi);
+        vid.addEventListener('pause', updateFsPlayPauseUi);
+        vid.addEventListener('volumechange', updateFsMuteUi);
+    };
+    bindMediaUi(elements.lightboxVideo);
+}
+
+/**
+ * Fullscreen without rebuffering: teleport the same <video> node into the
+ * stage and use a custom scrub bar (mouse drag/click always works).
+ */
+function openVideoViewer() {
+    const v = elements.lightboxVideo;
+    if (!v || !isLightboxVideoActive()) return;
+    if (state.videoInFullscreenShell) return;
+
+    wireFsVideoControls();
+
+    if (elements.photoViewerImg) {
+        elements.photoViewerImg.style.display = 'none';
+    }
+
+    // Show layout + move live element into stage (no src reload)
+    if (elements.fsVideoLayout) {
+        elements.fsVideoLayout.hidden = false;
+        elements.fsVideoLayout.style.display = 'flex';
+    }
+    const stage = elements.fsVideoStage || elements.photoViewerContainer;
+    stage.appendChild(v);
+    v.classList.add('fs-active-video');
+    v.style.display = 'block';
+    // Native controls are unreliable in the overlay shell — use custom bar
+    v.controls = false;
+    state.videoInFullscreenShell = true;
+    state.fsScrubbing = false;
+
+    elements.photoViewerOverlay.classList.add('is-video');
+    elements.photoViewerOverlay.style.display = 'flex';
+
+    // User gesture path — unmute
+    ensureVideoAudible(v);
+    if (v.paused) {
+        v.play().catch(() => {});
+    }
+
+    state.viewerZoom = 1;
+    state.viewerPanX = 0;
+    state.viewerPanY = 0;
+    state.viewerDragging = false;
+
+    updateFsSeekUi();
+    // Second paint after layout for correct track width
+    requestAnimationFrame(() => updateFsSeekUi());
+
+    if (elements.photoViewerHint) {
+        elements.photoViewerHint.innerHTML =
+            '<i class="fa-solid fa-film"></i> Drag the bar to scrub · ←/→ · Space · Esc';
+        elements.photoViewerHint.classList.remove('hidden');
+        setTimeout(() => {
+            elements.photoViewerHint.classList.add('hidden');
+        }, 2600);
+    }
+}
+
+function closePhotoViewer(opts = {}) {
+    const keepVideoPlaying = opts.keepVideoPlaying !== false;
+    const wasVideo = state.videoInFullscreenShell ||
+        elements.photoViewerOverlay.classList.contains('is-video');
+
+    if (wasVideo && elements.lightboxVideo) {
+        const v = elements.lightboxVideo;
+        const playing = !v.paused;
+        state.fsScrubbing = false;
+        // Restore native controls for lightbox preview
+        v.controls = true;
+        restoreLightboxVideoHome();
+        if (elements.fsVideoLayout) {
+            elements.fsVideoLayout.hidden = true;
+            elements.fsVideoLayout.style.display = 'none';
+        }
+        // Playback continues on the same element — no seek/reload handoff
+        if (keepVideoPlaying && playing && isDisplayFlex(elements.lightboxModal)) {
+            v.play().catch(() => {});
+        } else if (!keepVideoPlaying) {
+            v.pause();
+        }
+    }
+
+    if (elements.photoViewerImg) {
+        elements.photoViewerImg.style.display = 'block';
+    }
+    elements.photoViewerOverlay.classList.remove('is-video');
     elements.photoViewerOverlay.style.display = 'none';
     state.viewerZoom = 1;
     state.viewerPanX = 0;
     state.viewerPanY = 0;
+    state.viewerDragging = false;
 }
 
 function applyViewerTransform() {
@@ -1415,6 +2121,8 @@ function applyViewerTransform() {
 }
 
 function handleViewerWheel(e) {
+    // Don't hijack scroll/wheel over video (volume / page) — only zoom images
+    if (elements.photoViewerOverlay.classList.contains('is-video')) return;
     e.preventDefault();
     const delta = e.deltaY > 0 ? -0.15 : 0.15;
     const newZoom = Math.min(Math.max(state.viewerZoom + delta, 0.5), 8);
@@ -1436,7 +2144,11 @@ function handleViewerWheel(e) {
 
 function handleViewerMouseDown(e) {
     if (e.target === elements.photoViewerClose || e.target.closest('.photo-viewer-close')) return;
+    // Video mode: never capture pointer — native scrub bar / controls need it
+    if (elements.photoViewerOverlay.classList.contains('is-video')) return;
+    if (e.target.closest('video')) return;
     state.viewerDragging = true;
+    state.viewerMoved = false;
     state.viewerDragStartX = e.clientX;
     state.viewerDragStartY = e.clientY;
     state.viewerLastPanX = state.viewerPanX;
@@ -1446,8 +2158,11 @@ function handleViewerMouseDown(e) {
 
 function handleViewerMouseMove(e) {
     if (!state.viewerDragging) return;
-    state.viewerPanX = state.viewerLastPanX + (e.clientX - state.viewerDragStartX);
-    state.viewerPanY = state.viewerLastPanY + (e.clientY - state.viewerDragStartY);
+    const dx = e.clientX - state.viewerDragStartX;
+    const dy = e.clientY - state.viewerDragStartY;
+    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) state.viewerMoved = true;
+    state.viewerPanX = state.viewerLastPanX + dx;
+    state.viewerPanY = state.viewerLastPanY + dy;
     applyViewerTransform();
 }
 
@@ -1456,8 +2171,39 @@ function handleViewerMouseUp() {
     elements.photoViewerOverlay.classList.remove('dragging');
 }
 
+/** Click empty dark chrome (not the image/video/player) closes viewer when not panning/zoomed. */
+function handleViewerBackdropClick(e) {
+    if (state.viewerMoved) return;
+    if (state.fsScrubbing) return;
+    if (e.target.closest('.photo-viewer-close')) return;
+    // Never close while interacting with the custom player or video surface
+    if (
+        e.target.closest('#photoViewerImg') ||
+        e.target.closest('#lightboxVideo') ||
+        e.target.closest('video') ||
+        e.target.closest('#fsVideoLayout') ||
+        e.target.closest('.fs-video-bar') ||
+        e.target.closest('.fs-seek-wrap')
+    ) {
+        return;
+    }
+    // Image mode: only close when not zoomed in
+    if (!elements.photoViewerOverlay.classList.contains('is-video') && state.viewerZoom > 1.05) {
+        return;
+    }
+    // Backdrop / container padding only
+    if (
+        e.target === elements.photoViewerOverlay ||
+        e.target === elements.photoViewerContainer ||
+        e.target === elements.photoViewerHint
+    ) {
+        closePhotoViewer();
+    }
+}
+
 function handleViewerDblClick(e) {
     if (e.target === elements.photoViewerClose || e.target.closest('.photo-viewer-close')) return;
+    if (elements.photoViewerOverlay.classList.contains('is-video')) return;
     // Toggle between 1x and 2.5x zoom on double-click
     if (state.viewerZoom > 1.2) {
         state.viewerZoom = 1;
@@ -1517,6 +2263,21 @@ function closeDeleteModal() {
     elements.deleteConfirmModal.style.display = 'none';
     state.photoToDelete = null;
     state.photosToDelete = null;
+}
+
+function closeNewCreatorModal() {
+    if (elements.newCreatorModal) elements.newCreatorModal.style.display = 'none';
+}
+
+function closeUploadModal() {
+    if (elements.uploadModal) elements.uploadModal.style.display = 'none';
+}
+
+/** Wire .modal-overlay click → close (overlay is a sibling of .modal-card). */
+function bindModalOverlayDismiss(modalEl, closeFn) {
+    if (!modalEl || typeof closeFn !== 'function') return;
+    const overlay = modalEl.querySelector('.modal-overlay');
+    if (overlay) overlay.addEventListener('click', closeFn);
 }
 
 async function executeBulkDelete(paths) {
@@ -1899,6 +2660,22 @@ function setupEventListeners() {
         openPhotoViewer();
     });
 
+    // Video: expand button + double-click → fullscreen player (scrub + seek keys)
+    if (elements.videoExpandBtn) {
+        elements.videoExpandBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openPhotoViewer();
+        });
+    }
+    if (elements.lightboxVideo) {
+        elements.lightboxVideo.addEventListener('dblclick', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            openPhotoViewer();
+        });
+    }
+
     // Copy Buttons
     elements.copyPositiveBtn.addEventListener('click', () => {
         if (state.currentPromptData) {
@@ -1947,12 +2724,14 @@ function setupEventListeners() {
     elements.photoViewerClose.addEventListener('click', closePhotoViewer);
     elements.photoViewerOverlay.addEventListener('wheel', handleViewerWheel, { passive: false });
     elements.photoViewerOverlay.addEventListener('mousedown', handleViewerMouseDown);
+    elements.photoViewerOverlay.addEventListener('click', handleViewerBackdropClick);
     document.addEventListener('mousemove', handleViewerMouseMove);
     document.addEventListener('mouseup', handleViewerMouseUp);
     elements.photoViewerOverlay.addEventListener('dblclick', handleViewerDblClick);
 
     // Delete Modal Actions
     elements.cancelDeleteBtn.addEventListener('click', closeDeleteModal);
+    bindModalOverlayDismiss(elements.deleteConfirmModal, closeDeleteModal);
     elements.confirmDeleteBtn.addEventListener('click', async () => {
         if (state.photosToDelete && state.photosToDelete.length) {
             const paths = state.photosToDelete.slice();
@@ -1971,11 +2750,11 @@ function setupEventListeners() {
     elements.newCreatorBtn.addEventListener('click', () => {
         elements.newCreatorInput.value = '';
         elements.newCreatorModal.style.display = 'flex';
+        setTimeout(() => elements.newCreatorInput && elements.newCreatorInput.focus(), 0);
     });
 
-    elements.cancelNewCreatorBtn.addEventListener('click', () => {
-        elements.newCreatorModal.style.display = 'none';
-    });
+    elements.cancelNewCreatorBtn.addEventListener('click', closeNewCreatorModal);
+    bindModalOverlayDismiss(elements.newCreatorModal, closeNewCreatorModal);
 
     elements.confirmNewCreatorBtn.addEventListener('click', async () => {
         const name = elements.newCreatorInput.value.trim();
@@ -1989,7 +2768,7 @@ function setupEventListeners() {
             });
             if (res.ok) {
                 showToast(`Created folder @${name}`);
-                elements.newCreatorModal.style.display = 'none';
+                closeNewCreatorModal();
                 initApp();
             } else {
                 showToast('Error creating folder');
@@ -1999,14 +2778,22 @@ function setupEventListeners() {
         }
     });
 
+    if (elements.newCreatorInput) {
+        elements.newCreatorInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                elements.confirmNewCreatorBtn.click();
+            }
+        });
+    }
+
     // Upload Modal Actions
     elements.uploadPhotoBtn.addEventListener('click', () => {
         elements.uploadModal.style.display = 'flex';
     });
 
-    elements.cancelUploadBtn.addEventListener('click', () => {
-        elements.uploadModal.style.display = 'none';
-    });
+    elements.cancelUploadBtn.addEventListener('click', closeUploadModal);
+    bindModalOverlayDismiss(elements.uploadModal, closeUploadModal);
 
     elements.confirmUploadBtn.addEventListener('click', async () => {
         const creator = elements.uploadCreatorSelect.value;
@@ -2029,7 +2816,7 @@ function setupEventListeners() {
 
             if (res.ok) {
                 showToast(`Uploaded ${file.name} to @${creator}`);
-                elements.uploadModal.style.display = 'none';
+                closeUploadModal();
                 elements.uploadFileInput.value = '';
                 initApp();
             } else {
@@ -2040,7 +2827,23 @@ function setupEventListeners() {
         }
     });
 
-    // Keyboard Navigation — Escape priority: Photo Viewer > Delete Modal > Lightbox > Select
+    // Sync modal: overlay dismiss (Close button already wired)
+    bindModalOverlayDismiss(elements.syncModal, closeSyncModal);
+
+    // Creator options panel: click outside sidebar actions dismisses options (keeps filter)
+    document.addEventListener('pointerdown', (e) => {
+        if (!state.creatorPanelOpen) return;
+        if (isBlockingOverlayOpen()) return;
+        const t = e.target;
+        if (!(t instanceof Element)) return;
+        if (t.closest('#creatorStylePanel')) return;
+        if (t.closest('.creator-item')) return;
+        hideCreatorStylePanel();
+    });
+
+    // Keyboard Navigation — Escape priority:
+    // Photo Viewer > Delete > Lightbox > Sync > Upload > New Creator > Creator panel > Select
+    // Video: ←/→ seek (hold repeats smoothly), Space play/pause, Shift+←/→ prev/next media
     document.addEventListener('keydown', (e) => {
         if (elements.photoViewerOverlay.style.display === 'flex') {
             if (e.key === 'Escape') {
@@ -2048,6 +2851,31 @@ function setupEventListeners() {
                 closePhotoViewer();
                 return;
             }
+            // Fullscreen video — same element as lightbox (teleported)
+            if (isFullscreenVideoActive() && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                const v = activeVideoEl();
+                if (v && e.key === 'ArrowLeft') {
+                    e.preventDefault();
+                    const step = e.repeat ? VIDEO_SEEK_HOLD_SECONDS : VIDEO_SEEK_SECONDS;
+                    seekVideoElement(v, -step);
+                    updateFsSeekUi();
+                    return;
+                }
+                if (v && e.key === 'ArrowRight') {
+                    e.preventDefault();
+                    const step = e.repeat ? VIDEO_SEEK_HOLD_SECONDS : VIDEO_SEEK_SECONDS;
+                    seekVideoElement(v, step);
+                    updateFsSeekUi();
+                    return;
+                }
+                if (v && (e.key === ' ' || e.code === 'Space')) {
+                    e.preventDefault();
+                    toggleVideoPlayback(v);
+                    updateFsPlayPauseUi();
+                    return;
+                }
+            }
+            return;
         }
 
         if (elements.deleteConfirmModal.style.display === 'flex') {
@@ -2058,14 +2886,54 @@ function setupEventListeners() {
         }
 
         if (elements.lightboxModal.style.display === 'flex') {
-            if (e.key === 'Escape') closeLightbox();
-            if (e.key === 'ArrowLeft') navigateLightbox(-1);
-            if (e.key === 'ArrowRight') navigateLightbox(1);
+            if (e.key === 'Escape') {
+                closeLightbox();
+                return;
+            }
             // Don't steal typing when editing prompts
             const editing = document.activeElement === elements.positivePromptText
                 || document.activeElement === elements.negativePromptText
-                || document.activeElement === elements.searchInput;
-            if (!editing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                || document.activeElement === elements.searchInput
+                || (document.activeElement && document.activeElement.isContentEditable);
+            if (editing) return;
+
+            // Video seek takes precedence over gallery navigation
+            if (isLightboxVideoActive() && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                const v = activeVideoEl();
+                if (v && e.key === 'ArrowLeft' && !e.shiftKey) {
+                    e.preventDefault();
+                    const step = e.repeat ? VIDEO_SEEK_HOLD_SECONDS : VIDEO_SEEK_SECONDS;
+                    seekVideoElement(v, -step);
+                    return;
+                }
+                if (v && e.key === 'ArrowRight' && !e.shiftKey) {
+                    e.preventDefault();
+                    const step = e.repeat ? VIDEO_SEEK_HOLD_SECONDS : VIDEO_SEEK_SECONDS;
+                    seekVideoElement(v, step);
+                    return;
+                }
+                if (v && (e.key === ' ' || e.code === 'Space') && !e.shiftKey) {
+                    e.preventDefault();
+                    toggleVideoPlayback(v);
+                    return;
+                }
+                // Shift+arrows still jump to prev/next media while a video is open
+                if (e.key === 'ArrowLeft' && e.shiftKey) {
+                    e.preventDefault();
+                    navigateLightbox(-1);
+                    return;
+                }
+                if (e.key === 'ArrowRight' && e.shiftKey) {
+                    e.preventDefault();
+                    navigateLightbox(1);
+                    return;
+                }
+            } else {
+                if (e.key === 'ArrowLeft') navigateLightbox(-1);
+                if (e.key === 'ArrowRight') navigateLightbox(1);
+            }
+
+            if (!e.ctrlKey && !e.metaKey && !e.altKey) {
                 const key = e.key.toLowerCase();
                 if (key === 'g') {
                     e.preventDefault();
@@ -2083,6 +2951,23 @@ function setupEventListeners() {
                     toggleFavoriteCurrent();
                 }
             }
+            return;
+        }
+
+        if (e.key === 'Escape' && isDisplayFlex(elements.syncModal)) {
+            closeSyncModal();
+            return;
+        }
+        if (e.key === 'Escape' && isDisplayFlex(elements.uploadModal)) {
+            closeUploadModal();
+            return;
+        }
+        if (e.key === 'Escape' && isDisplayFlex(elements.newCreatorModal)) {
+            closeNewCreatorModal();
+            return;
+        }
+        if (e.key === 'Escape' && state.creatorPanelOpen) {
+            hideCreatorStylePanel();
             return;
         }
 
@@ -2141,13 +3026,22 @@ function hideScrapeJobChip() {
     if (elements.scrapeJobChip) elements.scrapeJobChip.style.display = 'none';
 }
 
+function isScrapeOrSyncActive(data) {
+    if (!data) return false;
+    const pending = data.pending || [];
+    const running = data.running_job;
+    const paused = Boolean(data.paused);
+    const sync = data.sync || {};
+    return !!(running || pending.length || paused || sync.running);
+}
+
 function updateScrapeJobChip(data) {
     if (!elements.scrapeJobChip) return;
     const pending = data.pending || [];
     const running = data.running_job;
     const paused = Boolean(data.paused);
     const sync = data.sync || {};
-    const active = !!(running || pending.length || paused || sync.running);
+    const active = isScrapeOrSyncActive(data);
 
     if (!active) {
         hideScrapeJobChip();
@@ -2181,17 +3075,26 @@ function updateScrapeJobChip(data) {
     } else if (sync.running && sync.scrape_username) {
         title = `Syncing @${sync.scrape_username}`;
     } else if (sync.running) {
-        title = sync.progress || 'Sync running…';
+        const jt = sync.job_type ? String(sync.job_type).replace(/_/g, ' ') : 'sync';
+        title = sync.progress || `${jt} running…`;
     } else if (pending.length) {
         title = `Queued @${pending[0].username}`;
     }
 
     let sub = '';
     if (running) {
-        const mode = running.mode || 'latest';
-        sub = mode;
+        const mode = running.mode || 'full';
+        const deep = running.deep === true ? ' deep' : running.deep === false ? '' : '';
+        sub = mode + deep;
         if (pending.length) sub += ` · +${pending.length} queued`;
-        if (sync.progress) sub += ` · ${sync.progress}`;
+        if (sync.progress) {
+            // Keep chip readable — show last progress fragment
+            const p = String(sync.progress);
+            sub += ` · ${p.length > 80 ? p.slice(-80) : p}`;
+        }
+    } else if (sync.running && !running) {
+        sub = sync.progress || sync.job_type || 'in progress';
+        if (pending.length) sub += ` · +${pending.length} queued`;
     } else if (paused) {
         sub = pending.length
             ? `${pending.length} waiting — resume from IG Sync when ready`
@@ -2213,9 +3116,9 @@ function toastForEnqueueResult(username, data) {
     if (st === 'started') {
         showToast({
             title: `Syncing @${username}`,
-            body: 'Fetching new posts…',
+            body: 'Full feed — all missing posts (skips existing)…',
             variant: 'info',
-            duration: 4000,
+            duration: 4500,
         });
     } else if (st === 'queued') {
         const pos = data.position != null ? data.position : '?';
@@ -2277,8 +3180,8 @@ async function refreshScrapeStatusOnce() {
     try {
         const res = await fetch('/api/scrape/status');
         if (res.status === 404) {
-            hideScrapeJobChip();
-            return null;
+            // Queue disabled — still try generic sync status for chip
+            return await refreshGenericSyncForChip();
         }
         const data = await res.json();
         state.scrapeStatus = data;
@@ -2287,7 +3190,7 @@ async function refreshScrapeStatusOnce() {
         const running = data.running_job;
         const paused = Boolean(data.paused);
         const sync = data.sync || {};
-        const active = !!(running || pending.length || paused || (sync.running && sync.job_type === 'creator_queue'));
+        const active = isScrapeOrSyncActive(data);
 
         // Modal-only queue panel (if open)
         if (elements.scrapeQueueStatus) {
@@ -2306,7 +3209,11 @@ async function refreshScrapeStatusOnce() {
         }
         if (elements.scrapeQueueList) {
             const rows = [];
-            if (running) rows.push(`▶ @${running.username} [${running.mode}] running`);
+            if (running) {
+                rows.push(
+                    `▶ @${running.username} [${running.mode}${running.deep ? ' deep' : ''}] running`
+                );
+            }
             pending.slice(0, 8).forEach((j, i) => {
                 rows.push(`${i + 1}. @${j.username} [${j.mode}] prio ${j.priority || 0}`);
             });
@@ -2336,6 +3243,7 @@ async function refreshScrapeStatusOnce() {
             running && running.username,
             pending.map((j) => j.username).join(','),
             paused ? '1' : '0',
+            sync.running ? 's1' : 's0',
         ].join('|');
         if (pillKey !== state._scrapePillKey) {
             state._scrapePillKey = pillKey;
@@ -2384,6 +3292,52 @@ async function refreshScrapeStatusOnce() {
     }
 }
 
+/** Fallback when scrape queue API is off — still show one-shot sync chip. */
+async function refreshGenericSyncForChip() {
+    try {
+        const res = await fetch('/api/sync/status');
+        if (!res.ok) return null;
+        const sync = await res.json();
+        const data = {
+            pending: [],
+            running_job: null,
+            paused: false,
+            sync,
+            history: [],
+            stats: {},
+        };
+        state.scrapeStatus = data;
+        updateScrapeJobChip(data);
+        return data;
+    } catch (err) {
+        return null;
+    }
+}
+
+/**
+ * On page load / hard refresh: reattach to any in-flight scrape queue or sync job.
+ * Without this, the floating chip and creator pills vanish until the user clicks Sync again.
+ */
+async function hydrateScrapeUiFromServer() {
+    state.scrapeChipDismissed = false;
+    const data = await refreshScrapeStatusOnce();
+    if (!data) return null;
+
+    // Seed completion baseline so reloading does not re-toast old finished jobs
+    if (state.scrapeNotifiedFinished == null) {
+        const hist = (data.history || [])[0];
+        if (hist && hist.finished_at) {
+            state.scrapeNotifiedFinished = hist.finished_at;
+        }
+    }
+
+    if (isScrapeOrSyncActive(data)) {
+        state.scrapeWasActive = true;
+        ensureScrapePolling();
+    }
+    return data;
+}
+
 function isSyncModalOpen() {
     return elements.syncModal && elements.syncModal.style.display === 'flex';
 }
@@ -2402,6 +3356,11 @@ async function pollScrapeStatus() {
     await refreshScrapeStatusOnce();
 }
 
+/**
+ * Sidebar “Sync new posts”: full-feed gap fill (mode=full, deep=true).
+ * Avoids mode=latest + max_posts=50 which stops early and leaves older gaps
+ * (Mikayla case: 50 newest filled, ~117 older posts never walked).
+ */
 async function syncLatestSelectedCreator() {
     const username = (state.selectedCreator || '').trim().replace(/^@/, '');
     if (!username) {
@@ -2414,9 +3373,10 @@ async function syncLatestSelectedCreator() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 username,
-                mode: 'latest',
-                max_posts: 50,
+                mode: 'full',
+                deep: true,
                 include_videos: true,
+                // omit max_posts → server uses FULL_SCRAPE_MAX_POSTS (default 5000)
             }),
         });
         const data = await res.json().catch(() => ({}));
@@ -2451,7 +3411,9 @@ async function enqueueCreatorScrape() {
     let mode = 'full';
     if (latest) mode = 'latest';
     else if (bounded) mode = 'bounded';
-    const deep = mode === 'full' ? Boolean(elements.scrapeFullDeep?.checked ?? true) : false;
+    // Full mode: deep defaults ON. "Latest" without catch_up_only is upgraded
+    // server-side to full+deep so partial archives still get older missing posts.
+    const deep = mode === 'full' ? Boolean(elements.scrapeFullDeep?.checked ?? true) : true;
     const maxPosts = parseInt(elements.scrapeMaxPosts?.value || '50', 10);
     const body = {
         username,
@@ -2459,7 +3421,8 @@ async function enqueueCreatorScrape() {
         deep,
         include_videos: syncIncludeVideosValue(),
     };
-    if (mode === 'bounded' || mode === 'latest') body.max_posts = maxPosts || 50;
+    // Only bounded keeps a low ceiling. latest is upgraded server-side unless catch_up_only.
+    if (mode === 'bounded') body.max_posts = maxPosts || 50;
     try {
         const res = await fetch('/api/scrape/enqueue', {
             method: 'POST',
@@ -2726,28 +3689,39 @@ function syncIncludeVideosValue() {
 }
 
 async function startSyncCreator() {
+    // Modal "Sync creator" — same full-feed deep path as sidebar (via scrape queue).
+    // Never max_posts=50 / bounded: that only pulled glam top-N and stopped early.
     const username = elements.syncCreatorInput.value.trim().replace(/^@/, '');
     if (!username) {
         showToast('Enter a creator handle');
         return;
     }
     try {
-        const res = await fetch('/api/sync/creator', {
+        const res = await fetch('/api/scrape/enqueue', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 username,
-                max_posts: 50,
+                mode: 'full',
+                deep: true,
                 include_videos: syncIncludeVideosValue(),
-            })
+            }),
         });
-        const data = await res.json();
-        if (res.ok) {
-            showToast(`Syncing @${username}...`);
-            pollSyncStatus();
-        } else {
-            showToast(data.message || 'Sync busy');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast({
+                title: 'Can’t sync',
+                body: data.message || data.error || `Failed (${res.status})`,
+                variant: 'error',
+            });
+            return;
         }
+        state.scrapeWasActive = true;
+        state.scrapeChipDismissed = false;
+        toastForEnqueueResult(username, data);
+        ensureScrapePolling();
+        await refreshScrapeStatusOnce();
+        pollSyncStatus();
     } catch (err) {
         showToast('Failed to start creator sync');
     }

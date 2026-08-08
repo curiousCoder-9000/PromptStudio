@@ -23,6 +23,7 @@ def create_instaloader(dirname_pattern: str | None = None) -> instaloader.Instal
         compress_json=False,
         max_connection_attempts=3,
         request_timeout=30,
+        sleep=True,
     )
 
 

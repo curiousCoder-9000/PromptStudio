@@ -1,9 +1,9 @@
 """Thumbnail generation for gallery performance."""
 
 import os
-from typing import Optional, Tuple
+from typing import Optional
 
-from promptstudio.config import SAVED_DIR, THUMB_DIR, THUMB_MAX_SIZE
+from promptstudio.config import THUMB_DIR, THUMB_MAX_SIZE
 
 
 def thumb_rel_path(rel_path: str) -> str:
@@ -25,6 +25,7 @@ def ensure_thumbnail(
     """
     Create a JPEG thumbnail if missing. Returns absolute thumb path or None.
     Uses Pillow when available; falls back to OpenCV.
+    Videos use quality-ranked mid-clip frames (not first frame only).
     """
     out_path = thumb_disk_path(rel_path, thumb_dir)
     # Always store thumbs as .jpg for consistency
@@ -38,7 +39,37 @@ def ensure_thumbnail(
 
     if full_path.lower().endswith((".mp4", ".webm")):
         try:
+            from promptstudio.scraping.video_frames import (
+                find_video_cover_image,
+                write_best_video_frame_jpeg,
+            )
+
+            # Prefer companion cover still when present (cheap, often good)
+            cover = find_video_cover_image(full_path)
+            if cover and os.path.isfile(cover):
+                try:
+                    from PIL import Image
+
+                    with Image.open(cover) as img:
+                        img = img.convert("RGB")
+                        img.thumbnail((max_size, max_size))
+                        img.save(out_path, "JPEG", quality=82, optimize=True)
+                    if os.path.isfile(out_path):
+                        return out_path
+                except Exception:
+                    pass
+
+            if write_best_video_frame_jpeg(
+                full_path, out_path, max_edge=max_size, jpeg_quality=82
+            ):
+                return out_path
+        except Exception as e:
+            print(f"Video thumbnail error for {rel_path}: {e}")
+
+        # Last resort: first frame
+        try:
             import cv2
+
             cap = cv2.VideoCapture(full_path)
             if not cap.isOpened():
                 return None
@@ -49,11 +80,15 @@ def ensure_thumbnail(
             h, w = frame.shape[:2]
             scale = min(max_size / max(w, 1), max_size / max(h, 1), 1.0)
             if scale < 1.0:
-                frame = cv2.resize(frame, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+                frame = cv2.resize(
+                    frame,
+                    (int(w * scale), int(h * scale)),
+                    interpolation=cv2.INTER_AREA,
+                )
             cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
             return out_path
         except Exception as e:
-            print(f"Video thumbnail error for {rel_path}: {e}")
+            print(f"Video thumbnail fallback error for {rel_path}: {e}")
             return None
 
     try:

@@ -55,6 +55,7 @@ THUMB_DIR = os.path.join(SAVED_DIR, "_thumbs")
 PROMPT_HISTORY_MAX = int(os.environ.get("PROMPT_HISTORY_MAX", "3"))
 
 # Scraping behaviour (Phase A anti-ban pacing)
+# Instaloader also applies its own per-request sleep when sleep=True (default).
 DOWNLOAD_DELAY_SEC = float(os.environ.get("IG_DOWNLOAD_DELAY", "2.5"))
 POST_DELAY_MIN_SEC = float(os.environ.get("IG_POST_DELAY_MIN", "4"))
 POST_DELAY_MAX_SEC = float(os.environ.get("IG_POST_DELAY_MAX", "12"))
@@ -96,6 +97,19 @@ DEFAULT_CAPTION_KEYWORDS = [
 ]
 # Gallery sexy filter: glam_score >= this (0–3; -1 = unscored)
 GLAM_SEXY_MIN = int(os.environ.get("GLAM_SEXY_MIN", "2"))
+
+# Reel / video glam classify (frame prefilter + vision)
+CLASSIFY_MAX_EDGE = int(os.environ.get("CLASSIFY_MAX_EDGE", "768"))
+CLASSIFY_REEL_CANDIDATES = int(os.environ.get("CLASSIFY_REEL_CANDIDATES", "10"))
+CLASSIFY_REEL_VISION_MAX = int(os.environ.get("CLASSIFY_REEL_VISION_MAX", "1"))
+CLASSIFY_REEL_SKIP_HEAD_FRAC = float(os.environ.get("CLASSIFY_REEL_SKIP_HEAD_FRAC", "0.08"))
+CLASSIFY_REEL_SKIP_TAIL_FRAC = float(os.environ.get("CLASSIFY_REEL_SKIP_TAIL_FRAC", "0.06"))
+CLASSIFY_REEL_MIN_BRIGHT = float(os.environ.get("CLASSIFY_REEL_MIN_BRIGHT", "22"))
+CLASSIFY_REEL_MIN_SHARP = float(os.environ.get("CLASSIFY_REEL_MIN_SHARP", "35"))
+# Second vision call when first confidence is inside this band (and VISION_MAX >= 2)
+CLASSIFY_REEL_UNCERTAIN_LO = float(os.environ.get("CLASSIFY_REEL_UNCERTAIN_LO", "0.45"))
+CLASSIFY_REEL_UNCERTAIN_HI = float(os.environ.get("CLASSIFY_REEL_UNCERTAIN_HI", "0.65"))
+
 DEFAULT_BIO_KEYWORDS = [
     k.strip()
     for k in os.environ.get(

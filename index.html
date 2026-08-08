@@ -93,7 +93,7 @@
                 <div class="creator-style-panel" id="creatorStylePanel" style="display:none;">
                     <div class="sync-status-label">Instagram</div>
                     <div class="creator-classify-actions">
-                        <button class="btn btn-primary btn-sm full-width" id="syncLatestCreatorBtn" type="button" title="Fetch only new posts; never re-download existing or deleted">
+                        <button class="btn btn-primary btn-sm full-width" id="syncLatestCreatorBtn" type="button" title="Walk the full Instagram feed and download every missing post (skips existing and deleted; does not stop after 50)">
                             <i class="fa-solid fa-arrows-rotate"></i> Sync new posts
                         </button>
                     </div>
@@ -219,10 +219,13 @@
                 <!-- Left: Media Viewer -->
                 <div class="inspector-media">
                     <div class="media-compare" id="mediaCompare">
-                        <div class="media-pane original">
+                        <div class="media-pane original" id="lightboxMediaPane">
                             <span class="media-pane-label">Original</span>
                             <img id="lightboxImg" src="" alt="Full view" title="Click to view full size">
-                            <video id="lightboxVideo" src="" controls autoplay loop muted style="display:none;" title="Click to view full size"></video>
+                            <video id="lightboxVideo" controls loop muted playsinline preload="auto" style="display:none;" title="Double-click for fullscreen · ←/→ seek · Space play/pause"></video>
+                            <button type="button" class="video-expand-btn" id="videoExpandBtn" title="Open fullscreen player (double-click video)">
+                                <i class="fa-solid fa-expand"></i>
+                            </button>
                         </div>
                         <div class="media-pane generated" id="generatedPane" style="display:none;">
                             <span class="media-pane-label">Generated</span>
@@ -442,9 +445,9 @@
                             <i class="fa-solid fa-cloud-arrow-down"></i> Enqueue
                         </button>
                     </div>
-                    <label class="sync-check-label" for="scrapeLatestMode" title="Only new posts until already-local/deleted streak">
+                    <label class="sync-check-label" for="scrapeLatestMode" title="Server upgrades this to full+deep archive fill (avoids stopping after 50 posts). True catch-up needs catch_up_only API flag.">
                         <input type="checkbox" id="scrapeLatestMode">
-                        Latest only (catch-up — existing folders)
+                        Latest (upgraded to full archive fill)
                     </label>
                     <label class="sync-check-label" for="scrapeFullDeep" title="Walk entire feed; fill gaps even after glam top-N pulls">
                         <input type="checkbox" id="scrapeFullDeep" checked>
@@ -541,7 +544,36 @@
         </div>
         <div class="photo-viewer-container" id="photoViewerContainer">
             <img id="photoViewerImg" src="" alt="Full resolution view">
+            <!-- Video FS layout: teleport #lightboxVideo into stage; custom scrub bar (native controls flaky in shell) -->
+            <div class="fs-video-layout" id="fsVideoLayout" style="display:none;" hidden>
+                <div class="fs-video-stage" id="fsVideoStage" title="Click to play/pause"></div>
+                <div class="fs-video-bar" id="fsVideoBar">
+                    <button type="button" class="fs-ctrl-btn" id="fsPlayPauseBtn" title="Play/Pause (Space)">
+                        <i class="fa-solid fa-pause" id="fsPlayPauseIcon"></i>
+                    </button>
+                    <span class="fs-time" id="fsTimeCurrent">0:00</span>
+                    <div class="fs-seek-wrap" id="fsSeekWrap" title="Drag or click to seek" role="slider" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0">
+                        <div class="fs-seek-track">
+                            <div class="fs-seek-buffered" id="fsSeekBuffered"></div>
+                            <div class="fs-seek-played" id="fsSeekPlayed"></div>
+                            <div class="fs-seek-thumb" id="fsSeekThumb"></div>
+                        </div>
+                        <!-- Native range backup: browsers map this reliably to mouse drag -->
+                        <input type="range" class="fs-seek-range" id="fsSeekRange" min="0" max="1000" value="0" step="1" aria-label="Seek">
+                    </div>
+                    <span class="fs-time" id="fsTimeDuration">0:00</span>
+                    <button type="button" class="fs-ctrl-btn" id="fsMuteBtn" title="Mute/Unmute">
+                        <i class="fa-solid fa-volume-high" id="fsMuteIcon"></i>
+                    </button>
+                </div>
+            </div>
         </div>
+    </div>
+
+    <!-- Shared video chrome (outside overlays so HUD works in preview + fullscreen) -->
+    <div class="video-seek-hud" id="videoSeekHud" aria-hidden="true"></div>
+    <div class="video-buffering" id="videoBuffering" aria-hidden="true">
+        <i class="fa-solid fa-circle-notch fa-spin"></i>
     </div>
 
     <!-- Lightweight scrape job chip (non-modal) -->

@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|--------|
-| **Status** | Implemented |
+| **Status** | Implemented (+ refresh hydrate; full deep enqueue) |
 | **Date** | 2026-08-08 |
 | **Problem** | Sidebar → Sync opens the full Instagram Sync modal; feels cluttered and wrong for a one-click catch-up |
 
@@ -242,6 +242,16 @@ No backend API changes required for PR1–PR3 (status endpoints already exist).
 
 ---
 
+## Follow-ups (2026-08-08)
+
+| Change | Why |
+|--------|-----|
+| Sidebar enqueue `mode=full, deep=true` (no `max_posts: 50`) | `latest`+ceiling left Mikayla with only newest 50; older gaps never walked |
+| `hydrateScrapeUiFromServer()` on `initApp` | Hard refresh wiped chip/pills even though queue still running on server |
+| Reverted extra post soft-pauses / paced `do_sleep` | Instaloader request sleep + existing 4–12s post delay are enough |
+
+---
+
 ## Success criteria
 
 1. Click Sync on creator **never** opens full Sync modal.
@@ -250,6 +260,8 @@ No backend API changes required for PR1–PR3 (status endpoints already exist).
 4. Can keep browsing gallery while sync runs.
 5. Done → short success feedback; new media appear when viewing that creator.
 6. Power users still reach full tools via main Instagram button.
+7. Hard refresh while a job runs → chip (and creator pill) restore from `/api/scrape/status`.
+8. Sidebar Sync walks full feed for missing posts (does not stop after 50).
 
 ---
 

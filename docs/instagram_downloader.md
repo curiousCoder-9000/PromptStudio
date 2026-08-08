@@ -51,6 +51,8 @@ py scripts/backfill_glam_scores.py
 
 **Glam scores (PR4):** `glam_score` 0–3 on `archive.db` + sidecars. Gallery **Sexy** chip → `?sexy=1` (`glam_score >= 2`).
 
+**Reels / videos (classify):** smart frame pick (time-based, drop dark/blurry) + reel vision prompt (`v3-reel-frames`); default **1** Ollama call per reel (`CLASSIFY_REEL_VISION_MAX`). Companion cover JPG used when present. Gallery video thumbs use the same best-frame ranker (not first frame only). See [design_reel_classifier.md](design_reel_classifier.md).
+
 Export following list first (includes biographies for keyword filters):
 
 ```powershell
@@ -64,15 +66,19 @@ Use `--keywords ""` to disable the bio keyword filter and queue every public acc
 
 ## Phase A — Anti-ban pacing
 
-Following sync is designed for **multi-day** crawls, not one overnight dump.
+Following sync is designed for **multi-day** crawls, not one overnight dump. Instaloader also applies its own per-request sleep (`sleep=True`).
 
 | Behaviour | Default |
 |-----------|---------|
-| Post delay | random 4–12 s (`IG_POST_DELAY_MIN` / `IG_POST_DELAY_MAX`) |
-| Between accounts | random 30–120 s |
+| Post delay | random 4–12 s after each successful download (`IG_POST_DELAY_MIN` / `IG_POST_DELAY_MAX`) |
+| Between accounts / queue jobs | random 30–120 s |
 | Soft batch pause | every 10 accounts, random 5–15 min |
 | Daily / run cap | 20 accounts (`--accounts-per-day` / `max_accounts`) |
 | Hard abort | 3 consecutive rate-limits, or `feedback_required` / `challenge_required` / `PleaseWaitFewMinutes` |
+
+**UI “Sync new posts”** enqueues `mode=full, deep=true` (walk entire feed, download every missing post, no early catch-up stop).
+
+**Server safety (2026-08-08):** `mode=latest` without `catch_up_only=true` is **upgraded to full+deep** in `CreatorScrapeQueue.enqueue` so partial glam archives cannot stop after 50 newest posts (`stop_reason=ceiling`). Modal creator sync and `/api/sync/creator` also route to the scrape queue as full+deep when the queue is enabled.
 
 **Rules of thumb**
 

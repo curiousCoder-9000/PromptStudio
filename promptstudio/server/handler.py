@@ -130,10 +130,27 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        # Range is required so browsers can probe partial media when CORS applies
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Range",
+        )
+        self.send_header(
+            "Access-Control-Expose-Headers",
+            "Accept-Ranges, Content-Range, Content-Length",
+        )
         super().end_headers()
 
     def do_OPTIONS(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def do_HEAD(self):
+        """Support HEAD for media (range probing); body omitted in _serve_local_file."""
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path.startswith("/media/"):
+            # do_GET uses self.command == "HEAD" to skip the body
+            return self.do_GET()
         self.send_response(200)
         self.end_headers()
 
@@ -148,6 +165,114 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
         if not length:
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
+
+    @staticmethod
+    def _parse_byte_range(range_header: str, file_size: int):
+        """
+        Parse a single HTTP Range header value into (start, end) inclusive.
+        Returns None if the header is missing/unusable; raises ValueError if unsatisfiable.
+        """
+        if not range_header:
+            return None
+        raw = range_header.strip()
+        if not raw.lower().startswith("bytes="):
+            return None
+        spec = raw.split("=", 1)[1].strip()
+        # Only honor the first range (browsers use single ranges for media)
+        spec = spec.split(",")[0].strip()
+        if "-" not in spec:
+            raise ValueError("invalid range")
+        start_s, end_s = spec.split("-", 1)
+        if start_s == "" and end_s == "":
+            raise ValueError("empty range")
+        if start_s == "":
+            # suffix: last N bytes
+            suffix = int(end_s)
+            if suffix <= 0:
+                raise ValueError("bad suffix")
+            if suffix >= file_size:
+                return 0, file_size - 1
+            return file_size - suffix, file_size - 1
+        start = int(start_s)
+        if start < 0 or start >= file_size:
+            raise ValueError("start out of bounds")
+        if end_s == "":
+            end = file_size - 1
+        else:
+            end = int(end_s)
+            if end < start:
+                raise ValueError("end before start")
+            end = min(end, file_size - 1)
+        return start, end
+
+    def _serve_local_file(
+        self,
+        full_path: str,
+        content_type: str,
+        cache_control: str = "public, max-age=3600",
+    ) -> None:
+        """
+        Stream a local file with HTTP Range support (206 Partial Content).
+
+        Chrome/Edge refuse to scrub HTML5 video unless the server advertises
+        Accept-Ranges and answers Range requests with 206 + Content-Range.
+        Serving the whole file as 200 without ranges makes currentTime seeks fail.
+        """
+        try:
+            file_size = os.path.getsize(full_path)
+        except OSError:
+            self.send_error(404, "File not found")
+            return
+
+        range_header = self.headers.get("Range")
+        try:
+            byte_range = self._parse_byte_range(range_header or "", file_size)
+        except ValueError:
+            self.send_response(416)
+            self.send_header("Content-Range", f"bytes */{file_size}")
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            return
+
+        chunk_size = 64 * 1024
+
+        if byte_range is None:
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", str(file_size))
+            self.send_header("Cache-Control", cache_control)
+            self.end_headers()
+            if self.command == "HEAD":
+                return
+            with open(full_path, "rb") as f:
+                while True:
+                    data = f.read(chunk_size)
+                    if not data:
+                        break
+                    self.wfile.write(data)
+            return
+
+        start, end = byte_range
+        length = end - start + 1
+        self.send_response(206)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+        self.send_header("Content-Length", str(length))
+        self.send_header("Cache-Control", cache_control)
+        self.end_headers()
+        if self.command == "HEAD":
+            return
+        with open(full_path, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                data = f.read(min(chunk_size, remaining))
+                if not data:
+                    break
+                self.wfile.write(data)
+                remaining -= len(data)
 
     def do_DELETE(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -323,19 +448,31 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 deep = data.get("deep", True)
                 if isinstance(deep, str):
                     deep = deep.lower() in ("1", "true", "yes")
-                if mode == "latest":
+                # catch_up_only: keep true latest (streak stop + low ceiling).
+                # Default latest is upgraded to full+deep inside CreatorScrapeQueue.
+                catch_up_only = data.get("catch_up_only", False)
+                if isinstance(catch_up_only, str):
+                    catch_up_only = catch_up_only.lower() in ("1", "true", "yes")
+                catch_up_only = bool(catch_up_only)
+                if mode == "latest" and catch_up_only:
                     deep = False
                 elif mode == "full":
                     deep = bool(deep)
+                elif mode == "latest":
+                    deep = True  # will be coerced to full+deep in queue
                 else:
                     deep = False
                 max_posts = data.get("max_posts")
                 if max_posts is not None and max_posts != "":
                     max_posts = int(max_posts)
                 else:
-                    max_posts = (
-                        None if mode == "full" else DEFAULT_MAX_POSTS_PER_CREATOR
-                    )
+                    # full / upgraded-latest: no low ceiling; bounded needs default
+                    if mode == "bounded":
+                        max_posts = DEFAULT_MAX_POSTS_PER_CREATOR
+                    elif mode == "latest" and catch_up_only:
+                        max_posts = DEFAULT_MAX_POSTS_PER_CREATOR
+                    else:
+                        max_posts = None
                 if "include_videos" in data:
                     include_videos = bool(data.get("include_videos"))
                 else:
@@ -352,6 +489,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     priority=priority,
                     folder_name=folder["name"],
                     folder_created=folder["created"],
+                    catch_up_only=catch_up_only,
                 )
                 started = False
                 if out["status"] == "queued":
@@ -465,27 +603,74 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/sync/creator":
             try:
                 data = self._read_json_body()
-                username = data.get("username", "").strip()
+                username = (data.get("username") or "").strip().lstrip("@")
+                if not username:
+                    self.send_error(400, "username required")
+                    return
+                # Prefer serial scrape queue: full feed + deep gap-fill (not glam top-50).
+                # One-shot bounded path remains only when queue disabled or client forces oneshot.
+                force_oneshot = data.get("oneshot", False)
+                if isinstance(force_oneshot, str):
+                    force_oneshot = force_oneshot.lower() in ("1", "true", "yes")
+                if CREATOR_SCRAPE_QUEUE_ENABLED and _scrape_queue and not force_oneshot:
+                    if "include_videos" in data:
+                        include_videos = bool(data.get("include_videos"))
+                    else:
+                        include_videos = INCLUDE_VIDEOS_DEFAULT
+                    folder = ensure_creator_folder(username)
+                    q = CreatorScrapeQueue.get()
+                    out = q.enqueue(
+                        username,
+                        mode="full",
+                        deep=True,
+                        max_posts=None,
+                        include_videos=include_videos,
+                        priority=0,
+                        folder_name=folder["name"],
+                        folder_created=folder["created"],
+                    )
+                    started = False
+                    if out["status"] == "queued":
+                        started = _sync.try_drain_creator_queue()
+                        if started:
+                            out["status"] = "started"
+                    self._send_json(
+                        {
+                            **out,
+                            "job_type": "creator_queue",
+                            "username": username,
+                            "include_videos": include_videos,
+                            "mode": "full",
+                            "deep": True,
+                            "folder": folder["name"],
+                            "folder_created": folder["created"],
+                            "routed": "scrape_queue",
+                        }
+                    )
+                    return
+
                 max_posts = int(data.get("max_posts", DEFAULT_MAX_POSTS_PER_CREATOR))
-                mode = (data.get("mode") or "bounded").strip().lower()
+                mode = (data.get("mode") or "full").strip().lower()
                 if mode not in ("bounded", "full", "latest"):
-                    mode = "bounded"
+                    mode = "full"
                 deep = data.get("deep", True)
                 if isinstance(deep, str):
                     deep = deep.lower() in ("1", "true", "yes")
                 if mode == "latest":
-                    deep = False
+                    # Avoid partial archives: oneshot latest still walks deep full stream
+                    mode = "full"
+                    deep = True
+                    max_posts = FULL_SCRAPE_MAX_POSTS
                 elif mode == "full":
                     deep = bool(deep)
+                    if deep and max_posts <= 0:
+                        max_posts = FULL_SCRAPE_MAX_POSTS
                 else:
                     deep = False
                 if "include_videos" in data:
                     include_videos = bool(data.get("include_videos"))
                 else:
                     include_videos = INCLUDE_VIDEOS_DEFAULT
-                if not username:
-                    self.send_error(400, "username required")
-                    return
                 blocked = _creator_queue_blocks_oneshot()
                 if blocked:
                     self._send_json(blocked, 409)
@@ -520,6 +705,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                             "include_videos": include_videos,
                             "mode": mode,
                             "deep": deep,
+                            "routed": "oneshot",
                         }
                     )
                 else:
@@ -974,12 +1160,12 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
 
             thumb = ensure_thumbnail(full_path, rel_path) or resolve_thumb_file(rel_path)
             serve_path = thumb or full_path
-            self.send_response(200)
-            self.send_header("Content-Type", "image/jpeg")
-            self.send_header("Cache-Control", "max-age=86400")
-            self.end_headers()
-            with open(serve_path, "rb") as f:
-                self.wfile.write(f.read())
+            # Thumbs are small; still advertise ranges for consistency
+            self._serve_local_file(
+                serve_path,
+                "image/jpeg",
+                cache_control="public, max-age=86400",
+            )
             return
 
         if path.startswith("/media/"):
@@ -996,12 +1182,14 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     content_type = "video/mp4"
                 elif ext == ".webm":
                     content_type = "video/webm"
-                self.send_response(200)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Cache-Control", "max-age=3600")
-                self.end_headers()
-                with open(full_path, "rb") as f:
-                    self.wfile.write(f.read())
+                elif ext == ".mov":
+                    content_type = "video/quicktime"
+                # CRITICAL: byte-range support so browser can scrub video currentTime
+                self._serve_local_file(
+                    full_path,
+                    content_type,
+                    cache_control="public, max-age=3600",
+                )
                 return
             self.send_error(404, "File not found")
             return

@@ -1155,6 +1155,59 @@ body {
     min-height: 0;
 }
 
+/* Video: keep native controls free of overlays */
+.inspector-media.is-video {
+    padding-bottom: 12px;
+}
+
+.inspector-media.is-video .media-pane {
+    /* Video fills pane; controls must remain clickable */
+    z-index: 1;
+}
+
+.inspector-media.is-video video {
+    position: relative;
+    z-index: 2;
+    /* Ensure control bar isn't clipped by overflow parents */
+    max-height: calc(100% - 4px);
+    /* Smooth decode: solid stage, no fade/transform jank on seek */
+    background: #000;
+    transition: none !important;
+    opacity: 1 !important;
+    -webkit-transform: translateZ(0);
+    transform: translateZ(0);
+}
+
+.video-expand-btn {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    z-index: 5;
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: rgba(15, 23, 42, 0.82);
+    color: #e2e8f0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    backdrop-filter: blur(8px);
+    transition: var(--transition-fast);
+    pointer-events: auto;
+}
+
+.video-expand-btn:hover {
+    background: rgba(139, 92, 246, 0.45);
+    border-color: rgba(139, 92, 246, 0.55);
+    color: #fff;
+}
+
+.inspector-media.is-video .video-expand-btn {
+    display: inline-flex;
+}
+
 .media-compare {
     display: flex;
     width: 100%;
@@ -1201,15 +1254,20 @@ body {
     max-height: 100%;
     object-fit: contain;
     border-radius: var(--radius-sm);
-    transition: opacity var(--transition-fast), transform var(--transition-fast);
 }
 
 .inspector-media img {
     cursor: zoom-in;
+    transition: opacity var(--transition-fast), transform var(--transition-fast);
 }
 
 .inspector-media img:hover {
     opacity: 0.92;
+}
+
+.inspector-media video {
+    /* Never animate <video> — causes stutter on seek/layout */
+    transition: none !important;
 }
 
 .media-badge.compare-toggle {
@@ -1294,6 +1352,23 @@ body {
     gap: 8px;
     flex-wrap: wrap;
     max-width: calc(100% - 40px);
+    z-index: 4;
+    /* Non-interactive labels must not steal clicks from media (esp. video seek bar) */
+    pointer-events: none;
+}
+
+.media-badge-group .compare-toggle,
+.media-badge-group button {
+    pointer-events: auto;
+}
+
+/* Videos: badges sit at the top so native progress/volume controls stay free */
+.inspector-media.is-video .media-badge-group {
+    bottom: auto;
+    top: 16px;
+    left: 16px;
+    right: 56px; /* room for expand button */
+    max-width: calc(100% - 80px);
 }
 
 .media-badge {
@@ -1599,6 +1674,7 @@ button.tag-pill.tag-clickable:hover {
     background: rgba(8, 12, 22, 0.86);
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
+    cursor: pointer;
 }
 
 .modal-card {
@@ -1615,6 +1691,7 @@ button.tag-pill.tag-clickable:hover {
     align-items: center;
     text-align: center;
     gap: 14px;
+    cursor: default;
     box-shadow: var(--surface-inset), var(--shadow-lg), 0 0 0 1px rgba(139, 92, 246, 0.06);
 }
 
@@ -2254,11 +2331,13 @@ button.tag-pill.tag-clickable:hover {
     padding: 10px 16px;
 }
 
-/* Fullscreen Photo Viewer Overlay */
+/* Fullscreen Photo Viewer Overlay
+   z-index must beat scrape-job-chip (1250) and toast (1300) or the chip
+   covers the bottom scrub bar and mouse seeks never hit the player. */
 .photo-viewer-overlay {
     position: fixed;
     inset: 0;
-    z-index: 1100;
+    z-index: 1400;
     background: rgba(0, 0, 0, 0.96);
     display: flex;
     align-items: center;
@@ -2334,6 +2413,290 @@ button.tag-pill.tag-clickable:hover {
     pointer-events: none;
     user-select: none;
     -webkit-user-drag: none;
+}
+
+/* Fullscreen video mode: custom scrub bar (native controls unreliable in overlay shell) */
+.photo-viewer-overlay.is-video {
+    cursor: default;
+    background: rgba(0, 0, 0, 0.97);
+}
+
+.photo-viewer-overlay.is-video .photo-viewer-container {
+    overflow: visible;
+    padding: 52px 16px 20px;
+    box-sizing: border-box;
+    /* Don't let image-viewer drag chrome steal hits from the player */
+    pointer-events: auto;
+}
+
+.photo-viewer-overlay.is-video .photo-viewer-hint {
+    top: 14px;
+    bottom: auto;
+    transform: translateX(-50%);
+}
+
+.fs-video-layout {
+    display: flex;
+    flex-direction: column;
+    width: min(96vw, 1600px);
+    max-height: calc(100vh - 72px);
+    margin: 0 auto;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #000;
+    box-shadow: 0 16px 56px rgba(0, 0, 0, 0.65);
+    pointer-events: auto;
+    position: relative;
+    z-index: 2;
+}
+
+.fs-video-stage {
+    flex: 1 1 auto;
+    min-height: 120px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #000;
+    cursor: pointer;
+    /* Stage only hosts the video surface; scrubbing is on the bar below */
+    position: relative;
+}
+
+/* Teleported lightbox video in fullscreen shell — native controls OFF in FS */
+#lightboxVideo.fs-active-video {
+    max-width: 100%;
+    max-height: calc(100vh - 160px);
+    width: 100%;
+    height: auto;
+    object-fit: contain;
+    border-radius: 0;
+    background: #000;
+    outline: none;
+    pointer-events: auto;
+    user-select: none;
+    transition: none !important;
+    opacity: 1 !important;
+    box-shadow: none;
+}
+
+/* Bottom control bar — fixed dock so nothing covers the scrub target */
+.fs-video-bar {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 18px 16px;
+    background: linear-gradient(180deg, rgba(15, 23, 42, 0.94), rgba(8, 12, 22, 0.99));
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    pointer-events: auto !important;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 1500;
+    user-select: none;
+    -webkit-user-select: none;
+    box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.45);
+}
+
+.photo-viewer-overlay.is-video .fs-video-layout {
+    /* Room for fixed bottom bar so video isn't hidden under it */
+    max-height: calc(100vh - 96px);
+    margin-bottom: 72px;
+}
+
+.fs-ctrl-btn {
+    flex: 0 0 auto;
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.06);
+    color: #f1f5f9;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.95rem;
+    transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.fs-ctrl-btn:hover {
+    background: rgba(139, 92, 246, 0.35);
+    border-color: rgba(139, 92, 246, 0.5);
+}
+
+.fs-time {
+    flex: 0 0 auto;
+    min-width: 42px;
+    font-family: var(--font-code, ui-monospace, monospace);
+    font-size: 0.78rem;
+    color: #cbd5e1;
+    text-align: center;
+    tabular-nums: true;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Wide seek strip — click/drag anywhere on this row to scrub */
+.fs-seek-wrap {
+    flex: 1 1 auto;
+    position: relative;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+    touch-action: none; /* critical: allow horizontal drag without page scroll */
+    min-width: 80px;
+    pointer-events: auto !important;
+    z-index: 2;
+}
+
+.fs-seek-track {
+    position: relative;
+    width: 100%;
+    height: 10px;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.28);
+    overflow: visible;
+    pointer-events: none; /* hits go to wrap, not children */
+}
+
+.fs-seek-wrap:hover .fs-seek-track,
+.fs-seek-wrap.is-scrubbing .fs-seek-track {
+    height: 12px;
+}
+
+/* Invisible native range on top — backup hit target for browsers that prefer <input> */
+.fs-seek-range {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    opacity: 0.01; /* nearly invisible but still receives events in some engines */
+    cursor: pointer;
+    z-index: 3;
+    pointer-events: auto;
+    /* Large thumb hit area */
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+}
+
+.fs-seek-range::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 28px;
+    height: 44px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+}
+
+.fs-seek-range::-moz-range-thumb {
+    width: 28px;
+    height: 44px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+}
+
+.fs-seek-range::-moz-range-track {
+    background: transparent;
+    border: none;
+}
+
+.fs-seek-buffered {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 0%;
+    border-radius: 999px;
+    background: rgba(226, 232, 240, 0.28);
+    pointer-events: none;
+}
+
+.fs-seek-played {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 0%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #8b5cf6, #ec4899);
+    pointer-events: none;
+}
+
+.fs-seek-thumb {
+    position: absolute;
+    top: 50%;
+    left: 0%;
+    width: 16px;
+    height: 16px;
+    margin-left: -8px;
+    margin-top: -8px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+    transform: scale(0.85);
+    transition: transform 0.1s ease;
+}
+
+.fs-seek-wrap:hover .fs-seek-thumb,
+.fs-seek-wrap.is-scrubbing .fs-seek-thumb {
+    transform: scale(1);
+}
+
+.video-buffering {
+    position: fixed;
+    inset: 0;
+    z-index: 1550;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    background: transparent;
+}
+
+.video-buffering.show {
+    display: flex;
+}
+
+.video-buffering i {
+    font-size: 2rem;
+    color: rgba(255, 255, 255, 0.88);
+    filter: drop-shadow(0 2px 10px rgba(0, 0, 0, 0.6));
+}
+
+.video-seek-hud {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%) scale(0.92);
+    z-index: 1560;
+    min-width: 88px;
+    padding: 12px 18px;
+    border-radius: 14px;
+    background: rgba(15, 23, 42, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #f8fafc;
+    font-family: var(--font-sub);
+    font-size: 1.05rem;
+    font-weight: 600;
+    text-align: center;
+    letter-spacing: 0.02em;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.14s ease, transform 0.14s ease;
+    backdrop-filter: blur(10px);
+}
+
+.video-seek-hud.show {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
 }
 
 @keyframes slideIn {
