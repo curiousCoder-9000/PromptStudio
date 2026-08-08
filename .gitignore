@@ -16,3 +16,7 @@ coverage.*
 
 # Local tooling state (Claude Code, etc.)
 .claude/
+
+# Python
+__pycache__/
+*.pyc
