@@ -23,15 +23,24 @@ from promptstudio.config import (
     DEFAULT_MAX_POSTS_PER_CREATOR,
     DEFAULT_MIN_MEDIA_COUNT,
     FOLLOWING_LIST_FILE,
+    FULL_SCRAPE_MAX_POSTS,
+    INCLUDE_VIDEOS_DEFAULT,
+    MEDIA_EXTENSIONS,
     POST_DELAY_MAX_SEC,
     POST_DELAY_MIN_SEC,
+    POST_RANK_ENABLED,
+    POST_SCAN_FACTOR,
     RATE_LIMIT_BACKOFF_MAX_SEC,
     RATE_LIMIT_BACKOFF_SEC,
     SAVED_DIR,
     SESSION_USER,
 )
 from promptstudio.scraping.checkpoints import SyncCheckpoints
-from promptstudio.scraping.filters import filter_following_entries, normalize_keywords
+from promptstudio.scraping.filters import (
+    filter_following_entries,
+    normalize_keywords,
+    score_instagram_post,
+)
 from promptstudio.scraping.organizer import deduplicate_archive, organize_root_images
 from promptstudio.scraping.queue import FollowingQueue
 from promptstudio.scraping.session import authenticated_profile, create_instaloader, load_session
@@ -61,6 +70,7 @@ class SyncResult:
     accounts_processed: int = 0
     queue_summary: Optional[dict] = None
     messages: List[str] = field(default_factory=list)
+    stop_reason: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -75,11 +85,13 @@ class InstagramDownloader:
         session_user: str = SESSION_USER,
         log: LogFn = None,
         on_rate_limit: Optional[Callable[[int, int], None]] = None,
+        should_cancel: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.save_dir = os.path.expanduser(save_dir)
         self.session_user = session_user
         self.log = log or print
         self.on_rate_limit = on_rate_limit
+        self.should_cancel = should_cancel or (lambda: False)
         self.checkpoints = SyncCheckpoints()
         self.queue = FollowingQueue()
         self._consecutive_rate_limits = 0
@@ -87,6 +99,22 @@ class InstagramDownloader:
         self._abort_reason = ""
         os.makedirs(self.save_dir, exist_ok=True)
         self._L = create_instaloader(os.path.join(self.save_dir, "{owner_username}"))
+
+    def _cancel_requested(self) -> bool:
+        try:
+            return bool(self.should_cancel())
+        except Exception:
+            return False
+
+    def _interruptible_sleep(self, seconds: float, *, what: str = "sleep") -> bool:
+        """Return True if cancelled/aborted early."""
+        end = time.monotonic() + max(0.0, float(seconds))
+        while time.monotonic() < end:
+            if self._aborted or self._cancel_requested():
+                return True
+            remaining = end - time.monotonic()
+            time.sleep(min(1.0, max(0.0, remaining)))
+        return False
 
     def _attach_metadata(self, post, creator: str) -> None:
         """Write sidecar metadata for files downloaded from this post."""
@@ -143,8 +171,7 @@ class InstagramDownloader:
         return 1
 
     def _sidecar_scan_paths(self, creator: str, shortcode: str, post_id: str) -> list:
-        """Find on-disk images whose sidecars match shortcode/post_id (index lag / legacy)."""
-        from promptstudio.config import IMAGE_EXTENSIONS
+        """Find on-disk media whose sidecars match shortcode/post_id (index lag / legacy)."""
         from promptstudio.storage.metadata import load_post_metadata
 
         folder = os.path.join(self.save_dir, creator)
@@ -156,7 +183,7 @@ class InstagramDownloader:
         except OSError:
             return []
         for name in names:
-            if not name.lower().endswith(IMAGE_EXTENSIONS):
+            if not name.lower().endswith(MEDIA_EXTENSIONS):
                 continue
             full = os.path.join(folder, name)
             meta = load_post_metadata(full) or {}
@@ -217,13 +244,17 @@ class InstagramDownloader:
         lo, hi = self._clamp_range(POST_DELAY_MIN_SEC, POST_DELAY_MAX_SEC)
         delay = random.uniform(lo, hi)
         self.log(f"Post delay {delay:.1f}s")
-        time.sleep(delay)
+        if self._interruptible_sleep(delay, what="post delay"):
+            self._aborted = True
+            self._abort_reason = self._abort_reason or "Cancelled by user"
 
     def _sleep_account_pause(self) -> None:
         lo, hi = self._clamp_range(ACCOUNT_PAUSE_MIN_SEC, ACCOUNT_PAUSE_MAX_SEC)
         delay = random.uniform(lo, hi)
         self.log(f"Account pause {delay:.0f}s")
-        time.sleep(delay)
+        if self._interruptible_sleep(delay, what="account pause"):
+            self._aborted = True
+            self._abort_reason = self._abort_reason or "Cancelled by user"
 
     def _maybe_batch_pause(self, processed: int) -> None:
         if BATCH_PAUSE_EVERY <= 0 or processed <= 0:
@@ -235,7 +266,9 @@ class InstagramDownloader:
         self.log(
             f"Batch pause after {processed} accounts — waiting {delay / 60:.1f} min"
         )
-        time.sleep(delay)
+        if self._interruptible_sleep(delay, what="batch pause"):
+            self._aborted = True
+            self._abort_reason = self._abort_reason or "Cancelled by user"
 
     @staticmethod
     def _is_abuse_signal(exc: BaseException) -> bool:
@@ -254,7 +287,9 @@ class InstagramDownloader:
         return self._consecutive_rate_limits >= ABORT_RATE_LIMIT_STREAK
 
     def _download_post(self, post, result: SyncResult, username: str = "") -> bool:
-        if self._aborted:
+        if self._aborted or self._cancel_requested():
+            if self._cancel_requested() and not self._aborted:
+                self._trigger_abort("Cancelled by user", result)
             return False
         creator = post.owner_username
         state = self._post_archive_state(post)
@@ -282,6 +317,8 @@ class InstagramDownloader:
                 downloaded_delta=1,
             )
             self._sleep_post_delay()
+            if self._aborted and self._cancel_requested() and not result.aborted:
+                self._trigger_abort("Cancelled by user", result)
             return True
         except instaloader.exceptions.ConnectionException as exc:
             result.errors += 1
@@ -296,7 +333,9 @@ class InstagramDownloader:
             self.log(msg + f" — waiting {wait}s (hit #{self._consecutive_rate_limits})")
             if self.on_rate_limit:
                 self.on_rate_limit(self._consecutive_rate_limits, wait)
-            time.sleep(wait)
+            if self._interruptible_sleep(wait, what="rate-limit backoff"):
+                self._trigger_abort("Cancelled by user", result)
+                return False
             if self._should_abort_rate_limit():
                 self._trigger_abort(
                     f"Rate-limit streak reached {self._consecutive_rate_limits} "
@@ -323,11 +362,18 @@ class InstagramDownloader:
         self.log(f"Authenticated as @{profile.username}")
 
         for post in profile.get_saved_posts():
-            if self._aborted:
+            if self._aborted or self._cancel_requested():
+                if self._cancel_requested() and not result.aborted:
+                    self._trigger_abort("Cancelled by user", result)
                 break
             self._download_post(post, result)
 
-        organize_root_images(self.save_dir, log=self.log)
+        if not self._aborted:
+            organize_root_images(self.save_dir, log=self.log)
+        if result.aborted and not result.stop_reason:
+            result.stop_reason = (
+                "cancel" if "cancelled" in (result.abort_reason or "").lower() else "abort"
+            )
         self.log(
             f"Saved sync done: {result.downloaded} new, "
             f"{result.skipped} skipped, {result.errors} errors"
@@ -339,16 +385,33 @@ class InstagramDownloader:
         self,
         username: str,
         max_posts: int = DEFAULT_MAX_POSTS_PER_CREATOR,
-        include_videos: bool = False,
+        include_videos: bool = INCLUDE_VIDEOS_DEFAULT,
+        *,
+        mode: str = "bounded",
+        deep: bool = True,
     ) -> SyncResult:
-        """Download recent posts from a single public creator."""
+        """Download posts from a single creator.
+
+        mode:
+          - bounded: existing rank/scan/top-N path (default; used by following bulk)
+          - full: stream entire feed; deep=True disables catch-up (true archive)
+        """
         result = SyncResult(job_type="creator")
         username = username.lstrip("@").strip()
         if not username:
             result.messages.append("Empty username")
+            result.stop_reason = "error"
             return result
 
-        self.log(f"=== Syncing feed @{username} (max {max_posts}) ===")
+        mode = (mode or "bounded").strip().lower()
+        if mode not in ("bounded", "full"):
+            mode = "bounded"
+
+        self.log(
+            f"=== Syncing feed @{username} mode={mode}"
+            + (f" deep={deep}" if mode == "full" else f" max={max_posts}")
+            + f" videos={'on' if include_videos else 'off'} ==="
+        )
         try:
             from promptstudio.storage.db import ArchiveIndex
 
@@ -364,47 +427,103 @@ class InstagramDownloader:
         except instaloader.exceptions.ProfileNotExistsException:
             result.messages.append(f"Profile @{username} not found")
             result.errors += 1
+            result.stop_reason = "not_found"
             return result
         except Exception as exc:
             result.errors += 1
             if self._is_abuse_signal(exc):
                 self._trigger_abort(f"Abuse signal loading @{username}: {exc}", result)
+                result.stop_reason = "abort"
             else:
                 msg = f"Error loading @{username}: {exc}"
                 result.messages.append(msg)
                 self.log(msg)
+                result.stop_reason = "error"
             return result
 
-        count = 0
+        # Private fail-fast when not followed by session user
+        try:
+            if bool(getattr(creator_profile, "is_private", False)) and not bool(
+                getattr(creator_profile, "followed_by_viewer", False)
+            ):
+                result.errors += 1
+                result.stop_reason = "private"
+                msg = f"@{username} is private and not followed by session user"
+                result.messages.append(msg)
+                self.log(msg)
+                return result
+        except Exception:
+            pass
+
+        if mode == "full":
+            return self._sync_creator_feed_full(
+                creator_profile,
+                username,
+                result,
+                max_posts=max_posts,
+                include_videos=include_videos,
+                deep=deep,
+            )
+        return self._sync_creator_feed_bounded(
+            creator_profile,
+            username,
+            result,
+            max_posts=max_posts,
+            include_videos=include_videos,
+        )
+
+    def _sync_creator_feed_bounded(
+        self,
+        creator_profile,
+        username: str,
+        result: SyncResult,
+        *,
+        max_posts: int,
+        include_videos: bool,
+    ) -> SyncResult:
+        """Existing two-phase collect → rank → download top N (following-safe)."""
+        max_posts = max(1, int(max_posts))
+        scan_factor = max(1.0, float(POST_SCAN_FACTOR))
+        scan_limit = max_posts if not POST_RANK_ENABLED else max(
+            max_posts, int(max_posts * scan_factor)
+        )
+        candidates: list = []  # (score, feed_index, post)
         consecutive_known = 0
+        scanned = 0
+
         try:
             post_iter = creator_profile.get_posts()
-            for post in post_iter:
-                if self._aborted:
+            for feed_index, post in enumerate(post_iter):
+                if self._aborted or self._cancel_requested():
+                    if self._cancel_requested() and not result.aborted:
+                        self._trigger_abort("Cancelled by user", result)
                     break
-                if count >= max_posts:
+                if scanned >= scan_limit:
                     break
                 if post.is_video and not include_videos:
                     result.skipped += 1
                     continue
+                scanned += 1
                 state = self._post_archive_state(post)
                 if state == "complete":
                     result.skipped += 1
                     consecutive_known += 1
                     sc = getattr(post, "shortcode", "") or ""
                     self.log(f"Skip (archived): @{username} {sc}")
-                    # Telemetry only — do not use checkpoint as sole stop signal
                     if consecutive_known >= CATCH_UP_STREAK:
                         self.log(
-                            f"Catch-up streak {consecutive_known} — stopping @{username}"
+                            f"Catch-up streak {consecutive_known} — stop scan @{username}"
                         )
+                        result.stop_reason = "catch_up"
                         break
                     continue
                 consecutive_known = 0
-                if self._download_post(post, result, username=username):
-                    count += 1
-                if self._aborted:
-                    break
+                score = (
+                    score_instagram_post(post, feed_index=feed_index)
+                    if POST_RANK_ENABLED
+                    else float(-feed_index)
+                )
+                candidates.append((score, feed_index, post))
         except Exception as exc:
             result.errors += 1
             if self._is_abuse_signal(exc):
@@ -418,8 +537,9 @@ class InstagramDownloader:
                 self.log(msg + f" — waiting {wait}s (hit #{self._consecutive_rate_limits})")
                 if self.on_rate_limit:
                     self.on_rate_limit(self._consecutive_rate_limits, wait)
-                time.sleep(wait)
-                if self._should_abort_rate_limit():
+                if self._interruptible_sleep(wait, what="rate-limit backoff"):
+                    self._trigger_abort("Cancelled by user", result)
+                elif self._should_abort_rate_limit():
                     self._trigger_abort(
                         f"Rate-limit streak reached {self._consecutive_rate_limits} "
                         f"(threshold {ABORT_RATE_LIMIT_STREAK})",
@@ -430,11 +550,169 @@ class InstagramDownloader:
                 result.messages.append(msg)
                 self.log(msg)
 
+        candidates.sort(key=lambda t: (-t[0], t[1]))
+        to_fetch = candidates[:max_posts]
+        if POST_RANK_ENABLED and candidates:
+            top = to_fetch[:5]
+            preview = ", ".join(
+                f"{getattr(p, 'shortcode', '?')}={s:.1f}" for s, _i, p in top
+            )
+            self.log(
+                f"Ranked {len(candidates)} new post(s) from scan {scanned}; "
+                f"downloading top {len(to_fetch)} (max {max_posts}). Top: {preview}"
+            )
+
+        for _score, _idx, post in to_fetch:
+            if self._aborted or self._cancel_requested():
+                if self._cancel_requested() and not result.aborted:
+                    self._trigger_abort("Cancelled by user", result)
+                break
+            self._download_post(post, result, username=username)
+            if self._aborted:
+                break
+
         if not self._aborted:
             organize_root_images(self.save_dir, log=self.log)
+        if result.aborted and not result.stop_reason:
+            result.stop_reason = (
+                "cancel" if "cancelled" in (result.abort_reason or "").lower() else "abort"
+            )
+        elif not result.stop_reason:
+            if result.downloaded == 0 and result.skipped > 0:
+                result.stop_reason = "nothing_new"
+            elif result.downloaded == 0 and scanned == 0:
+                result.stop_reason = "nothing_new"
+            else:
+                result.stop_reason = "end_of_feed"
         self.log(
             f"Feed sync @{username}: {result.downloaded} new, "
             f"{result.skipped} skipped, {result.errors} errors"
+            + (f" [{result.stop_reason}]" if result.stop_reason else "")
+            + (f" [ABORTED]" if result.aborted else "")
+        )
+        return result
+
+    def _sync_creator_feed_full(
+        self,
+        creator_profile,
+        username: str,
+        result: SyncResult,
+        *,
+        max_posts: int,
+        include_videos: bool,
+        deep: bool = True,
+    ) -> SyncResult:
+        """Stream entire feed; download every missing/incomplete post (no rank)."""
+        ceiling: Optional[int]
+        try:
+            mp = int(max_posts) if max_posts is not None else FULL_SCRAPE_MAX_POSTS
+        except (TypeError, ValueError):
+            mp = FULL_SCRAPE_MAX_POSTS
+        if mp <= 0:
+            ceiling = None
+        else:
+            ceiling = mp
+
+        use_catch_up = not bool(deep)
+        consecutive_known = 0
+        scanned = 0
+
+        try:
+            for post in creator_profile.get_posts():
+                if self._aborted or self._cancel_requested():
+                    if self._cancel_requested() and not result.aborted:
+                        self._trigger_abort("Cancelled by user", result)
+                    result.stop_reason = (
+                        "cancel"
+                        if "cancelled" in (result.abort_reason or "").lower()
+                        or self._cancel_requested()
+                        else "abort"
+                    )
+                    break
+
+                if post.is_video and not include_videos:
+                    result.skipped += 1
+                    continue
+
+                scanned += 1
+                state = self._post_archive_state(post)
+
+                if state == "complete":
+                    result.skipped += 1
+                    sc = getattr(post, "shortcode", "") or ""
+                    self.log(f"Skip (archived): @{username} {sc}")
+                    if use_catch_up:
+                        consecutive_known += 1
+                        if consecutive_known >= CATCH_UP_STREAK:
+                            result.stop_reason = "catch_up"
+                            self.log(f"Catch-up streak — stop full @{username}")
+                            break
+                    continue
+
+                consecutive_known = 0
+                self._download_post(post, result, username=username)
+
+                if self._aborted:
+                    result.stop_reason = (
+                        "cancel"
+                        if "cancelled" in (result.abort_reason or "").lower()
+                        else "abort"
+                    )
+                    break
+
+                if ceiling is not None and result.downloaded >= ceiling:
+                    result.stop_reason = "ceiling"
+                    self.log(f"Full scrape ceiling {ceiling} reached @{username}")
+                    break
+            else:
+                if not result.stop_reason:
+                    result.stop_reason = "end_of_feed"
+        except Exception as exc:
+            result.errors += 1
+            if self._is_abuse_signal(exc):
+                self._trigger_abort(f"Abuse signal on @{username} feed: {exc}", result)
+                result.stop_reason = "abort"
+            elif isinstance(exc, instaloader.exceptions.ConnectionException):
+                result.rate_limit_hits += 1
+                self._consecutive_rate_limits += 1
+                wait = self._backoff_seconds()
+                msg = f"Rate limit / connection on @{username}: {exc}"
+                result.messages.append(msg)
+                self.log(msg + f" — waiting {wait}s (hit #{self._consecutive_rate_limits})")
+                if self.on_rate_limit:
+                    self.on_rate_limit(self._consecutive_rate_limits, wait)
+                if self._interruptible_sleep(wait, what="rate-limit backoff"):
+                    self._trigger_abort("Cancelled by user", result)
+                    result.stop_reason = "cancel"
+                elif self._should_abort_rate_limit():
+                    self._trigger_abort(
+                        f"Rate-limit streak reached {self._consecutive_rate_limits} "
+                        f"(threshold {ABORT_RATE_LIMIT_STREAK})",
+                        result,
+                    )
+                    result.stop_reason = "abort"
+                else:
+                    result.stop_reason = result.stop_reason or "error"
+            else:
+                msg = f"Error iterating @{username}: {exc}"
+                result.messages.append(msg)
+                self.log(msg)
+                result.stop_reason = "error"
+
+        if not result.stop_reason and not result.aborted:
+            if scanned == 0 and result.downloaded == 0 and result.errors == 0:
+                result.stop_reason = "nothing_new"
+            elif result.downloaded == 0 and result.skipped > 0:
+                result.stop_reason = "nothing_new"
+            else:
+                result.stop_reason = "end_of_feed"
+
+        if not self._aborted:
+            organize_root_images(self.save_dir, log=self.log)
+        self.log(
+            f"Full feed @{username}: {result.downloaded} new, "
+            f"{result.skipped} skipped, {result.errors} errors"
+            + (f" [{result.stop_reason}]" if result.stop_reason else "")
             + (f" [ABORTED]" if result.aborted else "")
         )
         return result
@@ -447,7 +725,7 @@ class InstagramDownloader:
         following_list_path: str = FOLLOWING_LIST_FILE,
         keywords: Optional[Sequence[str]] = None,
         min_media_count: int = DEFAULT_MIN_MEDIA_COUNT,
-        include_videos: bool = False,
+        include_videos: bool = INCLUDE_VIDEOS_DEFAULT,
     ) -> SyncResult:
         """Bulk download from accounts in following_list.json with anti-ban pacing."""
         result = SyncResult(job_type="following")

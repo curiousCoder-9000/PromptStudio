@@ -12,6 +12,25 @@ from promptstudio.storage.db import (
 )
 
 
+def ensure_creator_folder(name: str, base_dir: str = SAVED_DIR) -> Dict[str, Any]:
+    """
+    Create creator folder if missing.
+
+    Returns {"name": str, "created": bool, "path": str}.
+    Raises ValueError for empty/invalid/excluded names.
+    """
+    raw = (name or "").strip().lstrip("@")
+    clean = re.sub(r"[^a-zA-Z0-9_\.]", "", raw)
+    if not clean:
+        raise ValueError("Invalid creator handle name")
+    if clean in EXCLUDED_FOLDERS or clean.startswith("_") or clean.startswith("."):
+        raise ValueError(f"Reserved or excluded creator name: {clean}")
+    path = os.path.join(os.path.expanduser(base_dir), clean)
+    existed = os.path.isdir(path)
+    os.makedirs(path, exist_ok=True)
+    return {"name": clean, "created": not existed, "path": path}
+
+
 def photo_sort_key(photo: Dict[str, Any]) -> Tuple[str, str]:
     """Return (iso_timestamp, filename) for date sorting."""
     filename = photo.get("filename") or ""
@@ -70,6 +89,10 @@ class ArchiveStore:
         unanalyzed: bool = False,
         favorite_only: bool = False,
         media_type: Optional[str] = None,
+        glam_min: Optional[int] = None,
+        glam_max: Optional[int] = None,
+        unscored_only: bool = False,
+        reject_only: bool = False,
         sort: str = "name",
     ) -> List[Dict[str, Any]]:
         photos, _ = self._index.query_photos(
@@ -78,6 +101,10 @@ class ArchiveStore:
             unanalyzed=unanalyzed,
             favorite_only=favorite_only,
             media_type=media_type,
+            glam_min=glam_min,
+            glam_max=glam_max,
+            unscored_only=unscored_only,
+            reject_only=reject_only,
             sort=sort,
             limit=limit,
             offset=offset,
@@ -94,6 +121,10 @@ class ArchiveStore:
         unanalyzed: bool = False,
         favorite_only: bool = False,
         media_type: Optional[str] = None,
+        glam_min: Optional[int] = None,
+        glam_max: Optional[int] = None,
+        unscored_only: bool = False,
+        reject_only: bool = False,
         sort: str = "name",
     ) -> Tuple[List[Dict[str, Any]], int]:
         return self._index.query_photos(
@@ -102,6 +133,10 @@ class ArchiveStore:
             unanalyzed=unanalyzed,
             favorite_only=favorite_only,
             media_type=media_type,
+            glam_min=glam_min,
+            glam_max=glam_max,
+            unscored_only=unscored_only,
+            reject_only=reject_only,
             sort=sort,
             limit=limit,
             offset=offset,
@@ -130,12 +165,7 @@ class ArchiveStore:
         return self._index.stats()
 
     def create_creator(self, name: str) -> str:
-        clean = re.sub(r"[^a-zA-Z0-9_\.]", "", name.strip())
-        if not clean:
-            raise ValueError("Invalid creator handle name")
-        path = os.path.join(self.base_dir, clean)
-        os.makedirs(path, exist_ok=True)
-        return clean
+        return ensure_creator_folder(name, base_dir=self.base_dir)["name"]
 
     def delete_photo(self, rel_path: str) -> Optional[str]:
         full = self.resolve_path(rel_path)

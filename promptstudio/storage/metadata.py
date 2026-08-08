@@ -65,15 +65,15 @@ def rel_path_from_full(full_path: str) -> str:
 
 
 def group_by_post_id(creator: str, base_dir: str = SAVED_DIR) -> Dict[str, list]:
-    """Group image paths under a creator by Instagram post_id from sidecars."""
-    from promptstudio.config import IMAGE_EXTENSIONS
+    """Group media paths under a creator by Instagram post_id from sidecars."""
+    from promptstudio.config import MEDIA_EXTENSIONS
 
     folder = os.path.join(os.path.expanduser(base_dir), creator)
     groups: Dict[str, list] = {}
     if not os.path.isdir(folder):
         return groups
     for name in os.listdir(folder):
-        if not name.lower().endswith(IMAGE_EXTENSIONS):
+        if not name.lower().endswith(MEDIA_EXTENSIONS):
             continue
         full = os.path.join(folder, name)
         meta = load_post_metadata(full) or {}

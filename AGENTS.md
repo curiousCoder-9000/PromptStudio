@@ -1,37 +1,42 @@
-# AGENTS.md - PromptStudio Guidelines
+# AGENTS.md — PromptStudio
 
-This file specifies project rules, coding standards, and operational guidelines for AI agents working in this workspace.
+Injected workspace rules. **Full map:** [docs/context.md](docs/context.md) (read first; keeps later tasks cheap).
 
-## Project Scope & Stack
+## Stack (current)
 
-- **Name:** PromptStudio (AI Vision Image Prompt Extractor & Creator Studio)
-- **Backend:** Python HTTP Server (`server.py`) running on `http://localhost:5000`
-- **Vision Engine:** Ollama Multimodal Vision (`moondream`) on `http://localhost:11434` (`prompt_engine.py`)
-- **Frontend:** Vanilla HTML5 / Vanilla CSS3 (Glassmorphism dark theme) / Vanilla JS (`index.html`, `style.css`, `app.js`)
-- **Local Storage Archive:** `~\Pictures\InstagramSaved`
+| Piece | Detail |
+|-------|--------|
+| App | PromptStudio — local IG archive + Ollama vision prompts + optional ComfyUI |
+| Server | `server.py` → `promptstudio.server.handler` · `http://localhost:5000` (threaded) |
+| Vision | Ollama `OLLAMA_VISION_MODEL` default **`qwen2.5vl:7b`** · pipeline `v2-structured` |
+| Frontend | `index.html` / `style.css` / `app.js` (glass dark: `#8b5cf6` `#ec4899` `#06b6d4`) |
+| Archive | `~/Pictures/InstagramSaved` (`PROMPTSTUDIO_ARCHIVE`) · catalog `archive.db` |
+| Package | All logic under `promptstudio/` · `scripts/` = thin CLIs only |
 
-## Guidelines for AI Agents
+## Hard rules
 
-1. **Preserve User Archive Data:**
-   - Do NOT perform unconfirmed file deletions.
-   - All photo deletions MUST go through the `DELETE /api/photo` endpoint after user confirms in `#deleteConfirmModal`.
+1. **Archive safety:** never delete media without user confirm → UI `#deleteConfirmModal` → `DELETE /api/photo`.
+2. **No `cgi`:** multipart via `promptstudio.server.multipart`. Target **Python 3.14+** on Windows.
+3. **Config single source:** `promptstudio/config.py` (+ env). Do not hardcode archive/model paths elsewhere.
+4. **Routes live in** `promptstudio/server/handler.py`. Prefer package modules over new root files.
+5. **Do not resurrect** non-person filter UX; keep `EXCLUDED_FOLDERS` behavior.
+6. **UI:** preserve glassmorphism + keyboard lightbox (`←`/`→`/`Esc`).
 
-2. **Ollama Vision Engine:**
-   - Always verify Ollama server status at `http://localhost:11434/api/tags`.
-   - Use `moondream` model for Base64 image captioning and photorealistic prompt generation.
-   - Cache results in `~/Pictures/InstagramSaved/prompts_cache.json` (in-memory write-through; gallery uses `archive.db` SQLite catalog).
+## Where to look
 
-3. **Python Version Compatibility:**
-   - Write Python code compatible with Python 3.14+ on Windows.
-   - Do NOT import deprecated standard library modules such as `cgi`.
+| Task | File |
+|------|------|
+| Any API change | `promptstudio/server/handler.py` |
+| Vision / prompts | `promptstudio/prompts/engine.py` |
+| Gallery index | `promptstudio/storage/db.py` |
+| Instagram sync | `promptstudio/scraping/downloader.py` |
+| ComfyUI | `promptstudio/comfy/client.py` |
+| Frontend | `app.js` |
 
-4. **Design System & Aesthetics:**
-   - Maintain modern dark mode glassmorphism UI with HSL tailored colors (`#8b5cf6`, `#ec4899`, `#06b6d4`).
-   - Use Google Fonts (`Outfit`, `Inter`, `Fira Code`).
-   - Keep line lengths reasonable and maintain full keyboard accessibility in Lightbox modals (`Left`/`Right` arrow keys, `Esc` key).
+## Docs (token budget)
 
-## Reference Documentation
-
-- [docs/architecture.md](file:///./docs/architecture.md) - Full Architecture & API Specification
-- [docs/agent.md](file:///./docs/agent.md) - Agent Operational Context & Guidelines
-- [docs/instagram_downloader.md](file:///./docs/instagram_downloader.md) - Instagram Downloader & Sync Guide
+| Load | Skip unless needed |
+|------|--------------------|
+| [docs/context.md](docs/context.md) | `docs/following_list.md`, `docs/following_classify_report.md` (data dumps) |
+| [docs/api.md](docs/api.md) for schemas | Full `app.js` / `style.css` unless UI task |
+| [docs/instagram_downloader.md](docs/instagram_downloader.md) for sync | Entire `scripts/` tree for non-scrape work |

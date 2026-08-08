@@ -26,7 +26,23 @@ PROMPT_CACHE_FILE = os.path.join(SAVED_DIR, "prompts_cache.json")
 SYNC_STATUS_FILE = os.path.join(SAVED_DIR, "sync_status.json")
 SYNC_STATE_FILE = os.path.join(SAVED_DIR, "sync_state.json")
 FOLLOWING_QUEUE_FILE = os.path.join(SAVED_DIR, "following_queue.json")
+CREATOR_SCRAPE_QUEUE_FILE = os.path.join(SAVED_DIR, "creator_scrape_queue.json")
 ARCHIVE_DB_FILE = os.path.join(SAVED_DIR, "archive.db")
+# Full-scrape ceiling (downloaded media units). 0 = unlimited.
+FULL_SCRAPE_MAX_POSTS = int(os.environ.get("IG_FULL_SCRAPE_MAX_POSTS", "5000"))
+CREATOR_SCRAPE_HISTORY_MAX = int(os.environ.get("IG_SCRAPE_HISTORY_MAX", "50"))
+CREATOR_SCRAPE_MAX_PENDING = int(os.environ.get("IG_SCRAPE_MAX_PENDING", "50"))
+CREATOR_SCRAPE_QUEUE_ENABLED = os.environ.get("IG_CREATOR_SCRAPE_QUEUE", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+AUTO_DRAIN_ON_START = os.environ.get("IG_AUTO_DRAIN_ON_START", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+AUTO_DRAIN_ON_START_DELAY_SEC = float(os.environ.get("IG_AUTO_DRAIN_DELAY_SEC", "2"))
 # Force full filesystem reindex on next server start when set to 1/true
 REBUILD_INDEX = os.environ.get("PROMPTSTUDIO_REBUILD_INDEX", "").lower() in (
     "1",
@@ -55,11 +71,36 @@ RATE_LIMIT_BACKOFF_SEC = int(os.environ.get("IG_RATE_LIMIT_BACKOFF", "60"))
 RATE_LIMIT_BACKOFF_MAX_SEC = int(os.environ.get("IG_RATE_LIMIT_BACKOFF_MAX", "300"))
 DEFAULT_MAX_POSTS_PER_CREATOR = int(os.environ.get("IG_MAX_POSTS", "50"))
 DEFAULT_MIN_MEDIA_COUNT = int(os.environ.get("IG_MIN_MEDIA_COUNT", "5"))
+# Download reels / video posts during creator + following sync (saved posts always include media)
+INCLUDE_VIDEOS_DEFAULT = os.environ.get("IG_INCLUDE_VIDEOS", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+# Queue priority boosts for classify-driven acquisition
+QUEUE_PRIORITY_KEEP = int(os.environ.get("IG_QUEUE_PRIORITY_KEEP", "100"))
+QUEUE_PRIORITY_UNSURE = int(os.environ.get("IG_QUEUE_PRIORITY_UNSURE", "40"))
+QUEUE_PRIORITY_DEFAULT = int(os.environ.get("IG_QUEUE_PRIORITY_DEFAULT", "10"))
+# Within a creator feed: scan more posts than we download, rank by glam signals
+POST_RANK_ENABLED = os.environ.get("IG_POST_RANK", "1").lower() in ("1", "true", "yes")
+POST_SCAN_FACTOR = float(os.environ.get("IG_POST_SCAN_FACTOR", "3"))
+DEFAULT_CAPTION_KEYWORDS = [
+    k.strip()
+    for k in os.environ.get(
+        "IG_CAPTION_KEYWORDS",
+        "bikini,lingerie,swim,swimwear,onlyfans,boudoir,lingerie,bodysuit,"
+        "cleavage,booty,thong,micro,sexy,glamour,glam,cosplay,fitness model,"
+        "underboob,see through,mesh,stockings,heels,wet",
+    ).split(",")
+    if k.strip()
+]
+# Gallery sexy filter: glam_score >= this (0–3; -1 = unscored)
+GLAM_SEXY_MIN = int(os.environ.get("GLAM_SEXY_MIN", "2"))
 DEFAULT_BIO_KEYWORDS = [
     k.strip()
     for k in os.environ.get(
         "IG_BIO_KEYWORDS",
-        "model,influencer,fitness,onlyfans,lingerie,bikini,glamour,actress",
+        "model,influencer,fitness,onlyfans,lingerie,bikini,glamour,actress,swimwear,boudoir,cosplay",
     ).split(",")
     if k.strip()
 ]

@@ -9,7 +9,12 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from promptstudio.config import DEFAULT_ACCOUNTS_PER_DAY, DEFAULT_BIO_KEYWORDS, DEFAULT_MIN_MEDIA_COUNT
+from promptstudio.config import (
+    DEFAULT_ACCOUNTS_PER_DAY,
+    DEFAULT_BIO_KEYWORDS,
+    DEFAULT_MIN_MEDIA_COUNT,
+    INCLUDE_VIDEOS_DEFAULT,
+)
 from promptstudio.scraping.downloader import InstagramDownloader
 
 
@@ -52,10 +57,17 @@ def main():
         default=DEFAULT_MIN_MEDIA_COUNT,
         help=f"Minimum media_count (default: {DEFAULT_MIN_MEDIA_COUNT})",
     )
-    parser.add_argument(
+    reels = parser.add_mutually_exclusive_group()
+    reels.add_argument(
         "--include-reels",
         action="store_true",
-        help="Also download reels / video posts (skipped by default)",
+        default=None,
+        help="Download reels / video posts (default: on via IG_INCLUDE_VIDEOS)",
+    )
+    reels.add_argument(
+        "--no-reels",
+        action="store_true",
+        help="Skip reels / video posts",
     )
     args = parser.parse_args()
 
@@ -70,6 +82,13 @@ def main():
         else DEFAULT_ACCOUNTS_PER_DAY
     )
 
+    if args.no_reels:
+        include_videos = False
+    elif args.include_reels:
+        include_videos = True
+    else:
+        include_videos = INCLUDE_VIDEOS_DEFAULT
+
     keywords = [k.strip() for k in args.keywords.split(",") if k.strip()] if args.keywords else []
     result = InstagramDownloader().sync_following(
         max_accounts=accounts_cap,
@@ -77,7 +96,7 @@ def main():
         public_only=not args.include_private,
         keywords=keywords,
         min_media_count=args.min_media,
-        include_videos=args.include_reels,
+        include_videos=include_videos,
     )
     if result.queue_summary:
         print(f"Queue summary: {result.queue_summary}")

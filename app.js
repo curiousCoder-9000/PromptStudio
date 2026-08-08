@@ -7,6 +7,9 @@ const state = {
     creatorSearchQuery: '',
     unanalyzedOnly: false,
     favoritesOnly: false,
+    sexyOnly: false,
+    rejectOnly: false,
+    unscoredOnly: false,
     mediaType: 'all',
     sortMode: 'name',
     selectMode: false,
@@ -23,6 +26,8 @@ const state = {
     photoToDelete: null,
     syncPollTimer: null,
     batchPollTimer: null,
+    classifyPollTimer: null,
+    classifyStatus: null,
     healthPollTimer: null,
     photoOffset: 0,
     photoLimit: 60,
@@ -116,14 +121,29 @@ const elements = {
     syncFollowMaxAccounts: document.getElementById('syncFollowMaxAccounts'),
     syncFollowMaxPosts: document.getElementById('syncFollowMaxPosts'),
     syncFollowKeywords: document.getElementById('syncFollowKeywords'),
+    syncIncludeVideos: document.getElementById('syncIncludeVideos'),
     syncStatusText: document.getElementById('syncStatusText'),
     syncProgressFill: document.getElementById('syncProgressFill'),
     syncRateMeta: document.getElementById('syncRateMeta'),
     closeSyncModalBtn: document.getElementById('closeSyncModalBtn'),
     syncInstagramBtn: document.getElementById('syncInstagramBtn'),
+    scrapeCreatorInput: document.getElementById('scrapeCreatorInput'),
+    scrapeEnqueueBtn: document.getElementById('scrapeEnqueueBtn'),
+    scrapeFullDeep: document.getElementById('scrapeFullDeep'),
+    scrapeBoundedMode: document.getElementById('scrapeBoundedMode'),
+    scrapeMaxPosts: document.getElementById('scrapeMaxPosts'),
+    scrapePauseBtn: document.getElementById('scrapePauseBtn'),
+    scrapeResumeBtn: document.getElementById('scrapeResumeBtn'),
+    scrapeCancelBtn: document.getElementById('scrapeCancelBtn'),
+    scrapeClearPendingBtn: document.getElementById('scrapeClearPendingBtn'),
+    scrapeQueueStatus: document.getElementById('scrapeQueueStatus'),
+    scrapeQueueList: document.getElementById('scrapeQueueList'),
     batchPromptBtn: document.getElementById('batchPromptBtn'),
     unanalyzedFilterBtn: document.getElementById('unanalyzedFilterBtn'),
     favoritesFilterBtn: document.getElementById('favoritesFilterBtn'),
+    sexyFilterBtn: document.getElementById('sexyFilterBtn'),
+    rejectFilterBtn: document.getElementById('rejectFilterBtn'),
+    unscoredFilterBtn: document.getElementById('unscoredFilterBtn'),
     sortSelect: document.getElementById('sortSelect'),
     mediaTypeSelect: document.getElementById('mediaTypeSelect'),
     favoritePhotoBtn: document.getElementById('favoritePhotoBtn'),
@@ -148,12 +168,21 @@ const elements = {
     creatorStylePanel: document.getElementById('creatorStylePanel'),
     creatorStylePrefix: document.getElementById('creatorStylePrefix'),
     creatorStyleTerms: document.getElementById('creatorStyleTerms'),
+    creatorClassifyMeta: document.getElementById('creatorClassifyMeta'),
+    classifyCreatorBtn: document.getElementById('classifyCreatorBtn'),
+    reviewRejectsBtn: document.getElementById('reviewRejectsBtn'),
+    cancelClassifyBtn: document.getElementById('cancelClassifyBtn'),
     rebuildStyleBtn: document.getElementById('rebuildStyleBtn'),
     bulkBar: document.getElementById('bulkBar'),
     bulkCount: document.getElementById('bulkCount'),
     bulkReanalyzeBtn: document.getElementById('bulkReanalyzeBtn'),
     bulkDeleteBtn: document.getElementById('bulkDeleteBtn'),
     bulkClearBtn: document.getElementById('bulkClearBtn'),
+    reviewRejectsBar: document.getElementById('reviewRejectsBar'),
+    reviewRejectsCount: document.getElementById('reviewRejectsCount'),
+    selectAllRejectsBtn: document.getElementById('selectAllRejectsBtn'),
+    deleteSelectedRejectsBtn: document.getElementById('deleteSelectedRejectsBtn'),
+    exitRejectsBtn: document.getElementById('exitRejectsBtn'),
     deleteConfirmTitle: document.getElementById('deleteConfirmTitle'),
     deleteConfirmBody: document.getElementById('deleteConfirmBody'),
     followingSearchInput: document.getElementById('followingSearchInput'),
@@ -177,6 +206,8 @@ async function initApp() {
     await fetchStats();
     await fetchCreators();
     await fetchPhotos();
+    // Resume classify progress UI if a job is mid-flight
+    pollClassifyStatus();
     if (!state.healthPollTimer) {
         state.healthPollTimer = setInterval(fetchHealth, 30000);
     }
@@ -390,6 +421,15 @@ async function fetchPhotos({ append = false } = {}) {
         if (state.favoritesOnly) {
             params.append('favorite', '1');
         }
+        if (state.sexyOnly) {
+            params.append('sexy', '1');
+        }
+        if (state.rejectOnly) {
+            params.append('reject', '1');
+        }
+        if (state.unscoredOnly) {
+            params.append('unscored', '1');
+        }
         params.append('media_type', state.mediaType || 'all');
         params.append('sort', state.sortMode || 'name');
         params.append('offset', String(state.photoOffset));
@@ -407,6 +447,7 @@ async function fetchPhotos({ append = false } = {}) {
         state.photos = append ? state.photos.concat(page) : page;
         state.photoOffset = state.photos.length;
         renderGallery({ append, fromIndex: append ? prevLen : 0 });
+        updateReviewRejectsBar();
     } catch (err) {
         console.error('Error fetching photos:', err);
     } finally {
@@ -472,12 +513,70 @@ function togglePhotoSelection(relPath, selected) {
 function updateBulkBar() {
     const count = state.selectedPaths.size;
     if (!elements.bulkBar) return;
+    // Prefer the reject-review bar when that filter is active
+    if (state.rejectOnly) {
+        elements.bulkBar.style.display = 'none';
+        updateReviewRejectsBar();
+        return;
+    }
     if (!state.selectMode || count === 0) {
         elements.bulkBar.style.display = 'none';
         return;
     }
     elements.bulkBar.style.display = 'flex';
     elements.bulkCount.textContent = `${count} selected`;
+}
+
+function updateReviewRejectsBar() {
+    if (!elements.reviewRejectsBar) return;
+    if (!state.rejectOnly) {
+        elements.reviewRejectsBar.style.display = 'none';
+        return;
+    }
+    elements.reviewRejectsBar.style.display = 'flex';
+    const total = state.photoTotal || state.photos.length;
+    const sel = state.selectedPaths.size;
+    if (elements.reviewRejectsCount) {
+        elements.reviewRejectsCount.textContent = sel
+            ? `Review rejects · ${total} items · ${sel} selected`
+            : `Review rejects · ${total} items`;
+    }
+}
+
+function enterRejectReviewMode() {
+    state.rejectOnly = true;
+    state.sexyOnly = false;
+    state.unscoredOnly = false;
+    if (elements.rejectFilterBtn) elements.rejectFilterBtn.classList.add('active');
+    if (elements.sexyFilterBtn) elements.sexyFilterBtn.classList.remove('active');
+    if (elements.unscoredFilterBtn) elements.unscoredFilterBtn.classList.remove('active');
+    setSelectMode(true);
+    fetchPhotos();
+}
+
+function exitRejectReviewMode() {
+    state.rejectOnly = false;
+    if (elements.rejectFilterBtn) elements.rejectFilterBtn.classList.remove('active');
+    clearSelection();
+    setSelectMode(false);
+    updateReviewRejectsBar();
+    fetchPhotos();
+}
+
+function selectNonFavoriteRejects() {
+    if (!state.rejectOnly) return;
+    setSelectMode(true);
+    state.photos.forEach((p) => {
+        if (p.favorite) {
+            state.selectedPaths.delete(p.rel_path);
+        } else {
+            state.selectedPaths.add(p.rel_path);
+        }
+    });
+    renderGallery();
+    updateReviewRejectsBar();
+    const n = state.selectedPaths.size;
+    showToast(n ? `Selected ${n} non-favorite rejects` : 'No non-favorite rejects on this page');
 }
 
 function setSelectMode(enabled) {
@@ -516,13 +615,34 @@ function renderCreatorList() {
     });
     elements.creatorList.appendChild(allItem);
 
+    const classifyRunning = state.classifyStatus && state.classifyStatus.running;
+    const classifyCreator = state.classifyStatus && state.classifyStatus.creator;
+
     const filtered = state.creators.filter(c => !q || c.name.toLowerCase().includes(q));
     filtered.forEach(c => {
         const item = document.createElement('div');
         item.className = `creator-item ${state.selectedCreator === c.name ? 'active' : ''}`;
+        const scored = c.scored_count != null ? c.scored_count : null;
+        const total = c.photo_count || 0;
+        const rejects = c.reject_count || 0;
+        const isJob = classifyRunning && classifyCreator === c.name;
+        let scorePill = '';
+        if (isJob) {
+            const st = state.classifyStatus;
+            scorePill = `<span class="creator-score-pill running" title="Classifying…">${st.completed || 0}/${st.total || 0}</span>`;
+        } else if (scored != null && total > 0) {
+            const cls = rejects > 0 ? 'creator-score-pill has-rejects' : 'creator-score-pill';
+            const title = rejects
+                ? `${scored}/${total} scored · ${rejects} rejects`
+                : `${scored}/${total} scored`;
+            scorePill = `<span class="${cls}" title="${title}">${scored}/${total}</span>`;
+        }
         item.innerHTML = `
             <span class="creator-name">@${c.name}${syncBadgeHtml(c)}</span>
-            <span class="creator-badge">${c.photo_count}</span>
+            <span style="display:inline-flex;align-items:center;gap:6px;">
+                ${scorePill}
+                <span class="creator-badge">${c.photo_count}</span>
+            </span>
         `;
         item.addEventListener('click', () => {
             state.selectedCreator = c.name;
@@ -559,6 +679,56 @@ function formatRelativeTime(iso) {
     }
 }
 
+function selectedCreatorMeta() {
+    if (!state.selectedCreator) return null;
+    return state.creators.find((c) => c.name === state.selectedCreator) || null;
+}
+
+function updateClassifyPanelUi() {
+    const creator = state.selectedCreator;
+    const meta = selectedCreatorMeta();
+    const st = state.classifyStatus;
+    const runningHere = !!(st && st.running && st.creator === creator);
+    const runningElsewhere = !!(st && st.running && st.creator && st.creator !== creator);
+
+    if (elements.creatorClassifyMeta) {
+        if (!creator) {
+            elements.creatorClassifyMeta.textContent = '—';
+        } else if (runningHere) {
+            const pct = st.total ? Math.round((st.completed / st.total) * 100) : 0;
+            elements.creatorClassifyMeta.textContent =
+                `Classifying… ${st.completed}/${st.total} (${pct}%) · keep ${st.kept || 0} · reject ${st.rejected || 0}` +
+                (st.failed ? ` · err ${st.failed}` : '');
+        } else if (runningElsewhere) {
+            elements.creatorClassifyMeta.textContent = `Job running on @${st.creator}…`;
+        } else if (meta) {
+            const scored = meta.scored_count != null ? meta.scored_count : 0;
+            const unscored = meta.unscored_count != null ? meta.unscored_count : 0;
+            const rejects = meta.reject_count != null ? meta.reject_count : 0;
+            elements.creatorClassifyMeta.textContent =
+                `${scored} scored · ${unscored} unscored · ${rejects} rejects`;
+        } else {
+            elements.creatorClassifyMeta.textContent = '—';
+        }
+    }
+
+    if (elements.classifyCreatorBtn) {
+        elements.classifyCreatorBtn.disabled = !creator || runningHere || runningElsewhere || state.ollamaOnline === false;
+        elements.classifyCreatorBtn.innerHTML = runningHere
+            ? '<i class="fa-solid fa-spinner fa-spin"></i> Classifying…'
+            : '<i class="fa-solid fa-fire"></i> Classify unscored';
+    }
+    if (elements.reviewRejectsBtn) {
+        const rejects = meta && meta.reject_count != null ? meta.reject_count : 0;
+        elements.reviewRejectsBtn.disabled = !creator;
+        elements.reviewRejectsBtn.innerHTML =
+            `<i class="fa-solid fa-filter"></i> Review rejects${rejects ? ` (${rejects})` : ''}`;
+    }
+    if (elements.cancelClassifyBtn) {
+        elements.cancelClassifyBtn.style.display = runningHere ? 'inline-flex' : 'none';
+    }
+}
+
 async function updateCreatorStylePanel() {
     if (!elements.creatorStylePanel) return;
     const creator = state.selectedCreator;
@@ -567,6 +737,7 @@ async function updateCreatorStylePanel() {
         return;
     }
     elements.creatorStylePanel.style.display = 'flex';
+    updateClassifyPanelUi();
     elements.creatorStylePrefix.textContent = 'Loading…';
     elements.creatorStyleTerms.innerHTML = '';
     try {
@@ -658,9 +829,14 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
             : '';
         const isVideo = p.filename.toLowerCase().endsWith('.mp4') || p.filename.toLowerCase().endsWith('.webm');
         const videoBadge = isVideo ? '<div class="video-badge"><i class="fa-solid fa-play"></i></div>' : '';
+        const glam = typeof p.glam_score === 'number' ? p.glam_score : -1;
+        const glamBadge = glam >= 0
+            ? `<span class="glam-score-badge g${glam}" title="Glam score ${glam}">g${glam}</span>`
+            : '';
         card.innerHTML = `
             <img src="${imgSrc}" alt="${p.filename}" loading="lazy" data-full="${p.url}">
             ${videoBadge}
+            ${glamBadge}
             <div class="photo-card-overlay">
                 <div class="overlay-top-actions">
                     ${state.selectMode
@@ -1269,11 +1445,15 @@ function promptBulkDelete() {
     const preview = names.slice(0, 5).join('\n') +
         (names.length > 5 ? `\nand ${names.length - 5} more` : '');
     if (elements.deleteConfirmTitle) {
-        elements.deleteConfirmTitle.textContent = `Delete ${paths.length} Photos?`;
+        elements.deleteConfirmTitle.textContent = state.rejectOnly
+            ? `Delete ${paths.length} Rejects?`
+            : `Delete ${paths.length} Photos?`;
     }
     if (elements.deleteConfirmBody) {
-        elements.deleteConfirmBody.textContent =
-            'Are you sure you want to permanently delete these photos from your storage folder?';
+        const who = state.selectedCreator ? ` for @${state.selectedCreator}` : '';
+        elements.deleteConfirmBody.textContent = state.rejectOnly
+            ? `Permanently delete ${paths.length} reject(s)${who}? This cannot be undone.`
+            : 'Are you sure you want to permanently delete these photos from your storage folder?';
     }
     elements.deleteFilenamePreview.textContent = preview;
     elements.deleteConfirmModal.style.display = 'flex';
@@ -1373,6 +1553,82 @@ function setupEventListeners() {
             elements.favoritesFilterBtn.classList.toggle('active', state.favoritesOnly);
             fetchPhotos();
         });
+    }
+
+    if (elements.sexyFilterBtn) {
+        elements.sexyFilterBtn.addEventListener('click', () => {
+            state.sexyOnly = !state.sexyOnly;
+            elements.sexyFilterBtn.classList.toggle('active', state.sexyOnly);
+            if (state.sexyOnly) {
+                state.rejectOnly = false;
+                state.unscoredOnly = false;
+                if (elements.rejectFilterBtn) elements.rejectFilterBtn.classList.remove('active');
+                if (elements.unscoredFilterBtn) elements.unscoredFilterBtn.classList.remove('active');
+                updateReviewRejectsBar();
+                // When turning Sexy on, prefer glam sort if still on default name
+                if (state.sortMode === 'name' && elements.sortSelect) {
+                    state.sortMode = 'glam';
+                    elements.sortSelect.value = 'glam';
+                }
+            }
+            fetchPhotos();
+        });
+    }
+
+    if (elements.rejectFilterBtn) {
+        elements.rejectFilterBtn.addEventListener('click', () => {
+            if (state.rejectOnly) {
+                exitRejectReviewMode();
+            } else {
+                enterRejectReviewMode();
+            }
+        });
+    }
+
+    if (elements.unscoredFilterBtn) {
+        elements.unscoredFilterBtn.addEventListener('click', () => {
+            state.unscoredOnly = !state.unscoredOnly;
+            elements.unscoredFilterBtn.classList.toggle('active', state.unscoredOnly);
+            if (state.unscoredOnly) {
+                state.sexyOnly = false;
+                state.rejectOnly = false;
+                if (elements.sexyFilterBtn) elements.sexyFilterBtn.classList.remove('active');
+                if (elements.rejectFilterBtn) elements.rejectFilterBtn.classList.remove('active');
+                updateReviewRejectsBar();
+            }
+            fetchPhotos();
+        });
+    }
+
+    if (elements.classifyCreatorBtn) {
+        elements.classifyCreatorBtn.addEventListener('click', startCreatorClassify);
+    }
+    if (elements.reviewRejectsBtn) {
+        elements.reviewRejectsBtn.addEventListener('click', () => {
+            if (!state.selectedCreator) {
+                showToast('Select a creator first');
+                return;
+            }
+            enterRejectReviewMode();
+        });
+    }
+    if (elements.cancelClassifyBtn) {
+        elements.cancelClassifyBtn.addEventListener('click', cancelCreatorClassify);
+    }
+    if (elements.selectAllRejectsBtn) {
+        elements.selectAllRejectsBtn.addEventListener('click', selectNonFavoriteRejects);
+    }
+    if (elements.deleteSelectedRejectsBtn) {
+        elements.deleteSelectedRejectsBtn.addEventListener('click', () => {
+            if (!state.selectedPaths.size) {
+                showToast('Select rejects to delete first');
+                return;
+            }
+            promptBulkDelete();
+        });
+    }
+    if (elements.exitRejectsBtn) {
+        elements.exitRejectsBtn.addEventListener('click', exitRejectReviewMode);
     }
 
     if (elements.favoritePhotoBtn) {
@@ -1481,6 +1737,36 @@ function setupEventListeners() {
     elements.syncSavedBtn.addEventListener('click', startSyncSaved);
     elements.syncCreatorBtn.addEventListener('click', startSyncCreator);
     elements.syncFollowingBtn.addEventListener('click', startSyncFollowing);
+    if (elements.scrapeEnqueueBtn) {
+        elements.scrapeEnqueueBtn.addEventListener('click', enqueueCreatorScrape);
+    }
+    if (elements.scrapePauseBtn) {
+        elements.scrapePauseBtn.addEventListener('click', pauseScrapeQueue);
+    }
+    if (elements.scrapeResumeBtn) {
+        elements.scrapeResumeBtn.addEventListener('click', resumeScrapeQueue);
+    }
+    if (elements.scrapeCancelBtn) {
+        elements.scrapeCancelBtn.addEventListener('click', cancelRunningSyncJob);
+    }
+    if (elements.scrapeClearPendingBtn) {
+        elements.scrapeClearPendingBtn.addEventListener('click', clearPendingScrapeJobs);
+    }
+    if (elements.scrapeBoundedMode) {
+        elements.scrapeBoundedMode.addEventListener('change', () => {
+            if (elements.scrapeMaxPosts) {
+                elements.scrapeMaxPosts.disabled = !elements.scrapeBoundedMode.checked;
+            }
+            if (elements.scrapeFullDeep) {
+                elements.scrapeFullDeep.disabled = elements.scrapeBoundedMode.checked;
+            }
+        });
+    }
+    if (elements.scrapeCreatorInput) {
+        elements.scrapeCreatorInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') enqueueCreatorScrape();
+        });
+    }
     elements.batchPromptBtn.addEventListener('click', startBatchAnalyze);
 
     if (elements.followingSearchInput) {
@@ -1733,7 +2019,195 @@ function showToast(message, duration = 3000) {
 function openSyncModal() {
     elements.syncModal.style.display = 'flex';
     pollSyncStatus();
+    pollScrapeStatus();
     loadFollowingPicker();
+}
+
+function setOneShotSyncEnabled(enabled, reason) {
+    [elements.syncSavedBtn, elements.syncCreatorBtn, elements.syncFollowingBtn].forEach((btn) => {
+        if (!btn) return;
+        btn.disabled = !enabled;
+        btn.title = enabled ? '' : (reason || 'Creator scrape queue has pending jobs');
+    });
+}
+
+async function pollScrapeStatus() {
+    const update = async () => {
+        if (!elements.scrapeQueueStatus) return;
+        try {
+            const res = await fetch('/api/scrape/status');
+            if (res.status === 404) {
+                elements.scrapeQueueStatus.textContent = 'Scrape queue disabled';
+                return;
+            }
+            const data = await res.json();
+            const pending = data.pending || [];
+            const running = data.running_job;
+            const paused = Boolean(data.paused);
+            const sync = data.sync || {};
+            let line = paused
+                ? `Paused — ${data.pause_reason || 'queue paused'}`
+                : running
+                  ? `Running @${running.username} (${running.mode || 'full'})`
+                  : pending.length
+                    ? `${pending.length} pending`
+                    : 'Queue idle';
+            if (sync.running && sync.progress) {
+                line += ` · ${sync.progress}`;
+            }
+            if (data.stats) {
+                line += ` · today ${data.stats.completed_today || 0} jobs / ${data.stats.downloaded_today || 0} files`;
+            }
+            elements.scrapeQueueStatus.textContent = line;
+            if (elements.scrapeQueueList) {
+                const rows = [];
+                if (running) {
+                    rows.push(`▶ @${running.username} [${running.mode}] running`);
+                }
+                pending.slice(0, 8).forEach((j, i) => {
+                    rows.push(`${i + 1}. @${j.username} [${j.mode}] prio ${j.priority || 0}`);
+                });
+                (data.history || []).slice(0, 5).forEach((j) => {
+                    rows.push(
+                        `✓ @${j.username} → ${j.status}${j.stop_reason ? ' (' + j.stop_reason + ')' : ''}`
+                    );
+                });
+                elements.scrapeQueueList.innerHTML = rows.length
+                    ? rows.map((r) => `<div class="scrape-queue-row">${r}</div>`).join('')
+                    : '';
+            }
+            // Fairness: disable one-shot when pending and not paused
+            const block = pending.length > 0 && !paused;
+            setOneShotSyncEnabled(
+                !block,
+                block
+                    ? `Creator scrape queue has ${pending.length} pending — pause or empty first`
+                    : ''
+            );
+            // Refresh gallery when a scrape job just finished
+            if (
+                !sync.running &&
+                sync.job_type === 'creator_queue' &&
+                sync.result &&
+                !state._scrapeLastFinishedAt
+            ) {
+                state._scrapeLastFinishedAt = sync.finished_at;
+                await initApp();
+            } else if (sync.finished_at && sync.finished_at !== state._scrapeLastFinishedAt) {
+                if (!sync.running && sync.job_type === 'creator_queue') {
+                    state._scrapeLastFinishedAt = sync.finished_at;
+                    await initApp();
+                }
+            }
+        } catch (err) {
+            console.error('Scrape status error:', err);
+        }
+    };
+    await update();
+    if (state.scrapePollTimer) clearInterval(state.scrapePollTimer);
+    state.scrapePollTimer = setInterval(update, 2500);
+}
+
+async function enqueueCreatorScrape() {
+    const username = (elements.scrapeCreatorInput?.value || '').trim().replace(/^@/, '');
+    if (!username) {
+        showToast('Enter a creator handle');
+        return;
+    }
+    const bounded = Boolean(elements.scrapeBoundedMode?.checked);
+    const mode = bounded ? 'bounded' : 'full';
+    const deep = bounded ? false : Boolean(elements.scrapeFullDeep?.checked ?? true);
+    const maxPosts = parseInt(elements.scrapeMaxPosts?.value || '50', 10);
+    const body = {
+        username,
+        mode,
+        deep,
+        include_videos: syncIncludeVideosValue(),
+    };
+    if (bounded) body.max_posts = maxPosts || 50;
+    try {
+        const res = await fetch('/api/scrape/enqueue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.message || data.error || `Enqueue failed (${res.status})`);
+            return;
+        }
+        const st = data.status || 'queued';
+        if (st === 'started') showToast(`Scraping @${username} started`);
+        else if (st === 'queued') showToast(`@${username} queued (#${data.position || '?'})`);
+        else if (st === 'already_pending') showToast(`@${username} already pending`);
+        else if (st === 'already_running') showToast(`@${username} already running`);
+        else showToast(`@${username}: ${st}`);
+        if (elements.scrapeCreatorInput) elements.scrapeCreatorInput.value = '';
+        pollScrapeStatus();
+        pollSyncStatus();
+    } catch (err) {
+        showToast('Failed to enqueue scrape');
+    }
+}
+
+async function pauseScrapeQueue() {
+    try {
+        const res = await fetch('/api/scrape/pause', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason: 'Paused by user' }),
+        });
+        if (res.ok) {
+            showToast('Scrape queue paused');
+            pollScrapeStatus();
+        } else showToast('Pause failed');
+    } catch (e) {
+        showToast('Pause failed');
+    }
+}
+
+async function resumeScrapeQueue() {
+    try {
+        const res = await fetch('/api/scrape/resume', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+            showToast(data.drain_started ? 'Queue resumed — starting next job' : 'Queue resumed');
+            pollScrapeStatus();
+            pollSyncStatus();
+        } else showToast('Resume failed');
+    } catch (e) {
+        showToast('Resume failed');
+    }
+}
+
+async function cancelRunningSyncJob() {
+    try {
+        const res = await fetch('/api/sync/cancel', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (data.status === 'cancelling') showToast('Cancel requested…');
+        else showToast('No running sync job');
+        pollSyncStatus();
+        pollScrapeStatus();
+    } catch (e) {
+        showToast('Cancel failed');
+    }
+}
+
+async function clearPendingScrapeJobs() {
+    try {
+        const res = await fetch('/api/scrape/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scope: 'all_pending' }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok) {
+            showToast(`Cleared ${data.cancelled_pending || 0} pending job(s)`);
+            pollScrapeStatus();
+        } else showToast('Clear pending failed');
+    } catch (e) {
+        showToast('Clear pending failed');
+    }
 }
 
 let followingSearchTimer = null;
@@ -1805,6 +2279,10 @@ function closeSyncModal() {
         clearInterval(state.syncPollTimer);
         state.syncPollTimer = null;
     }
+    if (state.scrapePollTimer) {
+        clearInterval(state.scrapePollTimer);
+        state.scrapePollTimer = null;
+    }
 }
 
 async function pollSyncStatus() {
@@ -1812,13 +2290,30 @@ async function pollSyncStatus() {
         try {
             const res = await fetch('/api/sync/status');
             const data = await res.json();
+            const cq = data.creator_queue || {};
+            if (cq.enabled !== false && cq.pending_count > 0 && !cq.paused) {
+                setOneShotSyncEnabled(
+                    false,
+                    `Creator scrape queue has ${cq.pending_count} pending — pause or empty first`
+                );
+            } else if (!state.scrapePollTimer) {
+                setOneShotSyncEnabled(true, '');
+            }
             if (elements.syncRateMeta) {
                 const hits = data.rate_limit_hits || 0;
                 const streak = data.consecutive_rate_limits || 0;
                 const backoff = data.last_backoff_sec || 0;
-                elements.syncRateMeta.textContent = hits
+                let meta = hits
                     ? `Rate limits: ${hits} · streak ${streak}` + (backoff ? ` · last wait ${backoff}s` : '')
                     : '';
+                if (cq.pending_count || cq.current_username) {
+                    meta += (meta ? ' · ' : '') +
+                        `scrape queue: ${cq.pending_count || 0} pending` +
+                        (cq.current_username ? ` · @${cq.current_username}` : '') +
+                        (cq.paused ? ' · PAUSED' : '');
+                }
+                if (data.cancel_requested) meta += (meta ? ' · ' : '') + 'cancel requested';
+                elements.syncRateMeta.textContent = meta;
             }
             if (data.running) {
                 elements.syncStatusText.textContent = data.progress || 'Running...';
@@ -1842,11 +2337,12 @@ async function pollSyncStatus() {
                     const queueBit = qs
                         ? ` · queue ${qs.pending ?? '?'} pending, today ${qs.accounts_today ?? 0}/${qs.daily_cap ?? '?'}`
                         : '';
+                    const stopBit = r.stop_reason ? ` · ${r.stop_reason}` : '';
                     elements.syncStatusText.textContent =
                         `Done — ${r.downloaded || 0} new, ${r.skipped || 0} skipped` +
                         (r.accounts_processed ? `, ${r.accounts_processed} accounts` : '') +
                         (r.rate_limit_hits ? `, ${r.rate_limit_hits} rate limits` : '') +
-                        queueBit;
+                        queueBit + stopBit;
                     elements.syncProgressFill.style.width = '100%';
                 }
                 await initApp();
@@ -1878,6 +2374,12 @@ async function startSyncSaved() {
     }
 }
 
+function syncIncludeVideosValue() {
+    // Default ON when checkbox missing (matches IG_INCLUDE_VIDEOS default)
+    if (!elements.syncIncludeVideos) return true;
+    return Boolean(elements.syncIncludeVideos.checked);
+}
+
 async function startSyncCreator() {
     const username = elements.syncCreatorInput.value.trim().replace(/^@/, '');
     if (!username) {
@@ -1888,7 +2390,11 @@ async function startSyncCreator() {
         const res = await fetch('/api/sync/creator', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username, max_posts: 50 })
+            body: JSON.stringify({
+                username,
+                max_posts: 50,
+                include_videos: syncIncludeVideosValue(),
+            })
         });
         const data = await res.json();
         if (res.ok) {
@@ -1910,6 +2416,7 @@ async function startSyncFollowing() {
         max_accounts: maxAccounts || 20,
         accounts_per_day: maxAccounts || 20,
         max_posts: maxPosts || 20,
+        include_videos: syncIncludeVideosValue(),
     };
     if (keywords) body.keywords = keywords;
     try {
@@ -1973,9 +2480,124 @@ async function startBatchAnalyze() {
         } else if (data.status === 'nothing_to_do') {
             showToast('All photos already analyzed');
         } else {
-            showToast('Batch already running or failed to start');
+            showToast(data.message || 'Batch already running or failed to start');
         }
     } catch (err) {
         showToast('Batch analyze failed');
+    }
+}
+
+async function pollClassifyStatus() {
+    try {
+        const res = await fetch('/api/classify/status');
+        const data = await res.json();
+        const wasRunning = !!(state.classifyStatus && state.classifyStatus.running);
+        state.classifyStatus = data;
+        updateClassifyPanelUi();
+
+        if (data.running) {
+            const pct = data.total ? Math.round((data.completed / data.total) * 100) : 0;
+            showToast(
+                `Classify @${data.creator}: ${data.completed}/${data.total} (${pct}%) · keep ${data.kept || 0} · reject ${data.rejected || 0}`,
+                1200
+            );
+            if (!state.classifyPollTimer) {
+                state.classifyPollTimer = setInterval(pollClassifyStatus, 3000);
+            }
+            // Light sidebar refresh while running
+            renderCreatorList();
+        } else {
+            if (state.classifyPollTimer) {
+                clearInterval(state.classifyPollTimer);
+                state.classifyPollTimer = null;
+            }
+            // Only celebrate completion when we observed a running → stopped transition
+            if (wasRunning) {
+                const who = data.creator || 'creator';
+                if (data.cancelled) {
+                    showToast(
+                        `Classify cancelled @${who} — ${data.completed}/${data.total} done · keep ${data.kept || 0} · reject ${data.rejected || 0}`
+                    );
+                } else {
+                    showToast(
+                        `Classify done @${who} — keep ${data.kept || 0} · reject ${data.rejected || 0}` +
+                            (data.failed ? ` · err ${data.failed}` : '')
+                    );
+                }
+                await fetchCreators();
+                updateClassifyPanelUi();
+                // Auto-open rejects review for that creator when any rejects found
+                if ((data.rejected || 0) > 0 && data.creator) {
+                    state.selectedCreator = data.creator;
+                    elements.galleryTitle.textContent = `@${data.creator}`;
+                    enterRejectReviewMode();
+                } else {
+                    await fetchPhotos();
+                }
+            }
+        }
+    } catch (err) {
+        console.error('Classify status error:', err);
+    }
+}
+
+async function startCreatorClassify() {
+    if (!state.selectedCreator) {
+        showToast('Select a creator first');
+        return;
+    }
+    if (!requireOllama()) return;
+    try {
+        const res = await fetch('/api/classify/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                creator: state.selectedCreator,
+                only_unscored: true,
+                include_videos: true,
+            }),
+        });
+        const data = await res.json();
+        if (res.ok && data.status === 'started') {
+            showToast(`Classify started — ${data.pending} media queued for @${data.creator}`);
+            state.classifyStatus = {
+                running: true,
+                creator: data.creator,
+                total: data.pending,
+                completed: 0,
+                kept: 0,
+                rejected: 0,
+                failed: 0,
+            };
+            updateClassifyPanelUi();
+            pollClassifyStatus();
+        } else if (data.status === 'nothing_to_do') {
+            showToast('All media already scored for this creator');
+            const meta = selectedCreatorMeta();
+            if (meta && (meta.reject_count || 0) > 0) {
+                enterRejectReviewMode();
+            }
+        } else if (data.status === 'ollama_down') {
+            showToast(data.message || 'Ollama offline');
+        } else {
+            showToast(data.message || 'Classify busy or failed to start');
+        }
+    } catch (err) {
+        showToast('Classify request failed');
+    }
+}
+
+async function cancelCreatorClassify() {
+    try {
+        const res = await fetch('/api/classify/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const data = await res.json();
+        if (data.status === 'cancelling') {
+            showToast('Cancelling classify after current item…');
+        } else {
+            showToast('No classify job running');
+        }
+        pollClassifyStatus();
+    } catch (err) {
+        showToast('Cancel failed');
     }
 }

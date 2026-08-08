@@ -1,63 +1,97 @@
-# Troubleshooting & Environment Setup Guide
+# Troubleshooting
 
-This guide provides setup steps, environment checks, and solutions to common operational issues for developers and AI agents running **PromptStudio**.
+Agent map: [context.md](context.md).
+
+## Environment
+
+| Item | Value |
+|------|--------|
+| OS | Windows 10/11 |
+| Python | 3.10+ (tested 3.14) |
+| Deps | `instaloader`, `opencv-python-headless` (`requirements.txt`); Pillow optional for thumbs |
+| Ollama | `http://localhost:11434` · default model **`qwen2.5vl:7b`** |
+| ComfyUI | optional `http://127.0.0.1:8188` |
+| Archive | `~/Pictures/InstagramSaved` |
+
+```powershell
+# Ollama up?
+py -c "import urllib.request; print(urllib.request.urlopen('http://localhost:11434/api/tags').read().decode()[:300])"
+
+# Pull model if missing
+ollama pull qwen2.5vl:7b
+
+# App
+py server.py
+```
+
+Override model: `$env:OLLAMA_VISION_MODEL="moondream"` (or any installed vision model).
 
 ---
 
-## 1. Environment Requirements
+## Common issues
 
-- **OS:** Windows 10/11
-- **Python Version:** Python 3.10+ (Tested on Python 3.14)
-- **Python Dependencies:** `opencv-python`, `numpy`
-- **Ollama Engine:** Ollama for Windows installed with `moondream` model
+### UnicodeEncodeError (PowerShell)
 
----
-
-## 2. Ollama Service Setup & Verification
-
-PromptStudio uses Ollama for local multimodal vision inference.
-
-### 2.1 Verify Ollama Service
-Check if Ollama is listening on port `11434`:
 ```powershell
-py -c "import urllib.request; print(urllib.request.urlopen('http://localhost:11434/api/tags').read().decode())"
+$env:PYTHONUTF8="1"
 ```
 
-### 2.2 Pulling the Vision Model (`moondream`)
-If `moondream` is missing, pull it using Ollama CLI:
+Avoid emoji in new `print()` paths when possible.
+
+### Port 5000 in use
+
+`ThreadingHTTPServer.allow_reuse_address = True`. Kill stale process:
+
 ```powershell
-& "~\AppData\Local\Programs\Ollama\ollama.exe" pull moondream
+Get-NetTCPConnection -LocalPort 5000 -ErrorAction SilentlyContinue | Select-Object OwningProcess
+# or
+Get-Process -Name python* | Stop-Process -Force
 ```
 
-### 2.3 Starting Ollama Service (if stopped)
+### `ModuleNotFoundError: cgi`
+
+Do **not** import `cgi`. Uploads use `promptstudio.server.multipart.parse_multipart_data`.
+
+### Ollama down / wrong model
+
+- Badge + `GET /api/health` show `ollama: false` or `model_ready: false`.
+- Ensure model name matches `OLLAMA_VISION_MODEL` (or tag prefix).
+- Batch analyze and single-prompt both require Ollama.
+
+### Stale or wrong prompts
+
+Cache: `~/Pictures/InstagramSaved/prompts_cache.json`.
+
 ```powershell
-& "~\AppData\Local\Programs\Ollama\ollama.exe" serve
+# Nuclear: wipe all cached prompts (user must confirm)
+Remove-Item "$HOME\Pictures\InstagramSaved\prompts_cache.json" -Force
 ```
 
----
+Or per-photo: `GET /api/prompt?path=…&refresh=true` / UI re-analyze.  
+Stale flags when `vision_engine` or `pipeline_version` ≠ current (`v2-structured`).
 
-## 3. Common Troubleshooting Scenarios
+### Gallery missing new files
 
-### Scenario A: `UnicodeEncodeError` in Windows PowerShell Console
-- **Symptom:** Python crashes with `charmap codec can't encode character...` when printing emojis.
-- **Fix:** Avoid emojis in console print statements or set environment variable:
-  ```powershell
-  $env:PYTHONUTF8="1"
-  ```
+```powershell
+$env:PROMPTSTUDIO_REBUILD_INDEX="1"
+py server.py
+```
 
-### Scenario B: Port 5000 Already in Use
-- **Symptom:** `OSError: [WinError 10048] Only one usage of each socket address is normally permitted`.
-- **Fix:** `server.py` enables `socketserver.TCPServer.allow_reuse_address = True`. If a stale python process is holding the port, kill it:
-  ```powershell
-  Get-Process -Name "python" | Stop-Process -Force
-  ```
+Index is `archive.db` next to media.
 
-### Scenario C: `ModuleNotFoundError: No module named 'cgi'`
-- **Symptom:** Server crashes on Python 3.14+ when importing standard `cgi` module.
-- **Fix:** PromptStudio includes a built-in native multipart parser function `parse_multipart_data()` in `server.py` and does not depend on `cgi`.
+### Instagram rate-limit / abort
 
-### Scenario D: Re-generating AI Vision Prompts for Gallery
-- **Fix:** To clear cached prompt descriptions and force Ollama Vision to re-analyze all photos, delete the cache file:
-  ```powershell
-  Remove-Item -Path "$HOME\Pictures\InstagramSaved\prompts_cache.json" -Force
-  ```
+- Stop for the day; queue persists in `following_queue.json`.
+- Keep app/browser IG closed during sync.
+- Reuse Instaloader session; do not re-login each run.
+- See [instagram_downloader.md](instagram_downloader.md).
+
+### Comfy generate fails
+
+- ComfyUI running; `GET /api/health` → `comfy: true`.
+- Checkpoint `COMFYUI_CHECKPOINT` must exist in Comfy models.
+- Pro workflow JSON: `promptstudio/comfy/workflows/modelToimage_pro.api.json`.
+
+### Thumbs broken
+
+OpenCV headless is enough for resize; if both Pillow and cv2 fail, `/media/thumb` falls back to full image.

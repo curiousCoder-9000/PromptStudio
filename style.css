@@ -501,6 +501,82 @@ body {
     text-align: left;
 }
 
+.creator-classify-meta {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    line-height: 1.35;
+}
+
+.creator-classify-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.creator-score-pill {
+    font-size: 0.65rem;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.7);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.creator-score-pill.has-rejects {
+    border-color: rgba(236, 72, 153, 0.45);
+    color: #f9a8d4;
+}
+
+.creator-score-pill.running {
+    border-color: rgba(251, 191, 36, 0.55);
+    color: #fcd34d;
+}
+
+.glam-score-badge {
+    position: absolute;
+    bottom: 8px;
+    right: 8px;
+    z-index: 2;
+    font-size: 0.68rem;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    color: #e2e8f0;
+    pointer-events: none;
+}
+
+.glam-score-badge.g0,
+.glam-score-badge.g1 {
+    border-color: rgba(236, 72, 153, 0.5);
+    color: #f9a8d4;
+}
+
+.glam-score-badge.g2,
+.glam-score-badge.g3 {
+    border-color: rgba(34, 197, 94, 0.45);
+    color: #86efac;
+}
+
+.btn-ghost {
+    background: transparent;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    color: var(--text-secondary);
+}
+
+.btn-ghost:hover {
+    background: rgba(51, 65, 85, 0.45);
+    color: var(--text-primary);
+}
+
+.review-rejects-bar {
+    border-color: rgba(236, 72, 153, 0.45);
+    box-shadow: 0 0 0 1px rgba(236, 72, 153, 0.12), var(--shadow-lg);
+}
+
 .creator-style-prefix {
     font-size: 0.78rem;
     color: var(--text-secondary);
@@ -1543,7 +1619,71 @@ button.tag-pill.tag-clickable:hover {
 }
 
 #syncModal .modal-card {
-    max-width: 520px;
+    max-width: 560px;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+.scrape-queue-block {
+    width: 100%;
+    text-align: left;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    border-radius: var(--radius-md);
+    background: rgba(139, 92, 246, 0.08);
+    border: 1px solid rgba(139, 92, 246, 0.2);
+}
+
+.scrape-queue-hint {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin: 0;
+    line-height: 1.35;
+}
+
+.scrape-queue-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.scrape-queue-actions .btn {
+    flex: 1 1 auto;
+    font-size: 0.8rem;
+    padding: 6px 10px;
+}
+
+.scrape-queue-status {
+    font-size: 0.85rem;
+    color: var(--accent-cyan);
+    font-family: "Fira Code", monospace;
+}
+
+.scrape-queue-list {
+    max-height: 120px;
+    overflow-y: auto;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    font-family: "Fira Code", monospace;
+}
+
+.scrape-queue-row {
+    padding: 2px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.sync-divider {
+    width: 100%;
+    border: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    margin: 8px 0;
+}
+
+.sync-actions .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
 }
 
 .modal-card.red-theme {
@@ -1715,6 +1855,24 @@ button.tag-pill.tag-clickable:hover {
     text-align: center;
     color: var(--text-muted);
     font-size: 0.85rem;
+}
+
+.sync-check-label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.65rem 0 0.35rem;
+    font-size: 0.88rem;
+    color: hsl(260 15% 78%);
+    cursor: pointer;
+    user-select: none;
+}
+
+.sync-check-label input[type="checkbox"] {
+    width: 1rem;
+    height: 1rem;
+    accent-color: #ec4899;
+    cursor: pointer;
 }
 
 .sync-following-block {

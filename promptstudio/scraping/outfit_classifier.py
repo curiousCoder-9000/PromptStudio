@@ -1,4 +1,4 @@
-"""Vision-based following classifier: woman, sexy outfit, good breasts (dry-run)."""
+"""Vision-based glam / outfit classifier (woman, sexy outfit, good breasts)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import tempfile
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
@@ -16,6 +17,7 @@ from promptstudio.config import (
     MODEL_NAME,
     OLLAMA_URL,
     SAVED_DIR,
+    VIDEO_EXTENSIONS,
 )
 
 # Vision classification does not need full-res Instagram JPGs; downscaling
@@ -81,6 +83,8 @@ class PostVerdict:
     brief_reason: str = ""
     ok: bool = False
     error: str = ""
+    glam_score: int = -1  # -1 unscored/error, 0–3 glam scale
+    source: str = "image"  # image | video
 
     def matches_keep(self) -> bool:
         return (
@@ -89,8 +93,24 @@ class PostVerdict:
             and self.confidence >= 0.5
         )
 
+    def compute_glam_score(self) -> int:
+        """Map vision flags → 0–3 glam score (gallery sexy filter uses >= 2)."""
+        if not self.ok:
+            return -1
+        if not self.has_woman:
+            return 0
+        if self.sexy_revealing_outfit and self.good_breasts:
+            return 3
+        if self.sexy_revealing_outfit or self.good_breasts:
+            return 2
+        return 1
+
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        if self.ok and self.glam_score < 0:
+            d["glam_score"] = self.compute_glam_score()
+        d["matches_keep"] = bool(self.ok and self.matches_keep())
+        return d
 
 
 @dataclass
@@ -163,7 +183,7 @@ def _ollama_vision_json(image_path: str) -> Optional[Dict[str, Any]]:
 
 
 def classify_image(image_path: str) -> PostVerdict:
-    verdict = PostVerdict(path=image_path)
+    verdict = PostVerdict(path=image_path, source="image")
     data = _ollama_vision_json(image_path)
     if not data:
         verdict.error = "empty vision response"
@@ -180,7 +200,126 @@ def classify_image(image_path: str) -> PostVerdict:
         verdict.confidence = 0.0
     verdict.brief_reason = str(data.get("brief_reason") or "")[:160]
     verdict.ok = True
+    verdict.glam_score = verdict.compute_glam_score()
     return verdict
+
+
+def _video_frame_paths(video_path: str, max_frames: int = 3) -> List[str]:
+    """Extract up to max_frames JPEGs along the video timeline; caller deletes them."""
+    try:
+        import cv2
+    except ImportError:
+        return []
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return []
+    try:
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        paths: List[str] = []
+        if frame_count <= 0:
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                fd, tmp = tempfile.mkstemp(suffix=".jpg")
+                os.close(fd)
+                cv2.imwrite(tmp, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                paths.append(tmp)
+            return paths
+        # Sample evenly across the clip (skip very end black frames)
+        positions = []
+        for i in range(max_frames):
+            frac = (i + 0.5) / max_frames
+            positions.append(min(frame_count - 1, max(0, int(frame_count * frac))))
+        for pos in positions:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
+            fd, tmp = tempfile.mkstemp(suffix=".jpg")
+            os.close(fd)
+            cv2.imwrite(tmp, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            paths.append(tmp)
+        return paths
+    finally:
+        cap.release()
+
+
+def classify_video(video_path: str, max_frames: int = 3) -> PostVerdict:
+    """Classify a video by scoring sample frames; keep best glam result."""
+    frames = _video_frame_paths(video_path, max_frames=max_frames)
+    if not frames:
+        return PostVerdict(
+            path=video_path,
+            source="video",
+            error="could not extract video frames",
+        )
+    best: Optional[PostVerdict] = None
+    try:
+        for fp in frames:
+            v = classify_image(fp)
+            v.path = video_path
+            v.source = "video"
+            if best is None:
+                best = v
+                continue
+            if not v.ok:
+                continue
+            if not best.ok or v.glam_score > best.glam_score:
+                best = v
+            elif v.glam_score == best.glam_score and v.confidence > best.confidence:
+                best = v
+    finally:
+        for fp in frames:
+            try:
+                os.remove(fp)
+            except OSError:
+                pass
+    if best is None:
+        return PostVerdict(path=video_path, source="video", error="no frame scores")
+    return best
+
+
+def classify_media(path: str) -> PostVerdict:
+    """Classify image or video path for glam scoring."""
+    lower = path.lower()
+    if lower.endswith(VIDEO_EXTENSIONS):
+        return classify_video(path)
+    return classify_image(path)
+
+
+def persist_glam_score(rel_path: str, verdict: PostVerdict, full_path: str = "") -> None:
+    """Write glam_score to SQLite index + sidecar metadata."""
+    score = verdict.glam_score if verdict.ok else -1
+    if verdict.ok and score < 0:
+        score = verdict.compute_glam_score()
+    try:
+        from promptstudio.storage.db import ArchiveIndex
+
+        ArchiveIndex.get().set_glam_score(
+            rel_path,
+            score,
+            has_woman=1 if verdict.has_woman else 0,
+            sexy=1 if verdict.sexy_revealing_outfit else 0,
+        )
+    except Exception as e:
+        print(f"glam index write warning for {rel_path}: {e}")
+    if full_path and os.path.isfile(full_path):
+        try:
+            from promptstudio.storage.metadata import load_post_metadata, save_post_metadata
+
+            meta = load_post_metadata(full_path) or {}
+            meta["glam_score"] = score
+            meta["glam"] = {
+                "score": score,
+                "has_woman": bool(verdict.has_woman),
+                "sexy_revealing_outfit": bool(verdict.sexy_revealing_outfit),
+                "good_breasts": bool(verdict.good_breasts),
+                "confidence": verdict.confidence,
+                "brief_reason": verdict.brief_reason,
+                "matches_keep": bool(verdict.ok and verdict.matches_keep()),
+            }
+            save_post_metadata(full_path, meta)
+        except Exception as e:
+            print(f"glam sidecar write warning for {rel_path}: {e}")
 
 
 def list_local_images(username: str, limit: int = 3) -> List[str]:

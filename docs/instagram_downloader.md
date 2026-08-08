@@ -1,7 +1,9 @@
 # Instagram Saved Images Downloader & Sync Guide
 
-Local archive: `~\Pictures\InstagramSaved`  
-Session user: configured in `promptstudio.config.SESSION_USER` (default `YOUR_INSTAGRAM_USERNAME`)
+Agent map: [context.md](context.md).
+
+Local archive: `~/Pictures/InstagramSaved` (`PROMPTSTUDIO_ARCHIVE`)  
+Session user: `promptstudio.config.SESSION_USER` (default `YOUR_INSTAGRAM_USERNAME`)
 
 ---
 
@@ -12,6 +14,42 @@ Session user: configured in `promptstudio.config.SESSION_USER` (default `YOUR_IN
 | Saved posts | `py scripts/download_instagram_saved.py` | `POST /api/sync/saved` |
 | Creator feed | `py scripts/download_creator_feed.py HANDLE --max-posts 50` | `POST /api/sync/creator` |
 | Following bulk | `py scripts/download_following.py` | `POST /api/sync/following` |
+
+**Videos / reels:** default **ON** (`IG_INCLUDE_VIDEOS=1`, config `INCLUDE_VIDEOS_DEFAULT`).  
+CLI: omit flag (default on), or `--no-reels` / `--include-reels`.  
+API/UI: `include_videos` body field + Sync modal checkbox.
+
+### Glam / sexy acquisition playbook
+
+```powershell
+# 1) Refresh following + bios
+py scripts/export_following_list.py
+
+# 2) Vision classify accounts (local archive first)
+py scripts/classify_following.py --limit 30
+
+# 3) Put classify:keep at front of the daily queue
+py scripts/prioritize_following_queue.py
+# dry-run:  py scripts/prioritize_following_queue.py --dry-run
+
+# 4) Bulk pull (reels on by default; caption-rank inside each feed)
+py scripts/download_following.py --accounts-per-day 15 --max-posts 30
+
+# High-value single creator
+py scripts/download_creator_feed.py HANDLE --max-posts 50
+
+# User-saved glam (always trust saved; no keyword filter)
+py scripts/download_instagram_saved.py
+
+# 5) Score local media for gallery Sexy filter (Ollama)
+py scripts/classify_local_photos.py --limit 50
+# Or apply existing report without re-running vision:
+py scripts/backfill_glam_scores.py
+```
+
+**Feed ranking (PR3):** when `IG_POST_RANK=1` (default), each creator feed scans up to `max_posts * IG_POST_SCAN_FACTOR` (default 3×) posts, scores captions/reels/carousels, then downloads the top `max_posts`.
+
+**Glam scores (PR4):** `glam_score` 0–3 on `archive.db` + sidecars. Gallery **Sexy** chip → `?sexy=1` (`glam_score >= 2`).
 
 Export following list first (includes biographies for keyword filters):
 
@@ -64,7 +102,16 @@ Progress across days is stored in `~/Pictures/InstagramSaved/following_queue.jso
 ```
 
 Statuses: `pending` | `done` | `skipped` | `error`.  
+Optional fields: `priority` (int, higher first), `reason` (e.g. `classify:keep`).  
+`next_pending` sorts by **priority desc**, then username.  
 `accounts_today` resets when `day_key` rolls to a new calendar day. A second run the same day only consumes the **remaining** daily budget.
+
+Seed priorities from the classify report:
+
+```powershell
+py scripts/prioritize_following_queue.py
+# --requeue-keep  → reset done keep accounts to pending for another pull
+```
 
 ---
 
@@ -118,6 +165,30 @@ Each downloaded image may have a `*.meta.json` sibling with `post_id`, `shortcod
 
 ---
 
+## Creator scrape queue (serial full archive)
+
+Enqueue handles for **one-at-a-time** full (or bounded) scrapes without running parallel Instagram jobs.
+
+| Piece | Detail |
+|-------|--------|
+| API | `POST /api/scrape/enqueue`, `GET /api/scrape/status`, pause/resume/cancel |
+| Persist | `~/Pictures/InstagramSaved/creator_scrape_queue.json` |
+| Mutex | `SyncManager` — same single-flight as saved/following/creator |
+| Full mode | Streams feed; `deep=true` (default) disables catch-up so glam top-N folders still backfill |
+| Ceiling | `IG_FULL_SCRAPE_MAX_POSTS` (default 5000 downloaded media units; `0` = unlimited) |
+| Fairness | One-shot `/api/sync/*` returns **409** while queue has pending (unless paused) |
+| Abort | Hard rate-limit/abuse **pauses** the queue; resume when safe |
+| Flag | `IG_CREATOR_SCRAPE_QUEUE=0` disables scrape API |
+
+CLI full scrape:
+
+```powershell
+py scripts/download_creator_feed.py HANDLE --full
+py scripts/download_creator_feed.py HANDLE --full --no-deep   # catch-up resume walk
+```
+
+Design: [design_creator_scrape_queue.md](design_creator_scrape_queue.md).
+
 ## Web UI
 
-Open Sync modal → **Sync Saved Posts**, **Sync Feed** (`@handle`), or **Sync Following List** (accounts/day · posts · keywords). Status polls every 2.5s and shows abort reason + queue summary when present.
+Open Sync modal → **Scrape creator** (enqueue full archive queue), **Sync Saved Posts**, **Sync Feed** (`@handle` one-shot), or **Sync Following List**. Status polls every 2.5s. One-shot buttons disable while the scrape queue has pending jobs.

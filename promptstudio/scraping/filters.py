@@ -1,8 +1,12 @@
-"""Filter Instagram following-list entries for bulk sync."""
+"""Filter Instagram following-list entries and rank posts for glam acquisition."""
 
-from typing import Iterable, List, Optional, Sequence
+from typing import Any, Iterable, List, Optional, Sequence
 
-from promptstudio.config import DEFAULT_BIO_KEYWORDS, DEFAULT_MIN_MEDIA_COUNT
+from promptstudio.config import (
+    DEFAULT_BIO_KEYWORDS,
+    DEFAULT_CAPTION_KEYWORDS,
+    DEFAULT_MIN_MEDIA_COUNT,
+)
 
 
 def normalize_keywords(keywords: Optional[Sequence[str]]) -> List[str]:
@@ -46,3 +50,40 @@ def filter_following_entries(
             continue
         selected.append(entry)
     return selected
+
+
+def score_instagram_post(
+    post: Any,
+    *,
+    caption_keywords: Optional[Sequence[str]] = None,
+    feed_index: int = 0,
+) -> float:
+    """Cheap glam preference score for an Instaloader Post (no network).
+
+    Higher = prefer download first within a feed scan window.
+    """
+    kws = [
+        k.strip().lower()
+        for k in (caption_keywords if caption_keywords is not None else DEFAULT_CAPTION_KEYWORDS)
+        if k and str(k).strip()
+    ]
+    score = 0.0
+    caption = (getattr(post, "caption", None) or "").lower()
+    hits = 0
+    for kw in kws:
+        if kw and kw in caption:
+            hits += 1
+    # Diminishing returns after first few hits
+    if hits:
+        score += 3.0 + min(hits - 1, 4) * 1.0
+    if getattr(post, "is_video", False):
+        score += 1.5
+    try:
+        slides = int(getattr(post, "mediacount", 0) or 0)
+    except (TypeError, ValueError):
+        slides = 0
+    if slides > 1:
+        score += 0.5 + min(slides - 2, 4) * 0.15
+    # Mild recency bias: earlier in feed (newer) ranks slightly higher
+    score -= min(feed_index, 200) * 0.01
+    return score

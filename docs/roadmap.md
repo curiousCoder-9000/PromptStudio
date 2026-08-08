@@ -1,6 +1,6 @@
 # PromptStudio Development Roadmap
 
-Phased plan: **scrape → organize → analyze → search → generate**.
+Agent map: [context.md](context.md). Phased plan: **scrape → organize → analyze → search → generate**.
 
 ---
 
@@ -90,6 +90,7 @@ Phased plan: **scrape → organize → analyze → search → generate**.
 | Paginated gallery (`offset` / `limit` + infinite scroll) | Done |
 | SQLite `archive.db` photo catalog (list/filter/sort) | Done |
 | In-memory write-through prompt + favorites caches | Done |
+| Per-creator **Classify unscored** job + Rejects review/delete UI | Done |
 
 ---
 
@@ -121,32 +122,18 @@ Phased plan: **scrape → organize → analyze → search → generate**.
 ```
 promptstudio/
 ├── config.py
-├── storage/
-│   ├── archive.py
-│   ├── db.py
-│   ├── favorites.py
-│   ├── metadata.py
-│   └── thumbs.py
-├── scraping/
-│   ├── session.py
-│   ├── downloader.py
-│   ├── filters.py
-│   ├── checkpoints.py
-│   ├── organizer.py
-│   └── sync_manager.py
-├── prompts/
-│   ├── cache.py
-│   ├── engine.py
-│   ├── styles.py
-│   └── batch.py
-└── server/
-    ├── handler.py
-    └── multipart.py
+├── storage/     archive db favorites metadata thumbs
+├── scraping/    session downloader filters queue checkpoints
+│                organizer sync_manager outfit_classifier
+├── prompts/     cache engine styles batch comfy_mode
+├── comfy/       client + workflows/modelToimage_pro.api.json
+└── server/      handler multipart
 
 scripts/                   # Thin CLI wrappers
-server.py                  # Entry point
-prompt_engine.py           # Backward-compat shim
+server.py / prompt_engine.py
 ```
+
+See [context.md](context.md) for the full task→file map.
 
 ---
 

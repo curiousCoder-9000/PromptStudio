@@ -1,33 +1,78 @@
-# PromptStudio Architecture Specification
+# PromptStudio Architecture
 
-PromptStudio is a local web application and AI Vision reverse-engineering engine for Instagram creator photo archives. It connects to your local image storage (`~/Pictures/InstagramSaved`), runs multimodal Ollama models to generate photorealistic image generation prompts (Stable Diffusion, Flux.1, Midjourney, ComfyUI), and provides photo management plus Instagram sync tools.
+Dense overview. Prefer [context.md](context.md) for agent work; this page is the component diagram + flow.
 
 ---
 
-## 1. System Components
+## Components
 
 ```mermaid
 graph TD
-    User[Browser UI] --> WebServer[promptstudio.server :5000]
-    WebServer --> Frontend[index.html / style.css / app.js]
-    WebServer --> Archive[promptstudio.storage]
-    WebServer --> Scraping[promptstudio.scraping]
-    WebServer --> Prompts[promptstudio.prompts]
+    Browser[Browser UI app.js] --> HTTP[ThreadingHTTPServer :5000]
+    HTTP --> Handler[promptstudio.server.handler]
+    Handler --> Archive[storage.archive + db]
+    Handler --> Prompts[prompts.engine + cache]
+    Handler --> Scraping[scraping.downloader]
+    Handler --> Comfy[comfy.client]
     Scraping --> IG[Instagram via Instaloader]
     Archive --> Disk["~/Pictures/InstagramSaved"]
-    Archive --> Index["archive.db (SQLite catalog)"]
-    Prompts --> Ollama[Ollama Vision + rewrite]
-    Prompts --> Cache[prompts_cache.json + memory]
+    Archive --> SQLite[archive.db]
+    Prompts --> Ollama[Ollama :11434]
+    Prompts --> CacheFile[prompts_cache.json]
+    Comfy --> ComfyUI[ComfyUI :8188]
+    Comfy --> Gens["_generations/ + generations_index.json"]
 ```
 
-Package layout lives under `promptstudio/` with thin entrypoints `server.py` and `prompt_engine.py`.
+Entrypoints: `server.py`, `prompt_engine.py` (shims). Logic: `promptstudio/`.
 
 ---
 
-## 2. Pipeline versions
+## Request flow (gallery)
 
-- **Ingest:** saved posts, creator feeds, following bulk (bio keyword + media filters, resume checkpoints, exponential rate-limit backoff).
-- **Prompt:** two-stage (`v2-structured`) — structured vision JSON then erotic rewrite; creator style prefixes; Flux/SDXL/Pony exports.
-- **Scale:** `/media/thumb/...` thumbnails; `/api/photos` pagination with infinite scroll; SQLite `archive.db` catalog + in-memory prompt/favorites caches (set `PROMPTSTUDIO_REBUILD_INDEX=1` to force reindex).
+1. Server start → `ArchiveStore.ensure_ready()` indexes disk into SQLite (unless already current; force with `PROMPTSTUDIO_REBUILD_INDEX=1`).
+2. `GET /api/photos` → SQL filter/sort/page → annotate prompt flags + favorites → JSON (no `full_path`).
+3. Grid uses `/media/thumb/...` (Pillow/OpenCV JPEG under `_thumbs/`); lightbox uses `/media/...`.
+4. `GET /api/prompt?path=` → cache hit or Ollama two-stage pipeline → write cache → return exports + tags.
 
-See [roadmap.md](roadmap.md), [api.md](api.md), [instagram_downloader.md](instagram_downloader.md).
+## Prompt pipeline
+
+```
+image → base64 → Ollama vision JSON (STRUCTURED_FIELDS)
+      → rewrite model (+ creator style_prefix)
+      → positive/negative + visual_tags + exports{flux,sdxl,pony}
+      → optional Mode E strip for Comfy IPAdapter
+```
+
+Engine id: `Ollama ({MODEL_NAME}) v2-structured`. Stale if engine/pipeline mismatch.
+
+## Sync pipeline
+
+```
+Instaloader session → download to <creator>/
+  → *.meta.json (post_id, shortcode, …)
+  → skip if identity already in archive.db
+  → catch-up streak stop; following queue + daily budget
+  → rate-limit exponential backoff → hard abort
+```
+
+Background: one `SyncManager` job at a time (saved / creator / following / **creator_queue** drain); `CreatorScrapeQueue` persists multi-handle FIFO and never starts a second IG session. One `BatchPromptManager` / `ComfyJobManager` / `ClassifyJobManager` similarly (classify ↔ batch mutual exclusion only).
+
+## Module responsibilities
+
+| Package | Responsibility |
+|---------|----------------|
+| `config` | Paths, env, pacing, models — single source of truth |
+| `server` | HTTP routing, CORS, multipart, static files from repo root |
+| `storage` | Disk archive + SQLite + thumbs + meta + favorites |
+| `prompts` | Vision, cache, batch, styles, Mode E |
+| `scraping` | IG session, download, filters, queue, organize, classify |
+| `comfy` | Queue jobs, upload ref image, poll history, save gens |
+
+## Scale notes
+
+- Gallery never full-scans disk per request (SQLite).
+- Prompt/favorites caches are process-local write-through JSON.
+- Threaded server keeps UI responsive during sync/batch/Comfy.
+- Thumbnails and pagination (`offset`/`limit`, max `PROMPTSTUDIO_PHOTO_PAGE` default 300).
+
+See [roadmap.md](roadmap.md) for completed phases; [api.md](api.md) for contracts.

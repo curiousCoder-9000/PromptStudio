@@ -91,7 +91,20 @@
                     <!-- Dynamic Creator Items -->
                 </div>
                 <div class="creator-style-panel" id="creatorStylePanel" style="display:none;">
-                    <div class="sync-status-label">Creator Style</div>
+                    <div class="sync-status-label">Classify &amp; clean</div>
+                    <div class="creator-classify-meta" id="creatorClassifyMeta">—</div>
+                    <div class="creator-classify-actions">
+                        <button class="btn btn-primary btn-sm full-width" id="classifyCreatorBtn" type="button" title="Score unscored media with glam vision filter">
+                            <i class="fa-solid fa-fire"></i> Classify unscored
+                        </button>
+                        <button class="btn btn-secondary btn-sm full-width" id="reviewRejectsBtn" type="button" title="Show scored media that failed keep criteria">
+                            <i class="fa-solid fa-filter"></i> Review rejects
+                        </button>
+                        <button class="btn btn-ghost btn-sm full-width" id="cancelClassifyBtn" type="button" style="display:none;" title="Stop classify after current item">
+                            <i class="fa-solid fa-stop"></i> Cancel classify
+                        </button>
+                    </div>
+                    <div class="sync-status-label" style="margin-top:6px;">Creator Style</div>
                     <div class="creator-style-prefix" id="creatorStylePrefix">No style yet</div>
                     <div class="creator-style-terms" id="creatorStyleTerms"></div>
                     <button class="btn btn-secondary btn-sm full-width" id="rebuildStyleBtn" type="button">
@@ -114,6 +127,7 @@
                             <option value="name">Name</option>
                             <option value="newest">Newest</option>
                             <option value="oldest">Oldest</option>
+                            <option value="glam">Glam score</option>
                         </select>
                         <select id="mediaTypeSelect" class="sort-select" title="Filter media type">
                             <option value="all">All Media</option>
@@ -122,6 +136,15 @@
                         </select>
                         <button class="filter-chip" id="favoritesFilterBtn" type="button" title="Show favorites only">
                             <i class="fa-solid fa-star"></i> Favorites
+                        </button>
+                        <button class="filter-chip" id="sexyFilterBtn" type="button" title="Show glam/sexy scored media (glam_score ≥ 2)">
+                            <i class="fa-solid fa-fire"></i> Sexy
+                        </button>
+                        <button class="filter-chip" id="rejectFilterBtn" type="button" title="Show scored non-keep media (glam 0–1) for cleanup">
+                            <i class="fa-solid fa-ban"></i> Rejects
+                        </button>
+                        <button class="filter-chip" id="unscoredFilterBtn" type="button" title="Show media not yet glam-scored">
+                            <i class="fa-solid fa-circle-question"></i> Unscored
                         </button>
                         <button class="filter-chip" id="selectModeBtn" type="button" title="Select multiple photos">
                             <i class="fa-solid fa-check-double"></i> Select
@@ -147,6 +170,20 @@
                     <p>Try selecting a different creator or clearing your search query.</p>
                 </div>
             </main>
+        </div>
+    </div>
+
+    <!-- Reject review bar (when Rejects filter is on) -->
+    <div class="bulk-bar review-rejects-bar" id="reviewRejectsBar" style="display:none;">
+        <span class="bulk-count" id="reviewRejectsCount">Review rejects</span>
+        <div class="bulk-actions">
+            <button class="btn btn-secondary" id="selectAllRejectsBtn" type="button" title="Select all non-favorite rejects on this page">
+                <i class="fa-solid fa-check-double"></i> Select non-favorites
+            </button>
+            <button class="btn btn-danger" id="deleteSelectedRejectsBtn" type="button">
+                <i class="fa-solid fa-trash-can"></i> Delete selected
+            </button>
+            <button class="btn btn-ghost" id="exitRejectsBtn" type="button">Done</button>
         </div>
     </div>
 
@@ -390,6 +427,36 @@
             <p>Download new photos into your local archive. Jobs run in the background.</p>
 
             <div class="sync-actions">
+                <div class="scrape-queue-block" id="scrapeQueueBlock">
+                    <div class="sync-status-label">Scrape creator (full archive queue)</div>
+                    <p class="scrape-queue-hint">Enqueue handles one-by-one. Jobs never run in parallel (Instagram rate limits).</p>
+                    <div class="sync-creator-row">
+                        <input type="text" id="scrapeCreatorInput" placeholder="@creator handle" class="modal-input" autocomplete="off">
+                        <button class="btn btn-primary" id="scrapeEnqueueBtn">
+                            <i class="fa-solid fa-cloud-arrow-down"></i> Enqueue
+                        </button>
+                    </div>
+                    <label class="sync-check-label" for="scrapeFullDeep" title="Walk entire feed; fill gaps even after glam top-N pulls">
+                        <input type="checkbox" id="scrapeFullDeep" checked>
+                        Full archive (deep — catch-up off)
+                    </label>
+                    <label class="sync-check-label" for="scrapeBoundedMode" title="Use bounded top-N instead of full feed">
+                        <input type="checkbox" id="scrapeBoundedMode">
+                        Bounded only (max posts)
+                    </label>
+                    <div class="sync-creator-row">
+                        <input type="number" id="scrapeMaxPosts" class="modal-input sync-num" value="50" min="1" max="5000" title="Max posts when bounded; full mode ceiling optional" disabled>
+                    </div>
+                    <div class="scrape-queue-actions">
+                        <button class="btn btn-secondary" id="scrapePauseBtn" type="button">Pause queue</button>
+                        <button class="btn btn-secondary" id="scrapeResumeBtn" type="button">Resume</button>
+                        <button class="btn btn-secondary" id="scrapeCancelBtn" type="button" title="Cancel running IG job">Cancel job</button>
+                        <button class="btn btn-secondary" id="scrapeClearPendingBtn" type="button">Clear pending</button>
+                    </div>
+                    <div class="scrape-queue-status" id="scrapeQueueStatus">Queue idle</div>
+                    <div class="scrape-queue-list" id="scrapeQueueList"></div>
+                </div>
+                <hr class="sync-divider">
                 <button class="btn btn-primary full-width" id="syncSavedBtn">
                     <i class="fa-solid fa-bookmark"></i> Sync Saved Posts
                 </button>
@@ -413,6 +480,10 @@
                         <input type="number" id="syncFollowMaxPosts" class="modal-input sync-num" value="20" min="1" max="100" title="Max posts per account">
                     </div>
                     <input type="text" id="syncFollowKeywords" class="modal-input" placeholder="Bio keywords (model, lingerie…) — blank = config defaults" autocomplete="off">
+                    <label class="sync-check-label" for="syncIncludeVideos" title="Download reels / video posts (images always included)">
+                        <input type="checkbox" id="syncIncludeVideos" checked>
+                        Include reels / videos
+                    </label>
                     <button class="btn btn-secondary full-width" id="syncFollowingBtn">
                         <i class="fa-solid fa-users"></i> Sync Following List
                     </button>

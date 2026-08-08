@@ -9,6 +9,7 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from promptstudio.config import INCLUDE_VIDEOS_DEFAULT
 from promptstudio.scraping.downloader import InstagramDownloader
 
 
@@ -19,18 +20,58 @@ def main():
         "--max-posts",
         type=int,
         default=50,
-        help="Maximum posts to download (default: 50)",
+        help="Maximum posts to download (default: 50; full mode uses IG_FULL_SCRAPE_MAX_POSTS if 0)",
     )
     parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Stream full feed (no glam rank / top-N). Default is bounded.",
+    )
+    parser.add_argument(
+        "--deep",
+        action="store_true",
+        default=None,
+        help="With --full: disable catch-up (true archive). Default on for --full.",
+    )
+    parser.add_argument(
+        "--no-deep",
+        action="store_true",
+        help="With --full: enable catch-up streak stop (resume walk).",
+    )
+    reels = parser.add_mutually_exclusive_group()
+    reels.add_argument(
         "--include-reels",
         action="store_true",
-        help="Also download reels / video posts (skipped by default)",
+        default=None,
+        help="Download reels / video posts (default: on via IG_INCLUDE_VIDEOS)",
+    )
+    reels.add_argument(
+        "--no-reels",
+        action="store_true",
+        help="Skip reels / video posts",
     )
     args = parser.parse_args()
+    if args.no_reels:
+        include_videos = False
+    elif args.include_reels:
+        include_videos = True
+    else:
+        include_videos = INCLUDE_VIDEOS_DEFAULT
+
+    mode = "full" if args.full else "bounded"
+    if args.no_deep:
+        deep = False
+    elif args.deep:
+        deep = True
+    else:
+        deep = True  # default deep for full
+
     InstagramDownloader().sync_creator_feed(
         args.username,
         max_posts=args.max_posts,
-        include_videos=args.include_reels,
+        include_videos=include_videos,
+        mode=mode,
+        deep=deep,
     )
 
 

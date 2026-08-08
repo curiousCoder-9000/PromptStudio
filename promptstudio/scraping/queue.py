@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import date, datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from promptstudio.config import DEFAULT_ACCOUNTS_PER_DAY, FOLLOWING_QUEUE_FILE
 
@@ -72,26 +72,88 @@ class FollowingQueue:
         used = int(self._data.get("accounts_today") or 0)
         return max(0, int(daily_cap) - used)
 
-    def ensure_accounts(self, usernames: Iterable[str]) -> int:
-        """Merge usernames as pending. Never overwrite done/skipped/error."""
+    def ensure_accounts(
+        self,
+        usernames: Iterable[str],
+        *,
+        priority: Optional[int] = None,
+        reason: str = "",
+    ) -> int:
+        """Merge usernames as pending. Never overwrite done/skipped/error status.
+
+        When an account already exists as pending, optionally raise priority if
+        the new value is higher. When missing, create with optional priority/reason.
+        """
         added = 0
+        updated = 0
         accounts: Dict[str, Any] = self._data.setdefault("accounts", {})
         for raw in usernames:
             key = _normalize_username(raw)
             if not key:
                 continue
-            if key in accounts:
+            if key not in accounts:
+                entry: Dict[str, Any] = {
+                    "status": "pending",
+                    "downloaded": 0,
+                    "last_error": "",
+                    "updated_at": _utc_now(),
+                }
+                if priority is not None:
+                    entry["priority"] = int(priority)
+                if reason:
+                    entry["reason"] = reason
+                accounts[key] = entry
+                added += 1
                 continue
-            accounts[key] = {
+            # Existing entry: bump priority on pending only
+            if priority is None:
+                continue
+            entry = accounts[key]
+            if not isinstance(entry, dict):
+                continue
+            if (entry.get("status") or "pending") != "pending":
+                continue
+            prev_p = int(entry.get("priority") or 0)
+            if int(priority) > prev_p:
+                entry["priority"] = int(priority)
+                if reason:
+                    entry["reason"] = reason
+                entry["updated_at"] = _utc_now()
+                updated += 1
+        if added or updated:
+            self.save()
+        return added
+
+    def set_priority(
+        self,
+        username: str,
+        priority: int,
+        *,
+        reason: str = "",
+        requeue: bool = False,
+    ) -> bool:
+        """Set priority on an account. Optionally reset done/error → pending."""
+        key = _normalize_username(username)
+        if not key:
+            return False
+        accounts: Dict[str, Any] = self._data.setdefault("accounts", {})
+        entry = dict(accounts.get(key) or {})
+        if not entry:
+            entry = {
                 "status": "pending",
                 "downloaded": 0,
                 "last_error": "",
-                "updated_at": _utc_now(),
             }
-            added += 1
-        if added:
-            self.save()
-        return added
+        if requeue and entry.get("status") in ("done", "error", "skipped"):
+            entry["status"] = "pending"
+            entry["last_error"] = ""
+        entry["priority"] = int(priority)
+        if reason:
+            entry["reason"] = reason
+        entry["updated_at"] = _utc_now()
+        accounts[key] = entry
+        self.save()
+        return True
 
     def next_pending(
         self,
@@ -102,7 +164,7 @@ class FollowingQueue:
     ) -> List[str]:
         """Return up to `limit` pending usernames, capped by remaining daily budget.
 
-        If `only` is provided, restrict to that username set (current filter pass).
+        Ordered by priority desc, then username. If `only` is set, restrict to that set.
         """
         self._roll_day_if_needed()
         budget = min(int(limit), self.remaining_today(daily_cap))
@@ -111,17 +173,19 @@ class FollowingQueue:
         allow = None
         if only is not None:
             allow = {_normalize_username(u) for u in only if u}
-        selected: List[str] = []
         accounts: Dict[str, Any] = self._data.get("accounts") or {}
+        candidates: List[Tuple[int, str]] = []
         for username, entry in accounts.items():
-            if len(selected) >= budget:
-                break
             if allow is not None and username not in allow:
                 continue
             status = (entry or {}).get("status", "pending")
-            if status == "pending":
-                selected.append(username)
-        return selected
+            if status != "pending":
+                continue
+            prio = int((entry or {}).get("priority") or 0)
+            candidates.append((prio, username))
+        # Higher priority first; stable by username
+        candidates.sort(key=lambda t: (-t[0], t[1]))
+        return [u for _p, u in candidates[:budget]]
 
     def mark(
         self,
@@ -144,6 +208,11 @@ class FollowingQueue:
             "last_error": last_error or "",
             "updated_at": _utc_now(),
         }
+        # Preserve priority / reason across status transitions
+        if "priority" in prev:
+            entry["priority"] = prev["priority"]
+        if prev.get("reason"):
+            entry["reason"] = prev["reason"]
         accounts[key] = entry
         self.save()
 
@@ -156,17 +225,21 @@ class FollowingQueue:
         self._roll_day_if_needed()
         counts = {s: 0 for s in VALID_STATUSES}
         accounts: Dict[str, Any] = self._data.get("accounts") or {}
+        high_priority_pending = 0
         for entry in accounts.values():
             status = (entry or {}).get("status", "pending")
             if status in counts:
                 counts[status] += 1
             else:
                 counts["pending"] += 1
+            if status == "pending" and int((entry or {}).get("priority") or 0) >= 50:
+                high_priority_pending += 1
         return {
             "day_key": self._data.get("day_key"),
             "accounts_today": int(self._data.get("accounts_today") or 0),
             "remaining_today": self.remaining_today(daily_cap),
             "daily_cap": int(daily_cap),
             "total": len(accounts),
+            "high_priority_pending": high_priority_pending,
             **counts,
         }

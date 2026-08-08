@@ -5,12 +5,17 @@ import json
 import os
 import socketserver
 import urllib.parse
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from promptstudio.comfy.client import ComfyJobManager, check_comfy_health
 from promptstudio.config import (
+    CREATOR_SCRAPE_QUEUE_ENABLED,
+    DEFAULT_MAX_POSTS_PER_CREATOR,
     FOLLOWING_LIST_FILE,
+    FULL_SCRAPE_MAX_POSTS,
+    GLAM_SEXY_MIN,
     HOST,
+    INCLUDE_VIDEOS_DEFAULT,
     MAX_PHOTOS_API_PAGE,
     MODEL_NAME,
     PORT,
@@ -20,10 +25,12 @@ from promptstudio.config import (
 from promptstudio.prompts.batch import BatchPromptManager, count_prompts_ready
 from promptstudio.prompts.cache import PromptCache
 from promptstudio.prompts.engine import ENGINE_ID, build_export_variants, get_prompt_for_image
+from promptstudio.scraping.classify_job import ClassifyJobManager
+from promptstudio.scraping.creator_queue import CreatorScrapeQueue
 from promptstudio.scraping.downloader import InstagramDownloader
 from promptstudio.scraping.sync_manager import SyncManager
 from promptstudio.server.multipart import parse_multipart_data
-from promptstudio.storage.archive import ArchiveStore
+from promptstudio.storage.archive import ArchiveStore, ensure_creator_folder
 from promptstudio.storage.favorites import FavoritesStore
 from promptstudio.storage.metadata import delete_metadata_for_image
 from promptstudio.prompts.styles import CreatorStyleStore
@@ -33,12 +40,35 @@ _prompt_cache = PromptCache()
 _favorites = FavoritesStore()
 _sync = SyncManager.get()
 _batch = BatchPromptManager.get()
+_classify = ClassifyJobManager.get()
 _styles = CreatorStyleStore()
 _comfy = ComfyJobManager.get()
+_scrape_queue = CreatorScrapeQueue.get() if CREATOR_SCRAPE_QUEUE_ENABLED else None
 
 OLLAMA_TAGS_URL = os.environ.get("OLLAMA_TAGS_URL", "http://localhost:11434/api/tags")
 
 _following_cache: Dict[str, Any] = {"mtime": None, "accounts": []}
+
+
+def _creator_queue_blocks_oneshot() -> Optional[Dict[str, Any]]:
+    """If scrape queue has pending jobs and is not paused, block one-shot sync."""
+    if not CREATOR_SCRAPE_QUEUE_ENABLED:
+        return None
+    try:
+        q = CreatorScrapeQueue.get()
+        n = q.pending_count()
+        if n > 0 and not q.is_paused():
+            return {
+                "status": "busy",
+                "message": (
+                    f"Creator scrape queue has {n} pending — "
+                    "pause or empty the queue first"
+                ),
+                "creator_queue_depth": n,
+            }
+    except Exception:
+        pass
+    return None
 
 
 def _load_following_accounts() -> List[Dict[str, Any]]:
@@ -269,13 +299,156 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(500, f"Error uploading image: {e}")
             return
 
+        if path == "/api/sync/cancel":
+            if _sync.request_cancel():
+                self._send_json({"status": "cancelling"})
+            else:
+                self._send_json({"status": "idle"})
+            return
+
+        if path == "/api/scrape/enqueue":
+            if not CREATOR_SCRAPE_QUEUE_ENABLED:
+                self.send_error(404, "Creator scrape queue disabled")
+                return
+            try:
+                data = self._read_json_body()
+                username = (data.get("username") or "").strip().lstrip("@")
+                if not username:
+                    self.send_error(400, "username required")
+                    return
+                mode = (data.get("mode") or "full").strip().lower()
+                if mode not in ("full", "bounded"):
+                    self.send_error(400, "mode must be full or bounded")
+                    return
+                deep = data.get("deep", True)
+                if isinstance(deep, str):
+                    deep = deep.lower() in ("1", "true", "yes")
+                deep = bool(deep) if mode == "full" else False
+                max_posts = data.get("max_posts")
+                if max_posts is not None and max_posts != "":
+                    max_posts = int(max_posts)
+                else:
+                    max_posts = (
+                        None if mode == "full" else DEFAULT_MAX_POSTS_PER_CREATOR
+                    )
+                if "include_videos" in data:
+                    include_videos = bool(data.get("include_videos"))
+                else:
+                    include_videos = INCLUDE_VIDEOS_DEFAULT
+                priority = int(data.get("priority") or 0)
+                folder = ensure_creator_folder(username)
+                q = CreatorScrapeQueue.get()
+                out = q.enqueue(
+                    username,
+                    mode=mode,
+                    deep=deep,
+                    max_posts=max_posts,
+                    include_videos=include_videos,
+                    priority=priority,
+                    folder_name=folder["name"],
+                    folder_created=folder["created"],
+                )
+                started = False
+                if out["status"] == "queued":
+                    started = _sync.try_drain_creator_queue()
+                    if started:
+                        out["status"] = "started"
+                self._send_json(
+                    {
+                        **out,
+                        "folder": folder["name"],
+                        "folder_created": folder["created"],
+                    }
+                )
+            except ValueError as e:
+                self.send_error(400, str(e))
+            except (json.JSONDecodeError, TypeError):
+                self.send_error(400, "Invalid JSON body")
+            return
+
+        if path == "/api/scrape/cancel":
+            if not CREATOR_SCRAPE_QUEUE_ENABLED:
+                self.send_error(404, "Creator scrape queue disabled")
+                return
+            try:
+                data = self._read_json_body()
+                scope = (data.get("scope") or "job").strip().lower()
+                q = CreatorScrapeQueue.get()
+                if scope == "all_pending":
+                    n = q.cancel_all_pending()
+                    cancel_running = bool(data.get("cancel_running"))
+                    if cancel_running:
+                        _sync.request_cancel()
+                    self._send_json(
+                        {
+                            "status": "ok",
+                            "cancelled_pending": n,
+                            "cancel_running": cancel_running,
+                        }
+                    )
+                    return
+                job_id = (data.get("job_id") or "").strip()
+                if not job_id:
+                    self.send_error(400, "job_id required")
+                    return
+                job = q.get_job(job_id)
+                if not job:
+                    self.send_error(404, "job not found")
+                    return
+                if job.get("status") == "pending":
+                    q.cancel_pending(job_id)
+                    self._send_json({"status": "cancelled", "job_id": job_id})
+                    return
+                if job.get("status") == "running":
+                    _sync.request_cancel()
+                    self._send_json({"status": "cancelling", "job_id": job_id})
+                    return
+                self._send_json(
+                    {"status": "already_terminal", "job_id": job_id, "job_status": job.get("status")}
+                )
+            except (ValueError, json.JSONDecodeError):
+                self.send_error(400, "Invalid JSON body")
+            return
+
+        if path == "/api/scrape/pause":
+            if not CREATOR_SCRAPE_QUEUE_ENABLED:
+                self.send_error(404, "Creator scrape queue disabled")
+                return
+            try:
+                data = self._read_json_body()
+            except Exception:
+                data = {}
+            reason = ""
+            if isinstance(data, dict):
+                reason = str(data.get("reason") or "Paused by user")
+            CreatorScrapeQueue.get().pause(reason or "Paused by user")
+            self._send_json({"status": "paused", "pause_reason": reason or "Paused by user"})
+            return
+
+        if path == "/api/scrape/resume":
+            if not CREATOR_SCRAPE_QUEUE_ENABLED:
+                self.send_error(404, "Creator scrape queue disabled")
+                return
+            CreatorScrapeQueue.get().resume()
+            started = _sync.try_drain_creator_queue()
+            self._send_json({"status": "resumed", "drain_started": started})
+            return
+
         if path == "/api/sync/saved":
+            blocked = _creator_queue_blocks_oneshot()
+            if blocked:
+                self._send_json(blocked, 409)
+                return
             if _sync.is_running():
                 self._send_json({"status": "busy", "message": "Sync already running"}, 409)
                 return
 
             def job(log, on_rate_limit=None):
-                dl = InstagramDownloader(log=log, on_rate_limit=on_rate_limit)
+                dl = InstagramDownloader(
+                    log=log,
+                    on_rate_limit=on_rate_limit,
+                    should_cancel=_sync.is_cancel_requested,
+                )
                 return dl.sync_saved_posts()
 
             if _sync.start_job("saved", job):
@@ -288,21 +461,56 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 data = self._read_json_body()
                 username = data.get("username", "").strip()
-                max_posts = int(data.get("max_posts", 50))
+                max_posts = int(data.get("max_posts", DEFAULT_MAX_POSTS_PER_CREATOR))
+                mode = (data.get("mode") or "bounded").strip().lower()
+                if mode not in ("bounded", "full"):
+                    mode = "bounded"
+                deep = data.get("deep", True)
+                if isinstance(deep, str):
+                    deep = deep.lower() in ("1", "true", "yes")
+                deep = bool(deep) if mode == "full" else False
+                if "include_videos" in data:
+                    include_videos = bool(data.get("include_videos"))
+                else:
+                    include_videos = INCLUDE_VIDEOS_DEFAULT
                 if not username:
                     self.send_error(400, "username required")
+                    return
+                blocked = _creator_queue_blocks_oneshot()
+                if blocked:
+                    self._send_json(blocked, 409)
                     return
                 if _sync.is_running():
                     self._send_json({"status": "busy"}, 409)
                     return
 
                 def job(log, on_rate_limit=None):
-                    dl = InstagramDownloader(log=log, on_rate_limit=on_rate_limit)
-                    return dl.sync_creator_feed(username, max_posts=max_posts)
+                    dl = InstagramDownloader(
+                        log=log,
+                        on_rate_limit=on_rate_limit,
+                        should_cancel=_sync.is_cancel_requested,
+                    )
+                    mp = max_posts
+                    if mode == "full" and (mp is None or mp <= 0):
+                        mp = FULL_SCRAPE_MAX_POSTS
+                    return dl.sync_creator_feed(
+                        username,
+                        max_posts=mp,
+                        include_videos=include_videos,
+                        mode=mode,
+                        deep=deep,
+                    )
 
                 if _sync.start_job("creator", job):
                     self._send_json(
-                        {"status": "started", "job_type": "creator", "username": username}
+                        {
+                            "status": "started",
+                            "job_type": "creator",
+                            "username": username,
+                            "include_videos": include_videos,
+                            "mode": mode,
+                            "deep": deep,
+                        }
                     )
                 else:
                     self._send_json({"status": "busy"}, 409)
@@ -320,6 +528,10 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 )
                 max_posts = int(data.get("max_posts", 20))
                 min_media_count = int(data.get("min_media_count", 5))
+                if "include_videos" in data:
+                    include_videos = bool(data.get("include_videos"))
+                else:
+                    include_videos = INCLUDE_VIDEOS_DEFAULT
                 keywords_raw = data.get("keywords", "")
                 if isinstance(keywords_raw, list):
                     keywords = keywords_raw
@@ -327,17 +539,26 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     keywords = [k.strip() for k in keywords_raw.split(",") if k.strip()]
                 else:
                     keywords = None
+                blocked = _creator_queue_blocks_oneshot()
+                if blocked:
+                    self._send_json(blocked, 409)
+                    return
                 if _sync.is_running():
                     self._send_json({"status": "busy"}, 409)
                     return
 
                 def job(log, on_rate_limit=None):
-                    dl = InstagramDownloader(log=log, on_rate_limit=on_rate_limit)
+                    dl = InstagramDownloader(
+                        log=log,
+                        on_rate_limit=on_rate_limit,
+                        should_cancel=_sync.is_cancel_requested,
+                    )
                     return dl.sync_following(
                         max_accounts=max_accounts,
                         max_posts_per_account=max_posts,
                         keywords=keywords,
                         min_media_count=min_media_count,
+                        include_videos=include_videos,
                     )
 
                 if _sync.start_job("following", job):
@@ -348,6 +569,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                             "max_accounts": max_accounts,
                             "accounts_per_day": max_accounts,
                             "keywords": keywords,
+                            "include_videos": include_videos,
                         }
                     )
                 else:
@@ -370,7 +592,16 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     if not paths:
                         paths = None
                 if _batch.is_running():
-                    self._send_json({"status": "busy"}, 409)
+                    self._send_json({"status": "busy", "message": "Batch already running"}, 409)
+                    return
+                if _classify.is_running():
+                    self._send_json(
+                        {
+                            "status": "busy",
+                            "message": "Classify job is using the vision model — wait or cancel it first",
+                        },
+                        409,
+                    )
                     return
                 pending = _batch.list_uncached(creator=creator, force=force, paths=paths)
                 if limit:
@@ -393,6 +624,54 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     self._send_json({"status": "busy"}, 409)
             except (ValueError, json.JSONDecodeError):
                 self.send_error(400, "Invalid JSON body")
+            return
+
+        if path == "/api/classify/start":
+            try:
+                data = self._read_json_body()
+                creator = (data.get("creator") or "").strip().lstrip("@")
+                if not creator:
+                    self.send_error(400, "creator required")
+                    return
+                force = bool(data.get("force", False))
+                only_unscored = data.get("only_unscored", True)
+                if isinstance(only_unscored, str):
+                    only_unscored = only_unscored.lower() in ("1", "true", "yes")
+                only_unscored = bool(only_unscored)
+                include_videos = data.get("include_videos", INCLUDE_VIDEOS_DEFAULT)
+                if isinstance(include_videos, str):
+                    include_videos = include_videos.lower() in ("1", "true", "yes")
+                include_videos = bool(include_videos)
+                limit = data.get("limit")
+                limit = int(limit) if limit is not None else None
+                result = _classify.start(
+                    creator,
+                    force=force,
+                    include_videos=include_videos,
+                    limit=limit,
+                    only_unscored=only_unscored,
+                )
+                status = result.get("status")
+                code = 200
+                if status == "busy":
+                    code = 409
+                elif status == "ollama_down":
+                    code = 503
+                elif status == "bad_creator":
+                    code = 400
+                self._send_json(result, code)
+            except (ValueError, json.JSONDecodeError):
+                self.send_error(400, "Invalid JSON body")
+            return
+
+        if path == "/api/classify/cancel":
+            ok = _classify.cancel()
+            self._send_json(
+                {
+                    "status": "cancelling" if ok else "idle",
+                    "running": _classify.is_running(),
+                }
+            )
             return
 
         if path == "/api/creator/style/rebuild":
@@ -755,11 +1034,33 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             unanalyzed = unanalyzed_raw in ("1", "true", "yes")
             favorite_raw = (query.get("favorite", ["false"])[0] or "").lower()
             favorite_only = favorite_raw in ("1", "true", "yes")
+            sexy_raw = (query.get("sexy", ["false"])[0] or "").lower()
+            sexy_only = sexy_raw in ("1", "true", "yes")
+            reject_raw = (query.get("reject", ["false"])[0] or "").lower()
+            reject_only = reject_raw in ("1", "true", "yes")
+            unscored_raw = (query.get("unscored", ["false"])[0] or "").lower()
+            unscored_only = unscored_raw in ("1", "true", "yes")
+            glam_min = None
+            glam_max = None
+            if sexy_only:
+                glam_min = GLAM_SEXY_MIN
+            glam_raw = query.get("glam_min", [None])[0]
+            if glam_raw is not None and str(glam_raw).strip() != "":
+                try:
+                    glam_min = int(glam_raw)
+                except ValueError:
+                    pass
+            glam_max_raw = query.get("glam_max", [None])[0]
+            if glam_max_raw is not None and str(glam_max_raw).strip() != "":
+                try:
+                    glam_max = int(glam_max_raw)
+                except ValueError:
+                    pass
             media_type = (query.get("media_type", ["all"])[0] or "all").lower()
             if media_type not in ("video", "photo"):
                 media_type = None
             sort = (query.get("sort", ["name"])[0] or "name").lower()
-            if sort not in ("name", "newest", "oldest"):
+            if sort not in ("name", "newest", "oldest", "glam"):
                 sort = "name"
             try:
                 offset = int(query.get("offset", ["0"])[0] or 0)
@@ -778,6 +1079,10 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 unanalyzed=unanalyzed,
                 favorite_only=favorite_only,
                 media_type=media_type,
+                glam_min=glam_min,
+                glam_max=glam_max,
+                unscored_only=unscored_only,
+                reject_only=reject_only,
                 sort=sort,
                 limit=limit,
                 offset=offset,
@@ -850,9 +1155,43 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(_sync.get_status())
             return
 
+        if path == "/api/scrape/status":
+            if not CREATOR_SCRAPE_QUEUE_ENABLED:
+                self.send_error(404, "Creator scrape queue disabled")
+                return
+            snap = CreatorScrapeQueue.get().status_snapshot()
+            snap["enabled"] = True
+            snap["sync"] = _sync.get_status()
+            self._send_json(snap)
+            return
+
         if path == "/api/prompt/batch/status":
             status = _batch.get_status()
             status["pending"] = len(_batch.list_uncached())
+            self._send_json(status)
+            return
+
+        if path == "/api/classify/status":
+            status = _classify.get_status()
+            creator = status.get("creator")
+            if creator and not status.get("running"):
+                # Include remaining unscored for resume UX
+                try:
+                    status["pending"] = len(
+                        _classify.list_pending(
+                            creator,
+                            force=False,
+                            include_videos=bool(status.get("include_videos", True)),
+                        )
+                    )
+                except Exception:
+                    status["pending"] = 0
+            elif status.get("running"):
+                total = int(status.get("total") or 0)
+                done = int(status.get("completed") or 0)
+                status["pending"] = max(0, total - done)
+            else:
+                status["pending"] = 0
             self._send_json(status)
             return
 

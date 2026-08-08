@@ -1,48 +1,51 @@
-# 🪄 PromptStudio - AI Image Prompt Extractor & Creator Studio
+# PromptStudio
 
-**PromptStudio** is a dark-mode web application and **AI Vision Reverse-Engineering Engine** that analyzes local creator photo archives (`~/Pictures/InstagramSaved`) and uses **Ollama Multimodal AI Vision (`moondream`)** to generate highly specific, photorealistic prompts for Stable Diffusion, Flux.1, Midjourney, and ComfyUI.
+Local **AI Vision Prompt Studio** for Instagram creator photo archives.
 
----
+Analyzes images under `~/Pictures/InstagramSaved` with **Ollama** (default `qwen2.5vl:7b`), builds photorealistic prompts for Stable Diffusion / Flux / Midjourney / ComfyUI, and manages scrape → gallery → generate in one dark glass UI.
 
-## ✨ Key Features
+## Features
 
-- **🤖 Real Ollama AI Vision (`moondream`):** Inspects image pixels directly via Base64 payload to produce unique, authentic prompts for every photo.
-- **💎 Dark Glassmorphic Web UI:** Built with HSL tailored colors (`#8b5cf6`, `#ec4899`, `#06b6d4`), Google Fonts (`Outfit`, `Inter`, `Fira Code`), and responsive masonry photo grids.
-- **🔍 Interactive AI Prompt Inspector Lightbox:** Click any photo to inspect its positive prompt, negative prompt, visual hashtags (`#full-body`, `#bikini`, `#sunset`), and diffusion parameters (Sampler, Steps, CFG Scale, Aspect Ratio).
-- **📋 1-Click Copy Buttons:** Copy Positive Prompt, Negative Prompt, or the Full Generation Bundle with instant toast notifications.
-- **🗑️ Photo Deletion with Confirmation Modal:** Click the dustbin icon to safely delete unwanted photos from disk storage after confirming via modal.
-- **📁 Creator Folder Creation & Image Uploads:** Create new creator subfolders and upload images (`.jpg`, `.png`, `.webp`) directly to your archive.
-- **🔎 Prompt Descriptor Search:** Search your entire 1,135+ photo archive by prompt keywords (e.g. search `bikini`, `sunset`, `35mm`, `poolside`).
+- Ollama two-stage vision (`v2-structured`): structured JSON → erotic rewrite → Flux/SDXL/Pony exports
+- Glassmorphic gallery: search prompts/tags, favorites, sort, media type, infinite scroll, thumbs
+- Lightbox: edit prompts, history restore, Mode E, ComfyUI pro generate (side-by-side)
+- Instagram sync: saved posts, creator feed, following bulk (anti-ban pacing + resume)
+- Safe delete, upload, creator folders, batch analyze
 
----
+## Quickstart
 
-## 🛠️ Quickstart Guide
-
-### 1. Prerequisites
-- Python 3.10+ installed
-- [Ollama](https://ollama.com) installed with `moondream` model:
-  ```powershell
-  ollama pull moondream
-  ```
-
-### 2. Launch the Application
-Open PowerShell or Command Prompt in the repository folder:
+**Prereqs:** Python 3.10+ (dev on 3.14 Windows), [Ollama](https://ollama.com) with vision model:
 
 ```powershell
-cd .
+ollama pull qwen2.5vl:7b
+pip install -r requirements.txt
 py server.py
 ```
 
-### 3. Open Web UI
-Navigate your browser to:
-👉 **`http://localhost:5000`**
+Open **http://localhost:5000**
 
----
+Optional: ComfyUI at `http://127.0.0.1:8188` for generate loop.
 
-## 📚 Comprehensive Documentation Suite
+## Docs (start here)
 
-- **[System Architecture](file:///./docs/architecture.md):** Architectural design, component specs, and data flow diagrams.
-- **[API Reference Specification](file:///./docs/api.md):** Complete HTTP endpoint schemas, request/response JSON, and query parameters.
-- **[Troubleshooting & Environment Setup](file:///./docs/troubleshooting.md):** Setup guide, Ollama service management, port conflicts, and cache maintenance.
-- **[Agent Guidelines](file:///./docs/agent.md):** Operational guidelines and context for AI coding agents.
-- **[Workspace Rules](file:///./AGENTS.md):** Root AGENTS rules file.
+| Doc | Purpose |
+|-----|---------|
+| **[docs/context.md](docs/context.md)** | **Agent/dev map** — package, data, API, task→file (read first) |
+| [docs/api.md](docs/api.md) | HTTP contracts |
+| [docs/architecture.md](docs/architecture.md) | Components & flows |
+| [docs/instagram_downloader.md](docs/instagram_downloader.md) | Sync & anti-ban |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Setup & failures |
+| [docs/roadmap.md](docs/roadmap.md) | Phases done / optional next |
+| [AGENTS.md](AGENTS.md) | Hard rules for AI agents |
+| [scripts/README.md](scripts/README.md) | CLI wrappers |
+
+## Layout
+
+```
+server.py                 # entry
+promptstudio/             # all application logic
+  config.py server/ storage/ prompts/ scraping/ comfy/
+scripts/                  # thin CLIs
+index.html style.css app.js
+docs/
+```
