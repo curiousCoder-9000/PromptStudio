@@ -185,6 +185,24 @@ class CreatorScrapeQueue:
             names.update(self._queued_sources_unlocked())
         return sorted(names)
 
+    def _pausable_lane_names(self) -> set:
+        """Every lane a global pause must reach. Caller MUST hold self._lock.
+
+        Registered sources included, so a lane created *after* the pause still
+        inherits it. Lazy import: the registry is itself lazy, so this does not
+        drag in instaloader or probe for the gallery-dl binary.
+        """
+        names = set(self._data.get("lanes") or {})
+        names.update(self._queued_sources_unlocked())
+        names.add(DEFAULT_SOURCE)
+        try:
+            from promptstudio.scraping.sources import known_sources
+
+            names.update(known_sources())
+        except Exception:
+            pass
+        return names
+
     def queued_sources(self) -> List[str]:
         """Sources named by pending or running jobs.
 
@@ -247,10 +265,16 @@ class CreatorScrapeQueue:
         with self._lock:
             if source is not None:
                 return bool(self._lane(source).get("paused"))
-            lanes = self._data.get("lanes") or {}
-            if not lanes:
+            # Over every *known* lane, not just the ones with a record — one
+            # paused lane must not read as "the queue is paused" while two
+            # others are idle and runnable.
+            stored = self._data.get("lanes") or {}
+            names = self._pausable_lane_names()
+            if not names:
                 return False
-            return all(bool(lane.get("paused")) for lane in lanes.values())
+            return all(
+                bool((stored.get(name) or {}).get("paused")) for name in names
+            )
 
     def pause(
         self,
@@ -270,7 +294,12 @@ class CreatorScrapeQueue:
             if source is not None:
                 targets = [self._lane(source)]
             else:
-                for name in set(self._lane_names()) | {DEFAULT_SOURCE}:
+                # Materialise every lane the user could plausibly mean, not just
+                # the ones that happen to exist. Lanes are created lazily, so a
+                # global pause on an empty queue used to record only Instagram —
+                # and enqueueing X right afterwards found a fresh, unpaused lane
+                # and started scraping seconds after the user pressed Pause.
+                for name in self._pausable_lane_names():
                     self._lane(name)
                 targets = list((self._data.get("lanes") or {}).values())
             for lane in targets:
@@ -389,12 +418,17 @@ class CreatorScrapeQueue:
                     "status": "already_running" if st == "running" else "already_pending",
                     "job": copy.deepcopy(existing),
                     "position": self._position_unlocked(existing.get("id")),
-                    "queue_depth": self._pending_count_unlocked(),
+                    "queue_depth": self._pending_count_unlocked(src),
                 }
 
-            if self._pending_count_unlocked() >= CREATOR_SCRAPE_MAX_PENDING:
+            # Per lane, not global. A shared cap couples independent lanes:
+            # 50 queued Instagram creators would make it impossible to enqueue
+            # a single Reddit job, even with the Reddit lane completely idle.
+            # Everything else here is already lane-scoped (position, pause,
+            # cancel, stats), and the cap exists to bound one lane's backlog.
+            if self._pending_count_unlocked(src) >= CREATOR_SCRAPE_MAX_PENDING:
                 raise ValueError(
-                    f"Queue full (max {CREATOR_SCRAPE_MAX_PENDING} pending)"
+                    f"The {src} queue is full (max {CREATOR_SCRAPE_MAX_PENDING} pending)"
                 )
 
             job = {
@@ -427,7 +461,9 @@ class CreatorScrapeQueue:
                 "status": "queued",
                 "job": copy.deepcopy(job),
                 "position": self._position_unlocked(job["id"]),
-                "queue_depth": self._pending_count_unlocked(),
+                # Same lane the position counts within, or "3 of 50" would be
+                # comparing a lane-local rank against a cross-lane total.
+                "queue_depth": self._pending_count_unlocked(src),
                 "upgraded_from_latest": opts.upgraded_from_latest,
             }
 
@@ -648,13 +684,23 @@ class CreatorScrapeQueue:
             }
 
     def _lane_snapshots_unlocked(self) -> Dict[str, Dict[str, Any]]:
+        """Every lane, whether or not it has a record yet.
+
+        Two reasons it cannot be "only the lanes in the file". The flat `paused`
+        beside this is the union — "nothing can run" — and pausing one lane
+        creates exactly one record, which made `all(paused)` trivially true
+        while the other platforms were idle and runnable. And the UI needs a
+        complete picture to show "X paused" next to an idle Instagram.
+
+        Reads with `.get`, never `_lane()`: reporting status must not mutate the
+        thing it reports on.
+        """
         out: Dict[str, Dict[str, Any]] = {}
-        names = set(self._data.get("lanes") or {})
-        for job in self._data.get("jobs") or []:
-            if isinstance(job, dict) and job.get("status") in ("pending", "running"):
-                names.add(job_key(job)[0])
-        for name in sorted(names):
-            lane = self._lane(name)
+        stored = self._data.get("lanes") or {}
+        for name in sorted(self._pausable_lane_names()):
+            lane = stored.get(name)
+            if not isinstance(lane, dict):
+                lane = self._default_lane()
             pending = self._ordered_pending_unlocked(name)
             running = self._running_unlocked(name)
             out[name] = {

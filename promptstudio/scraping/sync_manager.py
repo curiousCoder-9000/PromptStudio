@@ -146,7 +146,10 @@ class SyncManager:
         to drain into, or it sits pending forever instead of failing cleanly
         with "Unknown source".
         """
-        names = set(self._lanes)
+        # Snapshot under the lock: another thread creating a lane mid-iteration
+        # would otherwise raise "dictionary changed size during iteration".
+        with self._job_lock:
+            names = set(self._lanes)
         try:
             from promptstudio.scraping.sources import known_sources
 
@@ -377,19 +380,26 @@ class SyncManager:
         """
         lane_name = normalize_source(source)
         owner = lease_owner_for(lane_name)
-        # One session per platform, one job per lane. Taken before the status
-        # flip so two simultaneous requests cannot both observe running=False.
-        blocker = LEASES.acquire([scrape_resource(lane_name)], owner)
-        if blocker:
-            holder = LEASES.holder(blocker) or "another job"
-            self.last_refusal = f"{holder} is using the {lane_name} session"
-            return False
 
+        # Status check and lease acquire happen under ONE lock, in that order.
+        #
+        # The obvious shape — acquire, then check status, release on refusal —
+        # is wrong here, because owners are per lane and `LeaseRegistry.acquire`
+        # treats re-acquiring your own lease as success. A second job on a busy
+        # lane would therefore "acquire" the lease its predecessor is holding,
+        # fail the status check, and release a lease belonging to a job that is
+        # still scraping. Checking status first means the refusal never reaches
+        # the lease at all, and holding `_job_lock` across both keeps two
+        # simultaneous requests from each observing running=False.
         with self._job_lock:
             lane = self._lane(lane_name)
             if lane.status.get("running"):
-                LEASES.release(owner)
                 self.last_refusal = f"A {lane_name} sync is already running"
+                return False
+            blocker = LEASES.acquire([scrape_resource(lane_name)], owner)
+            if blocker:
+                holder = LEASES.holder(blocker) or "another job"
+                self.last_refusal = f"{holder} is using the {lane_name} session"
                 return False
             self.last_refusal = ""
             lane.cancel.clear()

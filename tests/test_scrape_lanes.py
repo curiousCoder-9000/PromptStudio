@@ -242,6 +242,104 @@ def test_paused_lane_does_not_block_other_lanes(manager, queue, gates):
     assert _wait(lambda: not manager.is_running("reddit"))
 
 
+def test_global_pause_covers_a_lane_that_does_not_exist_yet(queue, gates):
+    """Pause, then enqueue a source with no lane record — it must not start.
+
+    Lanes are created lazily, so a global pause with an empty queue used to
+    materialise only the Instagram lane. Enqueueing X afterwards found a fresh,
+    unpaused lane and ran immediately, right after the user pressed Pause.
+    """
+    queue.pause("user pressed pause")
+    assert queue.is_paused("x") is True, "a new lane must inherit the global pause"
+
+    queue.enqueue("kaya", source="x")
+    assert queue.is_paused("x") is True
+    assert queue.is_paused() is True
+
+
+def test_a_new_lane_after_a_targeted_pause_is_not_paused(queue):
+    """The inverse: pausing only Instagram must not pause anything else."""
+    queue.pause("rate limited", source="instagram")
+    assert queue.is_paused("x") is False
+
+
+def test_refused_start_does_not_release_the_running_lease(manager, queue, gates):
+    """A same-lane refusal must not free the lease the live job is holding.
+
+    Owners are per lane, and `LeaseRegistry.acquire` treats re-acquiring your
+    own lease as success — so the refusal path fell through to `release(owner)`
+    and dropped a lease belonging to a job that was still scraping.
+    """
+    queue.enqueue("someone", source="instagram")
+    manager.try_drain_creator_queue("instagram")
+    assert _wait(gates["instagram"].entered.is_set)
+    assert LEASES.holder(scrape_resource("instagram")) == "sync:instagram"
+
+    assert manager.start_job("saved", lambda log, orl=None: {}, source="instagram") is False
+    assert manager.is_running("instagram") is True
+    assert LEASES.holder(scrape_resource("instagram")) == "sync:instagram", (
+        "the running job must still hold its lease"
+    )
+
+    gates["instagram"].release.set()
+    assert _wait(lambda: not manager.is_running("instagram"))
+    assert LEASES.holder(scrape_resource("instagram")) is None
+
+
+def test_lease_is_freed_exactly_once_after_a_refusal(manager, queue, gates):
+    """After the refusal, the lane must still be acquirable by the next job."""
+    queue.enqueue("first", source="x")
+    manager.try_drain_creator_queue("x")
+    assert _wait(gates["x"].entered.is_set)
+    manager.start_job("saved", lambda log, orl=None: {}, source="x")
+
+    gates["x"].release.set()
+    assert _wait(lambda: not manager.is_running("x"))
+    assert LEASES.acquire([scrape_resource("x")], "someone_new") is None
+
+
+def test_one_paused_lane_does_not_report_the_queue_as_paused(queue):
+    """Flat `paused` means "nothing can run", so one paused lane must not set it.
+
+    The union used to be computed over only the lanes that happened to exist in
+    the file. Pausing X created exactly one lane, so `all(paused)` was trivially
+    true — and a legacy client (and the modal Pause button) saw the whole queue
+    as paused while Instagram and Reddit were idle and perfectly runnable.
+    """
+    queue.pause("cookies expired", source="x")
+
+    assert queue.is_paused("x") is True
+    assert queue.is_paused() is False, "only one of three lanes is paused"
+
+    snap = queue.status_snapshot()
+    assert snap["paused"] is False
+    assert set(snap["lanes"]) >= {"instagram", "x", "reddit"}, (
+        "status must describe every lane, not just the ones with state"
+    )
+    assert snap["lanes"]["instagram"]["paused"] is False
+    assert snap["lanes"]["x"]["paused"] is True
+
+
+def test_flat_paused_is_true_only_when_every_lane_is(queue):
+    for name in SOURCES:
+        queue.pause("stop", source=name)
+    assert queue.is_paused() is True
+    assert queue.status_snapshot()["paused"] is True
+
+
+def test_status_snapshot_does_not_persist_lanes_as_a_side_effect(queue):
+    """Reading status must not mutate the file it is reporting on."""
+    import json
+
+    queue.enqueue("nina", source="instagram")  # forces a first write
+    queue.status_snapshot()
+    with open(queue.path, "r", encoding="utf-8") as fh:
+        on_disk = json.load(fh)
+    assert set(on_disk.get("lanes") or {}) <= {"instagram"}, (
+        f"a read created lane records: {sorted(on_disk.get('lanes') or {})}"
+    )
+
+
 def test_resume_is_lane_scoped(queue):
     queue.pause("stop everything")
     queue.resume("x")
@@ -429,6 +527,22 @@ def test_queue_position_is_scoped_to_its_own_lane(queue):
     queue.enqueue("b", source="instagram")
     out = queue.enqueue("c", source="x")
     assert out["position"] == 1, "first in the X lane, not third overall"
+
+
+def test_pending_cap_is_per_lane(queue):
+    """A full Instagram queue must not block enqueueing on an idle lane."""
+    from promptstudio.config import CREATOR_SCRAPE_MAX_PENDING
+
+    for i in range(CREATOR_SCRAPE_MAX_PENDING):
+        queue.enqueue(f"ig_{i}", source="instagram")
+
+    with pytest.raises(ValueError, match="instagram queue is full"):
+        queue.enqueue("one_too_many", source="instagram")
+
+    out = queue.enqueue("kaya", source="x")
+    assert out["status"] == "queued", "a full IG lane must not close the X lane"
+    assert out["queue_depth"] == 1, "depth must count this lane, not the archive"
+    assert out["position"] == 1
 
 
 def test_cancel_all_pending_can_target_one_lane(queue):
