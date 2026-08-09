@@ -54,6 +54,7 @@ from promptstudio.evalset import (
     load_results,
     meets_target,
     merge_labels,
+    render_compare_page,
     render_label_page,
     render_photo_preview,
     save_labels,
@@ -367,6 +368,26 @@ def cmd_report(args) -> None:
     _print_report(args.name, args.against, kind=args.kind)
 
 
+def cmd_view(args) -> None:
+    """Write a visual card grid (truth vs two runs) and optionally open it."""
+    kind = args.kind
+    primary = args.name
+    against = args.against or ("legacy" if primary == "ordinal" else "")
+    if not against:
+        print("--against is required (baseline run name, e.g. legacy)")
+        sys.exit(2)
+    out = os.path.join(EVAL_DIR, f"compare-{kind}-{primary}-vs-{against}.html")
+    try:
+        path = render_compare_page(kind, primary, against, out)
+    except ValueError as e:
+        print(e)
+        sys.exit(1)
+    print(f"Wrote {path}")
+    print(f"Open:  {file_url(path)}")
+    if args.open:
+        _open_page(path)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -421,6 +442,23 @@ def main() -> None:
     rep.add_argument("--against", default="", help="baseline run to diff against")
     add_kind(rep)
     rep.set_defaults(func=cmd_report)
+
+    v = sub.add_parser(
+        "view",
+        help="visual HTML compare: truth vs two runs (opens browser)",
+    )
+    v.add_argument("--name", default="ordinal", help="candidate run (default: ordinal)")
+    v.add_argument("--against", default="legacy", help="baseline run (default: legacy)")
+    v.add_argument(
+        "--open", action="store_true", default=True,
+        help="open in browser (default on)",
+    )
+    v.add_argument(
+        "--no-open", action="store_false", dest="open",
+        help="only write the HTML file",
+    )
+    add_kind(v, default="photo")
+    v.set_defaults(func=cmd_view)
 
     args = ap.parse_args()
     args.func(args)

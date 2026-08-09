@@ -2260,6 +2260,9 @@ function setInspectorMode(mode) {
     if (elements.regeneratePromptBtn) {
         elements.regeneratePromptBtn.style.display = isVideo ? 'none' : '';
     }
+    if (elements.copyFullBundleBtn) {
+        elements.copyFullBundleBtn.style.display = isVideo ? 'none' : '';
+    }
 }
 
 function resetPromptPanel() {

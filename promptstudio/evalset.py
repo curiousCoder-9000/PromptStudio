@@ -687,3 +687,269 @@ def render_label_page(
     )
     atomic_write_text(out_path, html)
     return out_path
+
+
+# ── visual compare report ────────────────────────────────────────────
+
+_COMPARE_HTML = """<!doctype html>
+<meta charset="utf-8">
+<title>Eval compare — __KIND_PLAIN__</title>
+<style>
+ :root{color-scheme:dark;--bg:#0d0d12;--card:#16161f;--line:#2a2a36;--text:#e8e8f0;
+       --muted:#9a9ab0;--ok:#34d399;--bad:#f87171;--warn:#fbbf24;--accent:#8b5cf6;--cyan:#06b6d4}
+ *{box-sizing:border-box}
+ body{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--text)}
+ header{position:sticky;top:0;z-index:5;background:rgba(13,13,18,.92);backdrop-filter:blur(10px);
+        border-bottom:1px solid var(--line);padding:14px 18px}
+ h1{margin:0 0 4px;font-size:18px;font-weight:650}
+ .sub{color:var(--muted);font-size:12px;margin-bottom:12px}
+ .metrics{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+ .metric{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;min-width:110px}
+ .metric b{display:block;font-size:18px;font-variant-numeric:tabular-nums}
+ .metric span{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+ .metric.up b{color:var(--ok)} .metric.down b{color:var(--bad)}
+ .filters{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+ .filters button,.filters select{background:var(--card);color:var(--text);border:1px solid var(--line);
+        border-radius:8px;padding:6px 10px;cursor:pointer;font:inherit}
+ .filters button.on{background:var(--accent);border-color:var(--accent)}
+ .filters input{background:var(--card);color:var(--text);border:1px solid var(--line);
+        border-radius:8px;padding:6px 10px;min-width:180px;font:inherit}
+ .count{margin-left:auto;color:var(--muted);font-size:12px}
+ main{padding:16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+ .card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;
+       display:flex;flex-direction:column}
+ .card.miss-both{border-color:rgba(248,113,113,.45)}
+ .card.miss-leg{border-color:rgba(251,191,36,.4)}
+ .card.miss-ord{border-color:rgba(6,182,212,.4)}
+ .card.hit-both{border-color:rgba(52,211,153,.35)}
+ .thumb{aspect-ratio:3/4;background:#0a0a0e;display:flex;align-items:center;justify-content:center;overflow:hidden}
+ .thumb img{width:100%;height:100%;object-fit:cover}
+ .body{padding:10px 12px 12px;display:flex;flex-direction:column;gap:6px}
+ .path{font:11px ui-monospace,monospace;color:var(--muted);word-break:break-all;line-height:1.3}
+ .row{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px}
+ .lbl{color:var(--muted)}
+ .pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;
+       font:12px ui-monospace,monospace;border:1px solid var(--line);background:#1b1b24}
+ .pill.ok{color:var(--ok);border-color:rgba(52,211,153,.35);background:rgba(52,211,153,.08)}
+ .pill.bad{color:var(--bad);border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.08)}
+ .pill.na{color:var(--muted)}
+ .true{font-weight:650;color:#c4b5fd}
+ .note{font-size:11px;color:var(--muted);font-style:italic}
+ .empty{grid-column:1/-1;text-align:center;color:var(--muted);padding:40px}
+ kbd{background:#2a2a36;border-radius:4px;padding:1px 5px;font:11px ui-monospace,monospace}
+</style>
+<header>
+  <h1>Eval compare · <span id="kind"></span></h1>
+  <div class="sub" id="sub"></div>
+  <div class="metrics" id="metrics"></div>
+  <div class="filters">
+    <button data-f="all" class="on">All</button>
+    <button data-f="disagree">Models disagree</button>
+    <button data-f="ord_better">Ordinal fixed</button>
+    <button data-f="ord_worse">Ordinal broke</button>
+    <button data-f="both_wrong">Both wrong</button>
+    <button data-f="both_right">Both right</button>
+    <button data-f="leg_wrong">Legacy wrong</button>
+    <button data-f="ord_wrong">Ordinal wrong</button>
+    <select id="trueTier"><option value="">True tier: any</option>
+      <option value="0">0</option><option value="1">1</option><option value="2">2</option>
+      <option value="3">3</option><option value="4">4</option></select>
+    <input id="q" type="search" placeholder="Filter path…">
+    <span class="count" id="count"></span>
+  </div>
+</header>
+<main id="grid"></main>
+<script>
+const ROWS = __ROWS__;
+const META = __META__;
+const ANCHORS = __ANCHORS__;
+const KIND = __KIND__;
+
+const el = id => document.getElementById(id);
+el("kind").textContent = KIND;
+el("sub").textContent =
+  `${META.n} labelled · model ${META.model || "?"} · ` +
+  `legacy ${META.legacy_name || "legacy"} vs ${META.ordinal_name || "ordinal"} · ` +
+  `open over file:// next to sheets/`;
+
+function pct(x){ return x == null ? "—" : (100*x).toFixed(1) + "%"; }
+el("metrics").innerHTML = [
+  ["Legacy glam acc", pct(META.legacy_glam_acc), ""],
+  ["Ordinal glam acc", pct(META.ordinal_glam_acc),
+    META.ordinal_glam_acc > META.legacy_glam_acc ? "up" :
+    META.ordinal_glam_acc < META.legacy_glam_acc ? "down" : ""],
+  ["Ordinal tier exact", pct(META.ordinal_tier_acc), ""],
+  ["Ordinal within±1", pct(META.ordinal_within_one), ""],
+  ["Legacy top share", pct(META.legacy_top), ""],
+  ["Ordinal top share", pct(META.ordinal_top),
+    META.ordinal_top < META.legacy_top ? "up" :
+    META.ordinal_top > META.legacy_top ? "down" : ""],
+  ["Ordinal fixed", META.ord_better, "up"],
+  ["Ordinal broke", META.ord_worse, "down"],
+].map(([l,v,c]) => `<div class="metric ${c}"><b>${v}</b><span>${l}</span></div>`).join("");
+
+let filter = "all";
+function match(r) {
+  const q = el("q").value.trim().toLowerCase();
+  if (q && !r.rel_path.toLowerCase().includes(q)) return false;
+  const tt = el("trueTier").value;
+  if (tt !== "" && String(r.true_tier) !== tt) return false;
+  if (filter === "all") return true;
+  if (filter === "disagree") return r.leg_glam !== r.ord_glam;
+  if (filter === "ord_better") return !r.leg_ok && r.ord_ok;
+  if (filter === "ord_worse") return r.leg_ok && !r.ord_ok;
+  if (filter === "both_wrong") return !r.leg_ok && !r.ord_ok;
+  if (filter === "both_right") return r.leg_ok && r.ord_ok;
+  if (filter === "leg_wrong") return !r.leg_ok;
+  if (filter === "ord_wrong") return !r.ord_ok;
+  return true;
+}
+
+function pill(val, ok, na) {
+  if (na || val == null || val < 0) return `<span class="pill na">—</span>`;
+  return `<span class="pill ${ok ? "ok" : "bad"}">${val}</span>`;
+}
+
+function cardClass(r) {
+  if (r.leg_ok && r.ord_ok) return "hit-both";
+  if (!r.leg_ok && !r.ord_ok) return "miss-both";
+  if (!r.leg_ok) return "miss-leg";
+  return "miss-ord";
+}
+
+function render() {
+  const rows = ROWS.filter(match);
+  el("count").textContent = `${rows.length} / ${ROWS.length}`;
+  const g = el("grid");
+  if (!rows.length) {
+    g.innerHTML = `<div class="empty">No items match this filter</div>`;
+    return;
+  }
+  g.innerHTML = rows.map(r => {
+    const anchor = ANCHORS[String(r.true_tier)] || "";
+    const src = r.sheet ? ("sheets/" + r.sheet) : "";
+    return `<article class="card ${cardClass(r)}" data-path="${r.rel_path}">
+      <div class="thumb">${src ? `<img loading="lazy" src="${src}" alt="">` : ""}</div>
+      <div class="body">
+        <div class="path">${r.rel_path}</div>
+        <div class="row"><span class="lbl">You (tier → glam)</span>
+          <span class="true">T${r.true_tier} → G${r.true_glam}</span></div>
+        <div class="row"><span class="lbl">Legacy glam</span>
+          ${pill("G"+r.leg_glam, r.leg_ok, r.leg_glam < 0)}</div>
+        <div class="row"><span class="lbl">Ordinal tier→glam</span>
+          ${pill("T"+(r.ord_tier>=0?r.ord_tier:"?")+" → G"+r.ord_glam, r.ord_ok, r.ord_glam < 0)}</div>
+        ${r.note ? `<div class="note">${r.note}</div>` : ""}
+        <div class="note">${anchor}</div>
+      </div>
+    </article>`;
+  }).join("");
+}
+
+document.querySelectorAll(".filters button[data-f]").forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll(".filters button[data-f]").forEach(x => x.classList.remove("on"));
+    b.classList.add("on");
+    filter = b.dataset.f;
+    render();
+  };
+});
+el("q").oninput = render;
+el("trueTier").onchange = render;
+render();
+</script>
+"""
+
+
+def render_compare_page(
+    kind: str,
+    primary: str,
+    against: str,
+    out_path: str,
+) -> str:
+    """Build a visual card grid: truth vs two named runs side by side.
+
+    Images load from ``sheets/`` relative to the HTML file (same layout as the
+    labelling page), so open it over ``file://`` from ``_eval/``.
+    """
+    labels = [i for i in load_labels(labels_file(kind)) if i.is_labelled()]
+    primary_results, primary_meta = load_results(primary, kind)
+    against_results, against_meta = load_results(against, kind)
+    if not labels:
+        raise ValueError(f"no labelled {kind}s — run sample + label first")
+    if not primary_results:
+        raise ValueError(f"no results '{primary}' for {kind}")
+    if not against_results:
+        raise ValueError(f"no results '{against}' for {kind}")
+
+    by_pri = {r.rel_path: r for r in primary_results}
+    by_agt = {r.rel_path: r for r in against_results}
+    m_pri = compute_metrics(labels, primary_results)
+    m_agt = compute_metrics(labels, against_results)
+
+    # primary = ordinal (the candidate), against = legacy (baseline) is the
+    # usual call shape; card fields are named for that, but any two names work.
+    rows: List[Dict[str, Any]] = []
+    ord_better = ord_worse = 0
+    for item in labels:
+        leg = by_agt.get(item.rel_path)
+        ord_r = by_pri.get(item.rel_path)
+        true_glam = item.true_glam()
+        leg_glam = int(leg.glam_score) if leg and leg.ok else -1
+        ord_glam = int(ord_r.glam_score) if ord_r and ord_r.ok else -1
+        ord_tier = int(ord_r.predicted_tier) if ord_r and ord_r.ok else -1
+        leg_ok = leg_glam == true_glam and leg_glam >= 0
+        ord_ok = ord_glam == true_glam and ord_glam >= 0
+        if ord_ok and not leg_ok:
+            ord_better += 1
+        if leg_ok and not ord_ok:
+            ord_worse += 1
+        rows.append(
+            {
+                "rel_path": item.rel_path,
+                "sheet": os.path.basename(item.sheet) if item.sheet else "",
+                "true_tier": item.true_exposure,
+                "true_glam": true_glam,
+                "leg_glam": leg_glam,
+                "ord_glam": ord_glam,
+                "ord_tier": ord_tier,
+                "leg_ok": leg_ok,
+                "ord_ok": ord_ok,
+                "note": item.note or "",
+                "stratum": item.stratum,
+            }
+        )
+
+    # Sort: disagreements first, then path — easiest to browse failures.
+    rows.sort(
+        key=lambda r: (
+            0 if (r["leg_ok"] != r["ord_ok"]) else (1 if not r["leg_ok"] else 2),
+            r["rel_path"],
+        )
+    )
+
+    meta = {
+        "n": len(rows),
+        "model": primary_meta.get("model") or against_meta.get("model"),
+        "legacy_name": against,
+        "ordinal_name": primary,
+        "legacy_glam_acc": m_agt.glam_accuracy,
+        "ordinal_glam_acc": m_pri.glam_accuracy,
+        "ordinal_tier_acc": m_pri.exact_accuracy if m_pri.tier_scored else None,
+        "ordinal_within_one": m_pri.within_one if m_pri.tier_scored else None,
+        "legacy_top": m_agt.top_score_share,
+        "ordinal_top": m_pri.top_score_share,
+        "ord_better": ord_better,
+        "ord_worse": ord_worse,
+    }
+    html = (
+        _COMPARE_HTML.replace("__ROWS__", json.dumps(rows, ensure_ascii=False))
+        .replace("__META__", json.dumps(meta, ensure_ascii=False))
+        .replace(
+            "__ANCHORS__",
+            json.dumps({str(k): v for k, v in TIER_ANCHORS.items()}, ensure_ascii=False),
+        )
+        .replace("__KIND__", json.dumps(kind))
+        .replace("__KIND_PLAIN__", kind)
+    )
+    atomic_write_text(out_path, html)
+    return out_path

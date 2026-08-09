@@ -68,7 +68,9 @@ log = get_logger(__name__)
 
 CLASSIFY_PROMPT_VERSION = "v2-skin-exposure"
 CLASSIFY_REEL_PROMPT_VERSION = "v3-reel-frames"
-CLASSIFY_FRAME_V4_VERSION = "v4-ordinal-frame"
+# v2: sharper 3↔4 boundary. Photo eval on a frozen 120-set showed v1 never
+# predicted tier 4 (17/17 true-4 → 3) and piled ~81% of glam into bucket 2.
+CLASSIFY_FRAME_V4_VERSION = "v4-ordinal-frame-v2"
 CLASSIFY_SHEET_VERSION = "v4-reel-sheet"
 
 # exposure_tier (0-4) -> glam_score (0-3). Tier 3 is the Sexy-filter boundary.
@@ -88,13 +90,26 @@ _NO_FRAMES_ERRORS = frozenset({"no_usable_reel_frames", "no frame scores"})
 # absent panel exactly like tier 0, so the reading stays correct.
 _SHEET_UNREADABLE = "sheet_panels_unreadable"
 
+# Anchors shared by single-frame ordinal and reel contact-sheet prompts.
+# Written as hard decision rules, not soft vibes — VLMs collapse adjacent
+# tiers unless the 3↔4 and 2↔3 cuts are named as garment classes.
 _TIER_ANCHORS = (
-    "     0 = no woman present\n"
-    "     1 = fully modest: everyday coverage, no skin beyond face and hands\n"
-    "     2 = normal fashion: some skin (arms, neck, shoulders), fitted but not revealing\n"
-    "     3 = revealing: midriff, cleavage, bare back or thighs visible; short dress or "
-    "skirt; tight fit that emphasises the figure\n"
-    "     4 = maximally revealing: bikini, swimwear, lingerie, bodysuit, sheer or mesh\n"
+    "     0 = no woman present (title card, logo, scenery, men only, food, meme)\n"
+    "     1 = fully modest: opaque everyday clothes; skin only face/hands/maybe wrists; "
+    "no cleavage, no bare midriff, no short hem\n"
+    "     2 = normal fashion: street/casual/office wear with SOME skin (bare arms, "
+    "shoulders, collarbone, modest neckline) OR fitted clothing that does NOT show "
+    "midriff, deep cleavage, or upper thigh. Sundress with normal length, jeans+top, "
+    "blouse, sweater, jacket over a top — stay at 2 even if stylish or glamorous\n"
+    "     3 = revealing daywear (NOT swim/lingerie): crop top with bare midriff, "
+    "deep cleavage or plunging neckline, bare back, mini skirt/dress with upper thigh, "
+    "tight bodycon that clearly emphasises bust/hips, sideboob through clothes, "
+    "cut-outs on the torso. Still street/party clothes, not beachwear or underwear\n"
+    "     4 = maximally revealing / undress-class garments — USE 4 when ANY of these "
+    "apply: bikini, microbikini, monokini, swimsuit, swimwear, lingerie, bra+panties, "
+    "bodysuit worn as underwear, sheer or mesh over bare skin, see-through fabric, "
+    "pasties, underboob as the look, towel/robe open on bare body, nude or near-nude. "
+    "If it would be worn at a beach, pool, or as underwear → 4, not 3\n"
 )
 
 CLASSIFY_PROMPT = (
@@ -150,18 +165,37 @@ CLASSIFY_REEL_PROMPT = (
 )
 
 # Single-frame ordinal prompt: cascade confirmation, and photos when opted in.
+# Tuned against photo eval (120 labelled): v1 never emitted tier 4 and pushed
+# true-tier-2 into 3. Decision order below is deliberate — check 4 before 3.
 CLASSIFY_FRAME_V4_PROMPT = (
-    "Rate the outfit in this image for a personal fashion KEEP filter. "
-    "Return ONLY valid JSON:\n"
+    "Rate the outfit in this still image for a personal fashion KEEP filter. "
+    "Return ONLY valid JSON.\n"
     '  "has_woman": boolean — a woman / female-presenting person is a main subject. '
     "false for title cards, logos, text-only frames, scenery, food, cartoons, or men only.\n"
-    '  "exposure_tier": integer 0-4 for how much the outfit reveals:\n'
+    '  "exposure_tier": integer 0-4. Decide in this order (stop at first match):\n'
+    "    (1) If no woman as main subject → 0.\n"
+    "    (2) If garment is swimwear, bikini, lingerie, sheer/mesh over skin, or near-nude → 4.\n"
+    "    (3) Else if midriff bare, deep cleavage, bare back, mini with upper thigh, or "
+    "bodycon clearly selling the figure → 3.\n"
+    "    (4) Else if some skin (arms/shoulders/collarbone) or stylish fitted daywear "
+    "without the reveals in (3) → 2.\n"
+    "    (5) Else fully covered everyday clothes → 1.\n"
+    "Tier definitions:\n"
     + _TIER_ANCHORS
-    + '  "figure_visible": boolean — the bust or body shape is discernible\n'
-    '  "confidence": number 0.0-1.0\n'
-    '  "brief_reason": short phrase naming the garment\n'
+    + "Hard rules (override vibes):\n"
+    "  - Bikini / swimsuit / lingerie / sheer lingerie-look = ALWAYS 4. Never call these 3.\n"
+    "  - Glamorous red carpet or tight dress with cleavage/high slit = 3, not 4 "
+    "(unless fabric is sheer or it is actual lingerie).\n"
+    "  - Crop top + jeans with bare stomach = 3, not 2.\n"
+    "  - Bare shoulders or sleeveless top with covered midriff and normal neckline = 2, not 3.\n"
+    "  - Do NOT skip tier 4. The scale has five steps; using only 0–3 is wrong.\n"
+    '  "figure_visible": boolean — bust or body shape is clearly discernible\n'
+    '  "confidence": number 0.0-1.0 — lower when cropped, dark, or garment class is unclear\n'
+    '  "brief_reason": short phrase naming the garment class (e.g. "bikini set", '
+    '"crop top + jeans", "crewneck sweater")\n'
     "Judge only clothing and body. Ignore captions, stickers, watermarks and UI chrome. "
-    "If ambiguous choose the LOWER tier and report confidence below 0.5. Do not inflate tiers."
+    "Between 2 and 3, require a listed reveal for 3. Between 3 and 4, require an "
+    "undress-class garment for 4."
 )
 
 
