@@ -111,6 +111,8 @@ class BatchPromptManager:
                 return photos
             pending = []
             for photo in photos:
+                if not photo["filename"].lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                    continue
                 entry = cache.get(photo["rel_path"], photo["filename"])
                 if not entry or entry.get("parameters", {}).get("vision_engine") != ENGINE_ID:
                     pending.append(photo)
@@ -121,6 +123,8 @@ class BatchPromptManager:
             return photos
         pending = []
         for photo in photos:
+            if not photo["filename"].lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                continue
             rel = photo["rel_path"]
             entry = cache.get(rel, photo["filename"])
             if not entry or entry.get("parameters", {}).get("vision_engine") != ENGINE_ID:
