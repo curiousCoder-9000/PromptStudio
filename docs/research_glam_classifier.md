@@ -7,7 +7,7 @@
 | **Date** | 2026-08-09 |
 | **Status** | Research / Draft — no code written |
 | **Audience** | Engineers working on `outfit_classifier.py`, `video_frames.py`, `classify_job.py` |
-| **Related** | [`design_reel_classifier.md`](design_reel_classifier.md) (PR1–PR3, implemented) |
+| **Related** | [`design_reel_classifier_v2.md`](design_reel_classifier_v2.md) (current) · [`design_reel_classifier.md`](design_reel_classifier.md) (V1, superseded — still the source for the pre-V2 measurements cited below) |
 
 ---
 
@@ -30,7 +30,7 @@ The glam classifier scores every archived media file 0–3 with one Ollama visio
 | § | Finding | Status |
 |---|---------|--------|
 | 2.1 | Score barely discriminates | **Partly** — reels rescored with the v4 ordinal prompt (generosity language removed, tier→glam thresholds). Photos still run the v2 generous prompt behind `CLASSIFY_PHOTO_ORDINAL=0`. Unmeasurable until §2.2 |
-| 2.2 | No ground truth, no metric | **Open** — eval set deferred. Partly mitigated: the classify job now reports `score_hist`, `top_score_share` and `unscored_rate`, so a collapsed distribution is visible per run |
+| 2.2 | No ground truth, no metric | **Harness landed, labels pending** — `promptstudio/evalset.py` + `scripts/eval_reel_classifier.py` (sample / label / run / report) cover stratified sampling, ordinal accuracy, reveal recall and distribution entropy. Nothing is measured until the ~120 reels are actually labelled. The classify job also reports `score_hist`, `top_score_share` and `unscored_rate`, which catches a collapsed distribution without labels |
 | 2.3 | Two definitions of "keep" | **Resolved** — `matches_keep` is now `glam_score >= GLAM_SEXY_MIN` |
 | 2.4 | DB discards all but the int | **Open** — `set_glam_score` still drops `has_woman` / `sexy` |
 | 2.5 | Prompt versioning inert | **Open** — `list_pending` still skips on `glam_score >= 0`; no `prompt_version` column |
@@ -324,7 +324,7 @@ Persist per-shot scores in the existing `evidence` dict (`:323`) so a bad call i
 
 | Stage | Work | Gate / rationale |
 |-------|------|------------------|
-| **0 — Measure** | Stratified eval set (~300 items), labels seeded from `photos.favorite` + `_trash`, topped up via a keyboard-labelling contact sheet. Metric = **average precision** (ranking), not accuracy. Freeze as a fixture under `tests/`. | **Deferred by decision.** Everything below is unmeasurable without it. It also produces the training labels Stage 3 needs, so it is not overhead. |
+| **0 — Measure** | ~~Build the harness~~ **done** — `scripts/eval_reel_classifier.py sample / label / run / report`, results in `<archive>/_eval/`. **Labelling the sample is still outstanding.** | Everything below is unmeasurable until the labels exist. They are also Stage 3's training set, so this is not overhead. |
 | **1 — Plumbing** | ~~§3.1 `format` schema + `keep_alive`; retry/backoff~~ **done**; `glam_error` + `prompt_version` DB columns and `set_glam_score` flags **still open**. | Cheap, no modelling risk. The DB half is what turns Stage 2 rescoring into a query, and it is the part that did not land. |
 | **2 — Scoring** | §3.3 ordinal rubric **done** (as `exposure_tier` 0–4 mapped onto the 0–3 column, not `glam_100`); ~~unify `matches_keep`~~ **done**; §3.2 logprobs and the continuous score **open**. Optionally §3.4 model swap, measured against Stage 0. | Saturation is addressed for reels only. Without `glam_100` the gallery threshold is still 4 buckets, so re-tuning it remains coarse. |
 | **3 — Learned head** | §3.5 SigLIP-2 embeddings cached in DB + logistic head on Stage 0 labels. VLM demoted to explainer + boundary cases. | **Open.** Biggest accuracy and cost win. Depends on Stage 0 labels. |
@@ -332,7 +332,7 @@ Persist per-shot scores in the existing `evidence` dict (`:323`) so a bad call i
 
 **Stage 0 is the gate.** Not because the other work is hard, but because the current state is what happens without it: a detector tuned three times for recall, used as a ranker, with no instrument that would have shown when it stopped separating anything.
 
-**Update (2026-08-09):** Stages 1, 2 and 4 landed in part *before* Stage 0, by decision. The reel path is materially better *designed* than it was — but that is the only claim available, because the instrument that would turn it into "better" still does not exist. The `top_score_share` counter added to the classify job is a thin substitute: it catches a distribution collapsing again, which is the specific regression that went unnoticed last time, but says nothing about whether the scores are right.
+**Update (2026-08-09):** Stages 1, 2 and 4 landed in part *before* Stage 0, by decision. The Stage 0 *harness* has since landed too, but no labels have been recorded — so the reel path is still only demonstrably better *designed*, not measurably better. The `top_score_share` counter on the classify job is a thin substitute: it catches a distribution collapsing again, which is the specific regression that went unnoticed last time, but says nothing about whether the scores are right. Labelling the sample is the one remaining step that converts every claim in this document from argument to evidence.
 
 ---
 

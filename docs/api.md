@@ -17,6 +17,7 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/creator/style/rebuild` | Rebuild style from cached prompts |
 | `GET` | `/api/following` | Accounts from local `following_list.json` |
 | `GET` | `/api/photos` | Paginated (`offset`, `limit`, `creator`, `search`, `unanalyzed`, `favorite`, `sexy`, `glam_min`, `media_type`, `sort`) |
+| `GET` | `/api/media/detail` | Reel/photo inspector (`path`): caption, glam verdict, IG link — not vision prompts |
 | `GET` | `/api/prompt` | Vision prompt bundle (`path`, optional `refresh`) — includes `history` |
 | `PUT` | `/api/prompt` | Save edited positive/negative prompts + tags |
 | `POST` | `/api/prompt/restore` | Restore a prior prompt from history |

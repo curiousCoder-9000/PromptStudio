@@ -167,6 +167,7 @@ tests/
 | `IG_POST_RANK` | `1` | Rank feed posts by caption/reel signals |
 | `IG_POST_SCAN_FACTOR` | `3` | Scan window = max_posts × factor |
 | `GLAM_SEXY_MIN` | `2` | Gallery `sexy=1` minimum glam_score |
+| `CLASSIFY_*` | see `.env.example` | Reel contact sheet, frame ranking, retries, prompt vocabulary |
 | `PROMPTSTUDIO_TRASH` | `1` | Soft delete to `_trash/` (`0` = immediate unlink) |
 | `PROMPTSTUDIO_TRASH_DAYS` | `30` | Retention window for `purge expired` |
 | `INSTAGRAM_SESSION_USER` | _(empty)_ | Instaloader session name — set in `.env` |

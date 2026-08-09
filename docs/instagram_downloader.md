@@ -49,9 +49,9 @@ py scripts/backfill_glam_scores.py
 
 **Feed ranking (PR3):** when `IG_POST_RANK=1` (default), each creator feed scans up to `max_posts * IG_POST_SCAN_FACTOR` (default 3×) posts, scores captions/reels/carousels, then downloads the top `max_posts`.
 
-**Glam scores (PR4):** `glam_score` 0–3 on `archive.db` + sidecars. Gallery **Sexy** chip → `?sexy=1` (`glam_score >= 2`).
+**Glam scores (PR4):** `glam_score` 0–3 on `archive.db` + sidecars. Gallery **Sexy** chip → `?sexy=1` (`glam_score >= 2`). The DB also keeps the verdict behind the score — `glam_has_woman`, `glam_sexy`, `glam_confidence`, `glam_tier`, `glam_prompt_version`, `glam_error` — so "re-score what the old prompt judged" and "retry what failed" are queries, not archive walks.
 
-**Reels / videos (classify):** smart frame pick (time-based, drop dark/blurry) + reel vision prompt (`v3-reel-frames`); default **1** Ollama call per reel (`CLASSIFY_REEL_VISION_MAX`). Companion cover JPG used when present. Gallery video thumbs use the same best-frame ranker (not first frame only). See [design_reel_classifier.md](design_reel_classifier.md).
+**Reels / videos (classify):** the whole clip is sampled (tail included), segmented by shot cut, and composed into a 3×3 **contact sheet** of timestamped frames scored in **one** vision call (`v4-reel-sheet`). The peak panel is re-read at full resolution when the tier sits on the Sexy-filter boundary, the model is unsure, or a high tier came from the final shot — so the median is 1–2 calls (`CLASSIFY_REEL_VISION_MAX`, default 2). A companion cover JPG is used only when frame extraction fails outright; it is never a short-circuit, because covers show the "before" outfit. Gallery video thumbs reuse the classifier's peak-panel timestamp when it has run, else the cover, else the best-ranked frame. Set `CLASSIFY_REEL_SHEET=0` for the legacy per-frame path. See [design_reel_classifier_v2.md](design_reel_classifier_v2.md).
 
 Export following list first (includes biographies for keyword filters):
 
