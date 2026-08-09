@@ -1,8 +1,9 @@
 # Plan: Align photo ordinal classifier with your holdout labels (esp. T4)
 
-**Status:** Analysis complete — awaiting approval before code changes.  
+**Status:** Analysis complete — **implementation deferred**.  
 **Gold labels:** `c:\Users\archi\Downloads\labels-photo (1).jsonl` (120 photos, seed 20260810)  
-**Baseline run:** `holdout-ordinal` = `v4-ordinal-frame-v6` vs `holdout-legacy`
+**Baseline run:** `holdout-ordinal` = `v4-ordinal-frame-v6` vs `holdout-legacy`  
+**Eval diary (completed runs):** [eval_photo_ordinal_log.md](eval_photo_ordinal_log.md)
 
 ---
 
