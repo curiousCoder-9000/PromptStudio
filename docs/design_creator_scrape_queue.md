@@ -25,13 +25,13 @@ This design introduces a **user-facing creator scrape job queue**: type a handle
 
 | Piece | Role today |
 |-------|------------|
-| [`promptstudio/scraping/sync_manager.py`](promptstudio/scraping/sync_manager.py) `SyncManager` | Singleton; `start_job(job_type, fn)` returns `False` if `running`; persists `sync_status.json`; no pending queue; **no cancel**; stuck `running: true` survives process death |
-| [`promptstudio/scraping/downloader.py`](promptstudio/scraping/downloader.py) `InstagramDownloader.sync_creator_feed` | Two-phase: collect up to `max_posts * POST_SCAN_FACTOR` candidates, optional rank, download top `max_posts`; catch-up stop after `CATCH_UP_STREAK` consecutive complete posts; blocking `time.sleep` for delays/backoff |
-| [`promptstudio/scraping/queue.py`](promptstudio/scraping/queue.py) `FollowingQueue` | Multi-day bulk for **following list** with daily budget; **not** a singleton; `save()` is plain `json.dump` with **no** lock and **no** atomic replace—pattern to improve on, not copy blindly |
-| [`promptstudio/scraping/classify_job.py`](promptstudio/scraping/classify_job.py) `ClassifyJobManager` | Cooperative cancel Event, busy status dict, mutual exclusion with batch prompts |
-| [`promptstudio/server/handler.py`](promptstudio/server/handler.py) | `POST /api/creator/create`, `POST /api/sync/creator\|saved\|following`, `GET /api/sync/status`; no `/api/sync/cancel` |
-| [`promptstudio/storage/archive.py`](promptstudio/storage/archive.py) `ArchiveStore.create_creator` | Sanitizes handle, `os.makedirs`; does **not** return created-vs-existed; does **not** reject `EXCLUDED_FOLDERS` |
-| Frontend [`app.js`](app.js) | Sync modal: handle + hard-coded `max_posts: 50`; polls `/api/sync/status` |
+| [`promptstudio/scraping/sync_manager.py`](../promptstudio/scraping/sync_manager.py) `SyncManager` | Singleton; `start_job(job_type, fn)` returns `False` if `running`; persists `sync_status.json`; no pending queue; **no cancel**; stuck `running: true` survives process death |
+| [`promptstudio/scraping/downloader.py`](../promptstudio/scraping/downloader.py) `InstagramDownloader.sync_creator_feed` | Two-phase: collect up to `max_posts * POST_SCAN_FACTOR` candidates, optional rank, download top `max_posts`; catch-up stop after `CATCH_UP_STREAK` consecutive complete posts; blocking `time.sleep` for delays/backoff |
+| [`promptstudio/scraping/queue.py`](../promptstudio/scraping/queue.py) `FollowingQueue` | Multi-day bulk for **following list** with daily budget; **not** a singleton; `save()` is plain `json.dump` with **no** lock and **no** atomic replace—pattern to improve on, not copy blindly |
+| [`promptstudio/scraping/classify_job.py`](../promptstudio/scraping/classify_job.py) `ClassifyJobManager` | Cooperative cancel Event, busy status dict, mutual exclusion with batch prompts |
+| [`promptstudio/server/handler.py`](../promptstudio/server/handler.py) | `POST /api/creator/create`, `POST /api/sync/creator\|saved\|following`, `GET /api/sync/status`; no `/api/sync/cancel` |
+| [`promptstudio/storage/archive.py`](../promptstudio/storage/archive.py) `ArchiveStore.create_creator` | Sanitizes handle, `os.makedirs`; does **not** return created-vs-existed; does **not** reject `EXCLUDED_FOLDERS` |
+| Frontend [`app.js`](../app.js) | Sync modal: handle + hard-coded `max_posts: 50`; polls `/api/sync/status` |
 
 ### Pain points
 
@@ -1027,15 +1027,15 @@ Handler one-shot: if `queue.pending_count() > 0 and not queue.paused` → 409.
 
 ## References
 
-- [`docs/context.md`](docs/context.md), [`docs/api.md`](docs/api.md), [`docs/instagram_downloader.md`](docs/instagram_downloader.md), [`docs/architecture.md`](docs/architecture.md)
-- [`promptstudio/scraping/sync_manager.py`](promptstudio/scraping/sync_manager.py)
-- [`promptstudio/scraping/downloader.py`](promptstudio/scraping/downloader.py)
-- [`promptstudio/scraping/queue.py`](promptstudio/scraping/queue.py) — persistence ideas only; **no lock to copy**
-- [`promptstudio/scraping/classify_job.py`](promptstudio/scraping/classify_job.py)
-- [`promptstudio/server/handler.py`](promptstudio/server/handler.py)
-- [`promptstudio/config.py`](promptstudio/config.py)
-- [`promptstudio/storage/archive.py`](promptstudio/storage/archive.py)
-- [`scripts/sync_all_local_creators.py`](scripts/sync_all_local_creators.py) — multi-creator pacing reference; **not** migrated in this design
+- [`docs/context.md`](context.md), [`docs/api.md`](api.md), [`docs/instagram_downloader.md`](instagram_downloader.md), [`docs/architecture.md`](architecture.md)
+- [`promptstudio/scraping/sync_manager.py`](../promptstudio/scraping/sync_manager.py)
+- [`promptstudio/scraping/downloader.py`](../promptstudio/scraping/downloader.py)
+- [`promptstudio/scraping/queue.py`](../promptstudio/scraping/queue.py) — persistence ideas only; **no lock to copy**
+- [`promptstudio/scraping/classify_job.py`](../promptstudio/scraping/classify_job.py)
+- [`promptstudio/server/handler.py`](../promptstudio/server/handler.py)
+- [`promptstudio/config.py`](../promptstudio/config.py)
+- [`promptstudio/storage/archive.py`](../promptstudio/storage/archive.py)
+- [`scripts/sync_all_local_creators.py`](../scripts/sync_all_local_creators.py) — multi-creator pacing reference; **not** migrated in this design
 
 ---
 
