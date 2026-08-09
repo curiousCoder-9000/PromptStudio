@@ -83,6 +83,7 @@ _AUTH_PHRASES = (
 )
 _RATE_PHRASES = (
     "429",
+    " 429 ",
     "too many requests",
     "rate limit",
     "rate-limit",

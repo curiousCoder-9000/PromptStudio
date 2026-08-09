@@ -3,7 +3,7 @@
 .env.local
 .env.*.local
 !.env.example
-
+*.jpg
 *.log
 
 # ── Sessions & cookies (never commit — these are credentials) ────
