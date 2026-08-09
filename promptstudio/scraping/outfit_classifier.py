@@ -70,7 +70,10 @@ CLASSIFY_PROMPT_VERSION = "v2-skin-exposure"
 CLASSIFY_REEL_PROMPT_VERSION = "v3-reel-frames"
 # v2: restore tier 4 (bikini/lingerie). v3: stop dumping normal fashion into 3
 # (photo eval: v2 still sent 29/36 true-tier-2 → 3).
-CLASSIFY_FRAME_V4_VERSION = "v4-ordinal-frame-v3"
+# v4: any man present → tier 0 (discard couples/groups with men, not only men-only).
+# v5: unusable quality (blur / heavy distortion / pixelation) → tier 0.
+# v6: poster-like / flyer / graphic promo layouts → tier 0.
+CLASSIFY_FRAME_V4_VERSION = "v4-ordinal-frame-v6"
 CLASSIFY_SHEET_VERSION = "v4-reel-sheet"
 
 # exposure_tier (0-4) -> glam_score (0-3). Tier 3 is the Sexy-filter boundary.
@@ -94,7 +97,15 @@ _SHEET_UNREADABLE = "sheet_panels_unreadable"
 # Written as hard decision rules, not soft vibes — VLMs collapse adjacent
 # tiers unless the 3↔4 and 2↔3 cuts are named as garment classes.
 _TIER_ANCHORS = (
-    "     0 = no woman present (title card, logo, scenery, men only, food, meme)\n"
+    "     0 = DISCARD: no woman as main subject, OR any adult man / male person is "
+    "visible in the frame (couples, male friend in shot, group with men, men only), "
+    "OR title card / logo / scenery / food / meme / cartoon with no woman alone, "
+    "OR unusable image quality — heavy blur, motion blur, extreme soft-focus, "
+    "heavy pixelation/compression, warped or extreme lens distortion, heavy "
+    "glitch/artifact, out-of-focus subject, or face/outfit cannot be judged clearly, "
+    "OR poster-like / graphic layout — event flyer, promo poster, concert/tour poster, "
+    "magazine-cover graphic, collage with heavy typography, ad layout, or designed "
+    "graphic where text/layout dominates over a natural photo of a person\n"
     "     1 = fully modest: opaque everyday clothes; skin only face/hands/maybe wrists; "
     "no cleavage, no bare midriff, no short hem\n"
     "     2 = normal fashion: street/casual/office wear with SOME skin (bare arms, "
@@ -116,15 +127,18 @@ CLASSIFY_PROMPT = (
     "You classify Instagram photos for a personal KEEP filter. "
     "Be GENEROUS toward glamorous feminine photos — when unsure, prefer true. "
     "Return ONLY valid JSON:\n"
-    '  "has_woman": boolean — a woman / female-presenting person is a main subject\n'
+    '  "has_woman": boolean — a woman / female-presenting person is a main subject. '
+    "FALSE when any adult man is also clearly visible (couples/mixed groups = discard), "
+    "when the image is too blurry/distorted to judge, when it looks like a poster/flyer/graphic promo, "
+    "or for men-only, title cards, cartoons, food, memes, scenery, or no person.\n"
     '  "sexy_revealing_outfit": boolean — TRUE if clothing shows a good amount of skin '
     "or is glamorous/sexy: bikini, lingerie, bodysuit, crop top, low-cut top, "
     "cleavage, short dress/skirt, tight fit that highlights the body, swimwear, "
     "backless/revealing back, visible ass/butt/thighs/legs, sheer/mesh, lingerie-adjacent fashion, "
     "or stylish revealing outfits. "
     "TRUE even for cute/nice clothes if skin (shoulders, back, waist, midriff, thighs, buttocks, cleavage) shows. "
-    "FALSE only for fully modest everyday coverage, baggy opaque streetwear with no skin, "
-    "men-only, cartoons, food, memes, or no person.\n"
+    "FALSE for fully modest everyday coverage, baggy opaque streetwear with no skin, "
+    "any man in frame, heavy blur/distortion, poster/flyer graphics, men-only, cartoons, food, memes, or no person.\n"
     '  "good_breasts": boolean — TRUE when feminine bust/chest OR attractive body shape/figure '
     "(cleavage, shaped by top/bikini, soft curves, side/back view of figure) is visible. "
     "Do NOT require huge/massive/heavy breasts. Average-to-full, flattering, or attractive body outline is enough. "
@@ -172,9 +186,20 @@ CLASSIFY_FRAME_V4_PROMPT = (
     "Rate the outfit in this still image for a personal fashion KEEP filter. "
     "Return ONLY valid JSON.\n"
     '  "has_woman": boolean — a woman / female-presenting person is a main subject. '
-    "false for title cards, logos, text-only frames, scenery, food, cartoons, or men only.\n"
+    "false for title cards, logos, text-only frames, scenery, food, cartoons, or when "
+    "only men are present. true if a woman is a main subject even when a man also appears "
+    "(still set exposure_tier to 0 in that case).\n"
     '  "exposure_tier": integer 0-4. Decide in this order (stop at first match):\n'
-    "    (1) If no woman as main subject → 0.\n"
+    "    (1) If no woman as main subject → 0. "
+    "Also → 0 if ANY adult man / male-presenting person is visible in the frame "
+    "(boyfriend/couple shots, group photos with men, male friend in background). "
+    "Also → 0 if image quality is unusable: heavy blur, motion blur, extreme soft-focus, "
+    "heavy pixelation/compression mush, severe warping/distortion, heavy glitch, or the "
+    "face/outfit cannot be judged clearly. Mild Instagram filters or slight softness are OK. "
+    "Also → 0 if the image looks like a poster or graphic design: event/promo flyer, "
+    "concert poster, magazine-cover graphic, heavy text layout, collage-ad, or designed "
+    "promo art (not a natural portrait/fashion photo). "
+    "Only sharp enough, women-only, natural photos continue past this step.\n"
     "    (2) If garment is swimwear, bikini, lingerie, sheer/mesh over bare skin, or "
     "near-nude → 4.\n"
     "    (3) Else if AT LEAST ONE clear reveal is visible — bare midriff (stomach skin "
@@ -186,6 +211,12 @@ CLASSIFY_FRAME_V4_PROMPT = (
     "Tier definitions:\n"
     + _TIER_ANCHORS
     + "Hard rules (override vibes):\n"
+    "  - ANY man visible in the frame = ALWAYS tier 0. Couples and mixed groups are discard, "
+    "even if the woman's outfit would otherwise be 2–4.\n"
+    "  - Unusable quality (heavy blur / distortion / pixelation / unreadable subject) = "
+    "ALWAYS tier 0. Do not guess the outfit on a mushy or warped frame.\n"
+    "  - Poster-like / flyer / heavy graphic promo layout = ALWAYS tier 0, even if a "
+    "woman appears on the poster. Natural photos with a small watermark/sticker are OK.\n"
     "  - Bikini / swimsuit / lingerie / sheer lingerie-look = ALWAYS 4. Never call these 3.\n"
     "  - Most dresses, jumpsuits, jeans+top, blouses, sweaters = 2 even if glamorous, "
     "tight, or low-shoulder. Glamour alone is not tier 3.\n"
@@ -219,8 +250,11 @@ def reel_sheet_prompt(n_panels: int) -> str:
         '  "i": the panel number as captioned (1-based)\n'
         '  "has_woman": boolean — a woman / female-presenting person is a main subject in '
         "THAT panel. false for title cards, logos, text-only frames, scenery, food, cartoons, "
-        "or men only.\n"
-        '  "exposure_tier": integer 0-4 for how much the outfit in THAT panel reveals:\n'
+        "or when only men are present.\n"
+        '  "exposure_tier": integer 0-4 for how much the outfit in THAT panel reveals. '
+        "If ANY adult man is visible in THAT panel → 0 (couples/mixed groups discard). "
+        "If THAT panel is heavily blurred, distorted, pixelated, or the subject is unreadable → 0. "
+        "If THAT panel looks like a poster/flyer/graphic promo → 0:\n"
         + _TIER_ANCHORS
         + "Then, for the reel as a whole:\n"
         '  "peak_panel": panel number with the highest exposure_tier\n'

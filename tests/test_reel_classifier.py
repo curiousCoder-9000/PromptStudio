@@ -571,6 +571,7 @@ def test_structured_output_schema_is_sent(tmp_path, stub_vision):
 
 
 def test_photo_path_still_uses_the_legacy_prompt(monkeypatch, tmp_path):
+    """Legacy vocabulary when ordinal is forced off (env may default to 1)."""
     seen = {}
 
     def fake(image_path, prompt=oc.CLASSIFY_PROMPT, **kwargs):
@@ -587,7 +588,7 @@ def test_photo_path_still_uses_the_legacy_prompt(monkeypatch, tmp_path):
     photo = tmp_path / "p.jpg"
     cv2.imwrite(str(photo), np.full((40, 40, 3), SKIN_BGR, dtype=np.uint8))
 
-    verdict = oc.classify_image(str(photo))
+    verdict = oc.classify_image(str(photo), ordinal=False)
     assert seen["prompt"] == oc.CLASSIFY_PROMPT
     assert seen["schema"] is oc.LEGACY_FRAME_SCHEMA
     assert verdict.prompt_version == oc.CLASSIFY_PROMPT_VERSION

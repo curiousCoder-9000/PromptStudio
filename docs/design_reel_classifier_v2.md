@@ -149,7 +149,7 @@ Replace the two coupled booleans with one **anchored 0–4 exposure ordinal**, a
 
 | tier | anchor |
 |------|--------|
-| 0 | no woman — text card, logo, male-only, scenery, food, cartoon |
+| 0 | discard — no woman; any man present; unusable quality (blur, heavy distortion, pixelation); poster/flyer/graphic promo; text card, logo, scenery, food, cartoon |
 | 1 | fully modest — everyday coverage, no skin beyond face/hands |
 | 2 | normal fashion — some skin (arms, neck, shoulders), fitted but not revealing |
 | 3 | revealing — midriff / cleavage / back / thighs visible, short dress, tight fit emphasising figure |

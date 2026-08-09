@@ -67,7 +67,7 @@ LABELS_FILE = labels_file("reel")
 # What the labeller is asked for, mirroring the classifier's own vocabulary so
 # predictions and truth are directly comparable.
 TIER_ANCHORS = {
-    0: "no woman — title card, logo, scenery, men only",
+    0: "discard — no woman; any man present; unusable quality (blur/distortion); OR poster-like (event flyer, promo poster, graphic collage, heavy text layout, magazine cover graphic)",
     1: "fully modest — everyday coverage, no skin beyond face/hands",
     2: "normal fashion — some skin (arms, neck, shoulders), fitted",
     3: "revealing — midriff, cleavage, back, thighs; short dress; tight fit",
@@ -691,18 +691,47 @@ def render_label_page(
 
 # ── visual compare report ────────────────────────────────────────────
 
+# Short names for cards (full text is in the page legend).
+_TIER_SHORT = {
+    0: "discard (no woman / men / blur / poster)",
+    1: "fully modest",
+    2: "normal fashion",
+    3: "revealing",
+    4: "maximally revealing",
+}
+_GLAM_SHORT = {
+    0: "reject / no keep",
+    1: "modest keep",
+    2: "Sexy filter (border)",
+    3: "top glam bucket",
+}
+
 _COMPARE_HTML = """<!doctype html>
 <meta charset="utf-8">
 <title>Eval compare — __KIND_PLAIN__</title>
 <style>
  :root{color-scheme:dark;--bg:#0d0d12;--card:#16161f;--line:#2a2a36;--text:#e8e8f0;
-       --muted:#9a9ab0;--ok:#34d399;--bad:#f87171;--warn:#fbbf24;--accent:#8b5cf6;--cyan:#06b6d4}
+       --muted:#9a9ab0;--ok:#34d399;--bad:#f87171;--warn:#fbbf24;--accent:#8b5cf6;--cyan:#06b6d4;
+       --purple:#c4b5fd}
  *{box-sizing:border-box}
  body{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--text)}
- header{position:sticky;top:0;z-index:5;background:rgba(13,13,18,.92);backdrop-filter:blur(10px);
-        border-bottom:1px solid var(--line);padding:14px 18px}
+ header{position:sticky;top:0;z-index:5;background:rgba(13,13,18,.94);backdrop-filter:blur(10px);
+        border-bottom:1px solid var(--line);padding:14px 18px;max-height:72vh;overflow:auto}
  h1{margin:0 0 4px;font-size:18px;font-weight:650}
- .sub{color:var(--muted);font-size:12px;margin-bottom:12px}
+ .sub{color:var(--muted);font-size:12px;margin-bottom:10px}
+ .legend{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;
+         margin-bottom:12px;font-size:12.5px;line-height:1.55;color:#d4d4e0}
+ .legend h2{margin:0 0 8px;font-size:13px;font-weight:650;color:#fff}
+ .legend p{margin:0 0 8px}
+ .legend ul{margin:0 0 8px;padding-left:1.15rem}
+ .legend code{font:12px ui-monospace,monospace;background:#1b1b24;padding:1px 5px;border-radius:4px}
+ .map{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px;margin:8px 0}
+ .map div{background:#1b1b24;border:1px solid var(--line);border-radius:8px;padding:6px 8px;
+          font:12px ui-monospace,monospace}
+ .map b{color:var(--purple)}
+ .map span{color:var(--muted);display:block;font:11px system-ui,sans-serif;margin-top:2px}
+ .example{background:rgba(139,92,246,.1);border:1px solid rgba(139,92,246,.3);border-radius:8px;
+          padding:8px 10px;margin-top:8px}
  .metrics{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
  .metric{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px;min-width:110px}
  .metric b{display:block;font-size:18px;font-variant-numeric:tabular-nums}
@@ -715,33 +744,99 @@ _COMPARE_HTML = """<!doctype html>
  .filters input{background:var(--card);color:var(--text);border:1px solid var(--line);
         border-radius:8px;padding:6px 10px;min-width:180px;font:inherit}
  .count{margin-left:auto;color:var(--muted);font-size:12px}
- main{padding:16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+ .relabel-bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px;
+        padding:10px 12px;background:rgba(6,182,212,.08);border:1px solid rgba(6,182,212,.25);
+        border-radius:10px;font-size:12.5px}
+ .relabel-bar .hint{color:var(--muted);flex:1;min-width:200px}
+ .relabel-bar kbd{background:#2a2a36;border-radius:4px;padding:1px 5px;font:11px ui-monospace,monospace}
+ #dirtyCount{font-weight:650;color:var(--muted)}
+ #dirtyCount.has-edits{color:var(--warn)}
+ .btn-export{background:var(--cyan);color:#04222a;border:none;border-radius:8px;padding:7px 12px;
+        font:650 12.5px system-ui,sans-serif;cursor:pointer}
+ .btn-ghost{background:transparent;color:var(--text);border:1px solid var(--line);border-radius:8px;
+        padding:7px 12px;font:12.5px system-ui,sans-serif;cursor:pointer}
+ .tier-row{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:8px}
+ .tier-lbl{font-size:11px;color:var(--muted);margin-right:2px}
+ .tier-btn{width:32px;height:32px;border-radius:8px;border:1px solid var(--line);background:#1b1b24;
+        color:var(--text);font:650 13px ui-monospace,monospace;cursor:pointer}
+ .tier-btn:hover{border-color:var(--accent)}
+ .tier-btn.on{background:var(--accent);border-color:var(--accent);color:#fff}
+ .edited-badge{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:999px;font:11px system-ui,sans-serif;
+        background:rgba(251,191,36,.15);color:var(--warn);border:1px solid rgba(251,191,36,.4);vertical-align:middle}
+ .card.selected{outline:2px solid var(--cyan);outline-offset:2px;box-shadow:0 0 0 4px rgba(6,182,212,.15)}
+ main{padding:16px;display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;
-       display:flex;flex-direction:column}
+       display:flex;flex-direction:column;cursor:pointer}
  .card.miss-both{border-color:rgba(248,113,113,.45)}
  .card.miss-leg{border-color:rgba(251,191,36,.4)}
  .card.miss-ord{border-color:rgba(6,182,212,.4)}
  .card.hit-both{border-color:rgba(52,211,153,.35)}
  .thumb{aspect-ratio:3/4;background:#0a0a0e;display:flex;align-items:center;justify-content:center;overflow:hidden}
  .thumb img{width:100%;height:100%;object-fit:cover}
- .body{padding:10px 12px 12px;display:flex;flex-direction:column;gap:6px}
+ .body{padding:12px 12px 14px;display:flex;flex-direction:column;gap:8px}
  .path{font:11px ui-monospace,monospace;color:var(--muted);word-break:break-all;line-height:1.3}
- .row{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:12px}
- .lbl{color:var(--muted)}
- .pill{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;
-       font:12px ui-monospace,monospace;border:1px solid var(--line);background:#1b1b24}
- .pill.ok{color:var(--ok);border-color:rgba(52,211,153,.35);background:rgba(52,211,153,.08)}
- .pill.bad{color:var(--bad);border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.08)}
- .pill.na{color:var(--muted)}
- .true{font-weight:650;color:#c4b5fd}
+ .block{border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:#12121a}
+ .block.truth{border-color:rgba(167,139,250,.4);background:rgba(139,92,246,.08)}
+ .block.ok{border-color:rgba(52,211,153,.35)}
+ .block.bad{border-color:rgba(248,113,113,.4)}
+ .block-title{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);
+              margin-bottom:4px;display:flex;justify-content:space-between;gap:8px;align-items:center}
+ .block-title .who{font-weight:650;color:#e2e8f0;text-transform:none;letter-spacing:0;font-size:12px}
+ .verdict{font-size:11px;font-weight:650;padding:1px 7px;border-radius:999px;border:1px solid var(--line)}
+ .verdict.ok{color:var(--ok);border-color:rgba(52,211,153,.4);background:rgba(52,211,153,.1)}
+ .verdict.bad{color:var(--bad);border-color:rgba(248,113,113,.4);background:rgba(248,113,113,.1)}
+ .verdict.truth{color:var(--purple);border-color:rgba(167,139,250,.4);background:rgba(139,92,246,.12)}
+ .mainline{font-size:13px;font-weight:600;color:#f1f5f9;margin-bottom:2px}
+ .detail{font-size:12px;color:#cbd5e1}
+ .why{font-size:11.5px;color:var(--muted);margin-top:4px;line-height:1.4}
+ .codes{font:11.5px ui-monospace,monospace;color:#94a3b8;margin-top:3px}
  .note{font-size:11px;color:var(--muted);font-style:italic}
  .empty{grid-column:1/-1;text-align:center;color:var(--muted);padding:40px}
- kbd{background:#2a2a36;border-radius:4px;padding:1px 5px;font:11px ui-monospace,monospace}
+ details.legend-fold{margin-bottom:12px}
+ details.legend-fold > summary{cursor:pointer;color:var(--cyan);font-size:13px;font-weight:600;
+        list-style:none;margin-bottom:6px}
+ details.legend-fold > summary::-webkit-details-marker{display:none}
 </style>
 <header>
   <h1>Eval compare · <span id="kind"></span></h1>
   <div class="sub" id="sub"></div>
+
+  <details class="legend-fold" open>
+    <summary>How to read this page (tier vs glam) ▾</summary>
+    <div class="legend">
+      <h2>Two different scales</h2>
+      <p><b>Exposure tier (T0–T4)</b> — fine-grained outfit rating you labelled, and that the
+         <b>ordinal</b> model predicts. This is the human/VLM vocabulary.</p>
+      <p><b>Glam score (G0–G3)</b> — what the <b>gallery / Sexy filter</b> actually uses.
+         Tier is <i>collapsed</i> into glam with a fixed map (never changes):</p>
+      <div class="map" id="map"></div>
+      <ul>
+        <li><b>Your label</b> — ground truth. Shown as tier <i>and</i> the glam it maps to.</li>
+        <li><b>Legacy model</b> — old 3-boolean prompt. It only outputs <b>glam</b> (no tier).
+            Green = glam matches yours; red = wrong glam.</li>
+        <li><b>Ordinal model</b> — predicts a tier, then glam is derived via the map.
+            We score it on <b>glam match</b> (same axis as legacy). A wrong tier that still
+            maps to the right glam counts as OK for the product filter.</li>
+      </ul>
+      <div class="example">
+        <b>Example:</b> You said <code>T4 → G3</code> (maximally revealing → top glam bucket).<br>
+        Legacy <code>G3</code> with green = correct product score.<br>
+        Ordinal <code>T3 → G2</code> with red = model said “revealing daywear” (tier 3) which
+        maps to glam 2, so the Sexy filter treats it milder than you wanted (under by 1 glam).
+      </div>
+      <p style="margin-top:10px"><b>Fix a wrong label here:</b> click a card, press
+        <code>0</code>–<code>4</code> (or use the tier buttons). Then
+        <b>Export labels.jsonl</b> and import with the CLI (file:// pages cannot write the archive).</p>
+    </div>
+  </details>
+
   <div class="metrics" id="metrics"></div>
+  <div class="relabel-bar">
+    <span id="dirtyCount">0 edits</span>
+    <span class="hint">Click card · keys <kbd>0</kbd>–<kbd>4</kbd> set your tier · <kbd>j</kbd>/<kbd>k</kbd> prev/next · <kbd>e</kbd> export</span>
+    <button type="button" id="exportLabelsBtn" class="btn-export">Export labels.jsonl</button>
+    <button type="button" id="resetEditsBtn" class="btn-ghost">Reset edits</button>
+  </div>
   <div class="filters">
     <button data-f="all" class="on">All</button>
     <button data-f="disagree">Models disagree</button>
@@ -751,9 +846,11 @@ _COMPARE_HTML = """<!doctype html>
     <button data-f="both_right">Both right</button>
     <button data-f="leg_wrong">Legacy wrong</button>
     <button data-f="ord_wrong">Ordinal wrong</button>
-    <select id="trueTier"><option value="">True tier: any</option>
-      <option value="0">0</option><option value="1">1</option><option value="2">2</option>
-      <option value="3">3</option><option value="4">4</option></select>
+    <button data-f="edited">Edited only</button>
+    <select id="trueTier"><option value="">Your tier: any</option>
+      <option value="0">T0 discard (no woman / men / blur / poster)</option><option value="1">T1 modest</option>
+      <option value="2">T2 fashion</option><option value="3">T3 revealing</option>
+      <option value="4">T4 max</option></select>
     <input id="q" type="search" placeholder="Filter path…">
     <span class="count" id="count"></span>
   </div>
@@ -763,32 +860,108 @@ _COMPARE_HTML = """<!doctype html>
 const ROWS = __ROWS__;
 const META = __META__;
 const ANCHORS = __ANCHORS__;
+const TIER_SHORT = __TIER_SHORT__;
+const GLAM_SHORT = __GLAM_SHORT__;
+const TIER_TO_GLAM = __TIER_TO_GLAM__;
 const KIND = __KIND__;
+const STORE_KEY = "eval-compare-edits-" + KIND + "-" + (META.ordinal_name || "run");
 
 const el = id => document.getElementById(id);
 el("kind").textContent = KIND;
 el("sub").textContent =
-  `${META.n} labelled · model ${META.model || "?"} · ` +
-  `legacy ${META.legacy_name || "legacy"} vs ${META.ordinal_name || "ordinal"} · ` +
-  `open over file:// next to sheets/`;
+  `${META.n} labelled photos · model ${META.model || "?"} · ` +
+  `comparing ${META.legacy_name || "legacy"} (old) vs ${META.ordinal_name || "ordinal"} (new) · ` +
+  `green = product glam matches your label`;
+
+// Legend map tiles
+el("map").innerHTML = Object.entries(TIER_TO_GLAM).map(([t, g]) =>
+  `<div><b>T${t} → G${g}</b><span>${TIER_SHORT[t] || ""} → ${GLAM_SHORT[g] || ""}</span></div>`
+).join("");
+
+// ── mutable working copy + original snapshot for "edited" ──
+const ORIG = {};
+ROWS.forEach(r => {
+  r.orig_true_tier = r.true_tier;
+  ORIG[r.rel_path] = r.true_tier;
+});
+try {
+  const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "{}");
+  ROWS.forEach(r => {
+    if (saved[r.rel_path] != null && saved[r.rel_path] !== "") {
+      applyTier(r, Number(saved[r.rel_path]), false);
+    }
+  });
+} catch (e) {}
+
+function glamOfTier(t) {
+  const g = TIER_TO_GLAM[String(t)];
+  return g == null ? -1 : Number(g);
+}
+
+function applyTier(r, tier, persist) {
+  tier = Math.max(0, Math.min(4, Number(tier)));
+  r.true_tier = tier;
+  r.true_glam = glamOfTier(tier);
+  r.leg_ok = r.leg_glam >= 0 && r.leg_glam === r.true_glam;
+  r.ord_ok = r.ord_glam >= 0 && r.ord_glam === r.true_glam;
+  r.edited = r.true_tier !== ORIG[r.rel_path];
+  if (persist !== false) persistEdits();
+}
+
+function persistEdits() {
+  const out = {};
+  ROWS.forEach(r => {
+    if (r.true_tier !== ORIG[r.rel_path]) out[r.rel_path] = r.true_tier;
+  });
+  localStorage.setItem(STORE_KEY, JSON.stringify(out));
+  updateDirty();
+}
+
+function updateDirty() {
+  const n = ROWS.filter(r => r.true_tier !== ORIG[r.rel_path]).length;
+  el("dirtyCount").textContent = n ? `${n} edit${n === 1 ? "" : "s"} (not saved to archive yet)` : "0 edits";
+  el("dirtyCount").classList.toggle("has-edits", n > 0);
+}
+
+function liveMetrics() {
+  const n = ROWS.length;
+  let legOk = 0, ordOk = 0, ordTier = 0, ordNear = 0;
+  ROWS.forEach(r => {
+    if (r.leg_ok) legOk++;
+    if (r.ord_ok) ordOk++;
+    if (r.ord_tier >= 0 && r.ord_tier === r.true_tier) ordTier++;
+    if (r.ord_tier >= 0 && Math.abs(r.ord_tier - r.true_tier) <= 1) ordNear++;
+  });
+  return {
+    legacy_glam_acc: legOk / n,
+    ordinal_glam_acc: ordOk / n,
+    ordinal_tier_acc: ordTier / n,
+    ordinal_within_one: ordNear / n,
+    ord_better: ROWS.filter(r => !r.leg_ok && r.ord_ok).length,
+    ord_worse: ROWS.filter(r => r.leg_ok && !r.ord_ok).length,
+  };
+}
 
 function pct(x){ return x == null ? "—" : (100*x).toFixed(1) + "%"; }
-el("metrics").innerHTML = [
-  ["Legacy glam acc", pct(META.legacy_glam_acc), ""],
-  ["Ordinal glam acc", pct(META.ordinal_glam_acc),
-    META.ordinal_glam_acc > META.legacy_glam_acc ? "up" :
-    META.ordinal_glam_acc < META.legacy_glam_acc ? "down" : ""],
-  ["Ordinal tier exact", pct(META.ordinal_tier_acc), ""],
-  ["Ordinal within±1", pct(META.ordinal_within_one), ""],
-  ["Legacy top share", pct(META.legacy_top), ""],
-  ["Ordinal top share", pct(META.ordinal_top),
-    META.ordinal_top < META.legacy_top ? "up" :
-    META.ordinal_top > META.legacy_top ? "down" : ""],
-  ["Ordinal fixed", META.ord_better, "up"],
-  ["Ordinal broke", META.ord_worse, "down"],
-].map(([l,v,c]) => `<div class="metric ${c}"><b>${v}</b><span>${l}</span></div>`).join("");
+function paintMetrics() {
+  const m = liveMetrics();
+  el("metrics").innerHTML = [
+    ["Legacy right (glam)", pct(m.legacy_glam_acc), ""],
+    ["Ordinal right (glam)", pct(m.ordinal_glam_acc),
+      m.ordinal_glam_acc > m.legacy_glam_acc ? "up" :
+      m.ordinal_glam_acc < m.legacy_glam_acc ? "down" : ""],
+    ["Ordinal exact tier", pct(m.ordinal_tier_acc), ""],
+    ["Ordinal within ±1 tier", pct(m.ordinal_within_one), ""],
+    ["Legacy pile-up", pct(META.legacy_top), ""],
+    ["Ordinal pile-up", pct(META.ordinal_top), ""],
+    ["Ordinal fixed", m.ord_better, "up"],
+    ["Ordinal broke", m.ord_worse, "down"],
+  ].map(([l,v,c]) => `<div class="metric ${c}"><b>${v}</b><span>${l}</span></div>`).join("");
+}
 
 let filter = "all";
+let selectedPath = ROWS[0] ? ROWS[0].rel_path : null;
+
 function match(r) {
   const q = el("q").value.trim().toLowerCase();
   if (q && !r.rel_path.toLowerCase().includes(q)) return false;
@@ -802,12 +975,8 @@ function match(r) {
   if (filter === "both_right") return r.leg_ok && r.ord_ok;
   if (filter === "leg_wrong") return !r.leg_ok;
   if (filter === "ord_wrong") return !r.ord_ok;
+  if (filter === "edited") return r.true_tier !== ORIG[r.rel_path];
   return true;
-}
-
-function pill(val, ok, na) {
-  if (na || val == null || val < 0) return `<span class="pill na">—</span>`;
-  return `<span class="pill ${ok ? "ok" : "bad"}">${val}</span>`;
 }
 
 function cardClass(r) {
@@ -817,32 +986,188 @@ function cardClass(r) {
   return "miss-ord";
 }
 
+function glamDeltaText(pred, truth) {
+  if (pred < 0 || truth < 0) return "";
+  const d = pred - truth;
+  if (d === 0) return "Matches your product score.";
+  if (d > 0) return `Too high by ${d} glam step${d>1?"s":""} (model more revealing than you).`;
+  return `Too low by ${-d} glam step${d<-1?"s":""} (model milder than you).`;
+}
+
+function tierDeltaText(pred, truth) {
+  if (pred < 0 || truth == null) return "";
+  const d = pred - truth;
+  if (d === 0) return "Exact tier match.";
+  if (d > 0) return `Tier too high by ${d} (over-scored).`;
+  return `Tier too low by ${-d} (under-scored).`;
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+function rowByPath(path) {
+  return ROWS.find(r => r.rel_path === path);
+}
+
+function setSelected(path) {
+  selectedPath = path;
+  document.querySelectorAll(".card").forEach(c => {
+    c.classList.toggle("selected", c.dataset.path === path);
+  });
+}
+
+function relabelSelected(tier) {
+  const r = rowByPath(selectedPath);
+  if (!r) return;
+  applyTier(r, tier, true);
+  paintMetrics();
+  render();
+  setSelected(selectedPath);
+}
+
+function visibleRows() {
+  return ROWS.filter(match);
+}
+
+function moveSelection(delta) {
+  const vis = visibleRows();
+  if (!vis.length) return;
+  let i = vis.findIndex(r => r.rel_path === selectedPath);
+  if (i < 0) i = 0;
+  else i = Math.max(0, Math.min(vis.length - 1, i + delta));
+  selectedPath = vis[i].rel_path;
+  render();
+  setSelected(selectedPath);
+  const node = document.querySelector(`.card[data-path="${CSS.escape(selectedPath)}"]`);
+  if (node) node.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function exportLabels() {
+  // Full set with current tiers (including unedited).
+  const body = ROWS.map(r => JSON.stringify({
+    rel_path: r.rel_path,
+    kind: KIND,
+    sheet: r.sheet || "",
+    stratum: r.stratum || "",
+    prior_glam: r.prior_glam != null ? r.prior_glam : -1,
+    true_exposure: r.true_tier,
+    reveal_at_end: false,
+    peak_time_sec: null,
+    note: r.note || "",
+  })).join("\\n") + "\\n";
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([body], { type: "application/x-ndjson" }));
+  a.download = "labels-" + KIND + ".jsonl";
+  a.click();
+  const n = ROWS.filter(r => r.true_tier !== ORIG[r.rel_path]).length;
+  alert(
+    "Downloaded labels-" + KIND + ".jsonl" +
+    (n ? ` (${n} changed)` : "") +
+    "\\n\\nImport into the archive with:\\n" +
+    "py scripts/eval_reel_classifier.py label --kind " + KIND +
+    " --import %USERPROFILE%\\\\Downloads\\\\labels-" + KIND + ".jsonl"
+  );
+}
+
 function render() {
-  const rows = ROWS.filter(match);
-  el("count").textContent = `${rows.length} / ${ROWS.length}`;
+  paintMetrics();
+  updateDirty();
+  const rows = visibleRows();
+  el("count").textContent = `${rows.length} / ${ROWS.length} shown`;
   const g = el("grid");
   if (!rows.length) {
     g.innerHTML = `<div class="empty">No items match this filter</div>`;
     return;
   }
+  if (!rows.some(r => r.rel_path === selectedPath)) {
+    selectedPath = rows[0].rel_path;
+  }
   g.innerHTML = rows.map(r => {
-    const anchor = ANCHORS[String(r.true_tier)] || "";
     const src = r.sheet ? ("sheets/" + r.sheet) : "";
-    return `<article class="card ${cardClass(r)}" data-path="${r.rel_path}">
-      <div class="thumb">${src ? `<img loading="lazy" src="${src}" alt="">` : ""}</div>
+    const tName = TIER_SHORT[r.true_tier] || ("tier " + r.true_tier);
+    const gName = GLAM_SHORT[r.true_glam] || ("glam " + r.true_glam);
+    const anchor = ANCHORS[String(r.true_tier)] || "";
+    const edited = r.true_tier !== ORIG[r.rel_path];
+    const sel = r.rel_path === selectedPath ? " selected" : "";
+
+    const legOk = r.leg_ok;
+    const ordOk = r.ord_ok;
+    const legGlamName = r.leg_glam >= 0 ? (GLAM_SHORT[r.leg_glam] || "") : "failed";
+    const ordTierName = r.ord_tier >= 0 ? (TIER_SHORT[r.ord_tier] || "") : "failed";
+    const ordGlamName = r.ord_glam >= 0 ? (GLAM_SHORT[r.ord_glam] || "") : "";
+
+    const tierBtns = [0,1,2,3,4].map(t =>
+      `<button type="button" class="tier-btn${r.true_tier === t ? " on" : ""}" data-tier="${t}" data-path="${esc(r.rel_path)}" title="${esc(TIER_SHORT[t] || "")}">${t}</button>`
+    ).join("");
+
+    return `<article class="card ${cardClass(r)}${sel}" data-path="${esc(r.rel_path)}" tabindex="0">
+      <div class="thumb">${src ? `<img loading="lazy" src="${esc(src)}" alt="">` : ""}</div>
       <div class="body">
-        <div class="path">${r.rel_path}</div>
-        <div class="row"><span class="lbl">You (tier → glam)</span>
-          <span class="true">T${r.true_tier} → G${r.true_glam}</span></div>
-        <div class="row"><span class="lbl">Legacy glam</span>
-          ${pill("G"+r.leg_glam, r.leg_ok, r.leg_glam < 0)}</div>
-        <div class="row"><span class="lbl">Ordinal tier→glam</span>
-          ${pill("T"+(r.ord_tier>=0?r.ord_tier:"?")+" → G"+r.ord_glam, r.ord_ok, r.ord_glam < 0)}</div>
-        ${r.note ? `<div class="note">${r.note}</div>` : ""}
-        <div class="note">${anchor}</div>
+        <div class="path">${esc(r.rel_path)}${edited ? ' <span class="edited-badge">edited</span>' : ""}</div>
+
+        <div class="block truth">
+          <div class="block-title">
+            <span class="who">1 · Your label (truth)</span>
+            <span class="verdict truth">${edited ? "edited" : "ground truth"}</span>
+          </div>
+          <div class="mainline">${esc(tName)}</div>
+          <div class="detail">Exposure <b>tier ${r.true_tier}</b> → product <b>glam ${r.true_glam}</b> (${esc(gName)}).
+            ${edited ? "Was T" + ORIG[r.rel_path] + "." : ""}</div>
+          <div class="codes">code: T${r.true_tier} → G${r.true_glam}</div>
+          <div class="why">${esc(anchor)}</div>
+          <div class="tier-row" title="Click to relabel this photo">
+            <span class="tier-lbl">Set your tier:</span>
+            ${tierBtns}
+          </div>
+        </div>
+
+        <div class="block ${legOk ? "ok" : "bad"}">
+          <div class="block-title">
+            <span class="who">2 · Legacy model (current default)</span>
+            <span class="verdict ${legOk ? "ok" : "bad"}">${legOk ? "✓ glam match" : "✗ glam wrong"}</span>
+          </div>
+          <div class="mainline">${r.leg_glam >= 0 ? "Glam " + r.leg_glam + " — " + esc(legGlamName) : "No score"}</div>
+          <div class="detail">Old boolean classifier. Only outputs glam 0–3 (no tier).</div>
+          <div class="codes">code: G${r.leg_glam} &nbsp;·&nbsp; needed G${r.true_glam}</div>
+          <div class="why">${esc(glamDeltaText(r.leg_glam, r.true_glam))}</div>
+        </div>
+
+        <div class="block ${ordOk ? "ok" : "bad"}">
+          <div class="block-title">
+            <span class="who">3 · Ordinal model (candidate)</span>
+            <span class="verdict ${ordOk ? "ok" : "bad"}">${ordOk ? "✓ glam match" : "✗ glam wrong"}</span>
+          </div>
+          <div class="mainline">${r.ord_tier >= 0
+            ? "Tier " + r.ord_tier + " — " + esc(ordTierName)
+            : "No score"}</div>
+          <div class="detail">Maps to <b>glam ${r.ord_glam >= 0 ? r.ord_glam : "—"}</b>
+            ${ordGlamName ? "(" + esc(ordGlamName) + ")" : ""}.</div>
+          <div class="codes">code: T${r.ord_tier >= 0 ? r.ord_tier : "?"} → G${r.ord_glam}
+            &nbsp;·&nbsp; needed T${r.true_tier} → G${r.true_glam}</div>
+          <div class="why">${esc(tierDeltaText(r.ord_tier, r.true_tier))}
+            ${esc(glamDeltaText(r.ord_glam, r.true_glam))}</div>
+        </div>
+
+        ${r.note ? `<div class="note">Note: ${esc(r.note)}</div>` : ""}
       </div>
     </article>`;
   }).join("");
+
+  // bind card select + tier buttons
+  g.querySelectorAll(".card").forEach(card => {
+    card.addEventListener("click", (e) => {
+      if (e.target.closest(".tier-btn")) return;
+      setSelected(card.dataset.path);
+    });
+  });
+  g.querySelectorAll(".tier-btn").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      selectedPath = btn.dataset.path;
+      relabelSelected(Number(btn.dataset.tier));
+    });
+  });
 }
 
 document.querySelectorAll(".filters button[data-f]").forEach(b => {
@@ -855,6 +1180,33 @@ document.querySelectorAll(".filters button[data-f]").forEach(b => {
 });
 el("q").oninput = render;
 el("trueTier").onchange = render;
+el("exportLabelsBtn").onclick = exportLabels;
+el("resetEditsBtn").onclick = () => {
+  if (!confirm("Reset all in-page edits back to the original labels?")) return;
+  ROWS.forEach(r => applyTier(r, ORIG[r.rel_path], false));
+  localStorage.removeItem(STORE_KEY);
+  paintMetrics();
+  updateDirty();
+  render();
+};
+
+addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT") return;
+  if (e.key >= "0" && e.key <= "4") {
+    e.preventDefault();
+    relabelSelected(Number(e.key));
+  } else if (e.key === "j" || e.key === "ArrowLeft") {
+    e.preventDefault();
+    moveSelection(-1);
+  } else if (e.key === "k" || e.key === "ArrowRight") {
+    e.preventDefault();
+    moveSelection(1);
+  } else if (e.key === "e") {
+    e.preventDefault();
+    exportLabels();
+  }
+});
+
 render();
 </script>
 """
@@ -916,6 +1268,7 @@ def render_compare_page(
                 "ord_ok": ord_ok,
                 "note": item.note or "",
                 "stratum": item.stratum,
+                "prior_glam": item.prior_glam,
             }
         )
 
@@ -941,12 +1294,26 @@ def render_compare_page(
         "ord_better": ord_better,
         "ord_worse": ord_worse,
     }
+    from promptstudio.scraping.outfit_classifier import TIER_TO_GLAM
+
     html = (
         _COMPARE_HTML.replace("__ROWS__", json.dumps(rows, ensure_ascii=False))
         .replace("__META__", json.dumps(meta, ensure_ascii=False))
         .replace(
             "__ANCHORS__",
             json.dumps({str(k): v for k, v in TIER_ANCHORS.items()}, ensure_ascii=False),
+        )
+        .replace(
+            "__TIER_SHORT__",
+            json.dumps({str(k): v for k, v in _TIER_SHORT.items()}, ensure_ascii=False),
+        )
+        .replace(
+            "__GLAM_SHORT__",
+            json.dumps({str(k): v for k, v in _GLAM_SHORT.items()}, ensure_ascii=False),
+        )
+        .replace(
+            "__TIER_TO_GLAM__",
+            json.dumps({str(k): v for k, v in TIER_TO_GLAM.items()}, ensure_ascii=False),
         )
         .replace("__KIND__", json.dumps(kind))
         .replace("__KIND_PLAIN__", kind)
