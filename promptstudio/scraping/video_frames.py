@@ -20,7 +20,7 @@ import math
 import os
 import tempfile
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from promptstudio.config import (
     CLASSIFY_REEL_CANDIDATES,
@@ -91,12 +91,14 @@ class ContactSheet:
     rows: int = 0
     panel_w: int = 0
     panel_h: int = 0
+    considered: int = 0  # candidate frames decoded to choose these panels
 
     def to_dict(self) -> dict:
         return {
             "cols": int(self.cols),
             "rows": int(self.rows),
             "panels": len(self.picks),
+            "considered": int(self.considered),
             "panel_w": int(self.panel_w),
             "panel_h": int(self.panel_h),
             "times": [round(float(p.t_sec), 2) for p in self.picks],
@@ -556,6 +558,7 @@ def select_timeline_frames(
     candidates: Optional[int] = None,
     min_bright: Optional[float] = None,
     min_sharp: Optional[float] = None,
+    stats: Optional[Dict[str, int]] = None,
 ) -> List[Tuple[FramePick, object]]:
     """
     Pick frames spanning the whole clip, **chronologically ordered**.
@@ -565,6 +568,9 @@ def select_timeline_frames(
     so panels are allocated per shot and the final shot is always represented.
     The sharpness gate is deliberately not applied: a soft frame still tells the
     model what the outfit is, and on reveal reels the soft frames are the point.
+
+    ``stats``, when given, receives ``considered`` — how many candidates were
+    actually decoded, which is not the configured count when seeks fail.
 
     Returns [(pick, bgr_frame)]; picks have no JPEG path.
     """
@@ -580,6 +586,8 @@ def select_timeline_frames(
         head_frac=CLASSIFY_REEL_SKIP_HEAD_FRAC,
         tail_frac=CLASSIFY_REEL_SKIP_TAIL_FRAC,
     )
+    if stats is not None:
+        stats["considered"] = len(raw)
     if not raw:
         return []
 
@@ -660,8 +668,9 @@ def compose_contact_sheet(
     n_panels = max(1, int(panels if panels is not None else CLASSIFY_REEL_SHEET_PANELS))
     width = max(96, int(panel_w if panel_w is not None else CLASSIFY_REEL_SHEET_PANEL_W))
 
+    stats: Dict[str, int] = {}
     selected = select_timeline_frames(
-        video_path, panels=n_panels, candidates=candidates
+        video_path, panels=n_panels, candidates=candidates, stats=stats
     )
     if not selected:
         return None
@@ -704,6 +713,7 @@ def compose_contact_sheet(
         rows=rows,
         panel_w=width,
         panel_h=height,
+        considered=int(stats.get("considered", 0)),
     )
 
 

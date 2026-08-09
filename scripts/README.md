@@ -50,7 +50,15 @@ Classifier report (resumable): `following_classify_report.json` + `docs/followin
 
 ```powershell
 py scripts/organize_and_filter.py
+
+# Byte-identical duplicates
 py scripts/deduplicate.py
+
+# Near-duplicates (perceptual hash) — catches re-encodes, resizes, light crops
+# and cross-creator reposts that byte-matching misses. Report only, never deletes.
+py scripts/find_duplicates.py
+py scripts/find_duplicates.py --distance 4      # near-identical only
+py scripts/find_duplicates.py --json dupes.json
 ```
 
 ## Web UI

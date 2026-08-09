@@ -1,4 +1,20 @@
-"""Prompt cache with in-memory write-through to prompts_cache.json."""
+"""Prompt cache, backed by the `prompts` table in archive.db.
+
+Previously a single JSON file loaded whole into memory and **rewritten in full
+on every save** — an O(n) serialize per O(1) logical write, with ~4400 entries.
+It was also a second source of truth for data `photos` already mirrored
+(`has_prompt`, `prompt_stale`, `prompt_search`), and its lookup fell back from
+`rel_path` to bare `filename`, so two creators with the same filename could read
+each other's prompt.
+
+The public API is unchanged; only the storage moved. `prompts_cache.json` is
+imported once on first use and then left alone on disk as a rollback copy — it
+stops being updated, so treat it as a snapshot, not the live store.
+
+`load()` still materialises the whole dict for callers that think in
+whole-cache terms; it is memoised exactly as before, and `set()` no longer
+depends on it.
+"""
 
 import json
 import os
@@ -8,7 +24,6 @@ from typing import Any, Dict, List, Optional
 
 from promptstudio.config import PROMPT_CACHE_FILE, PROMPT_HISTORY_MAX, PROMPT_PIPELINE_VERSION
 from promptstudio.logging_setup import get_logger
-from promptstudio.storage.atomic import atomic_write_json
 
 log = get_logger(__name__)
 
@@ -26,18 +41,37 @@ def _lock_for(path: str) -> threading.RLock:
         return _MEM_LOCKS[path]
 
 
+def _index():
+    from promptstudio.storage.db import ArchiveIndex
+
+    return ArchiveIndex.get()
+
+
 class PromptCache:
     def __init__(self, cache_file: str = PROMPT_CACHE_FILE) -> None:
         self.cache_file = cache_file
 
-    def _ensure_loaded(self) -> dict:
-        lock = _lock_for(self.cache_file)
-        with lock:
-            data = _MEM.get(self.cache_file)
-            if data is None:
-                data = self._read_file()
-                _MEM[self.cache_file] = data
-            return data
+    # ── one-time migration off the JSON file ─────────────────────────
+
+    def _import_legacy_json(self) -> None:
+        """Load prompts_cache.json into the table once, then never again.
+
+        Guarded by a meta flag rather than table emptiness, so deliberately
+        clearing the prompts table does not silently resurrect the old file.
+        """
+        index = _index()
+        if index.prompt_import_done():
+            return
+        legacy = self._read_file()
+        if legacy:
+            count = index.prompt_replace_all(legacy)
+            log.info(
+                "imported %d prompts from %s into archive.db "
+                "(the JSON file is now a snapshot, not the live store)",
+                count,
+                os.path.basename(self.cache_file),
+            )
+        index.mark_prompt_import_done()
 
     def _read_file(self) -> dict:
         if os.path.exists(self.cache_file):
@@ -45,24 +79,30 @@ class PromptCache:
                 with open(self.cache_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 return data if isinstance(data, dict) else {}
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("legacy prompt cache unreadable (%s): %s", self.cache_file, e)
         return {}
+
+    def _ensure_loaded(self) -> dict:
+        lock = _lock_for(self.cache_file)
+        with lock:
+            data = _MEM.get(self.cache_file)
+            if data is None:
+                self._import_legacy_json()
+                data = _index().prompt_all()
+                _MEM[self.cache_file] = data
+            return data
 
     def load(self) -> dict:
         return self._ensure_loaded()
 
     def save(self, cache: dict) -> None:
+        """Whole-cache replace. Kept for the legacy module-level helper."""
         lock = _lock_for(self.cache_file)
         with lock:
-            _MEM[self.cache_file] = cache
-            self._write_file(cache)
-
-    def _write_file(self, cache: dict) -> None:
-        try:
-            atomic_write_json(self.cache_file, cache)
-        except OSError as e:
-            log.error("saving prompt cache %s: %s", self.cache_file, e)
+            _index().mark_prompt_import_done()
+            _index().prompt_replace_all(cache)
+            _MEM[self.cache_file] = dict(cache)
 
     def invalidate_memory(self) -> None:
         lock = _lock_for(self.cache_file)
@@ -75,8 +115,12 @@ class PromptCache:
     def get(self, rel_path: str, filename: str) -> Optional[Dict[str, Any]]:
         lock = _lock_for(self.cache_file)
         with lock:
-            cache = self._ensure_loaded()
-            return self._lookup(cache, rel_path, filename)
+            self._import_legacy_json()
+            cached = _MEM.get(self.cache_file)
+            if cached is not None:
+                return self._lookup(cached, rel_path, filename)
+        # Single-row read; no need to materialise the whole cache for one photo.
+        return _index().prompt_get(self.cache_key(rel_path), filename)
 
     def _lookup(self, cache: dict, rel_path: str, filename: str) -> Optional[Dict[str, Any]]:
         key = self.cache_key(rel_path)
@@ -97,18 +141,17 @@ class PromptCache:
     def _sync_index(self, rel_path: str, entry: Optional[Dict[str, Any]]) -> None:
         try:
             from promptstudio.prompts.engine import ENGINE_ID
-            from promptstudio.storage.db import ArchiveIndex
 
-            ArchiveIndex.get().update_prompt_flags(rel_path, entry, ENGINE_ID)
+            _index().update_prompt_flags(rel_path, entry, ENGINE_ID)
         except Exception as e:
             log.warning("prompt index sync failed for %s: %s", rel_path, e)
 
     def set(self, rel_path: str, data: Dict[str, Any], *, push_history: bool = True) -> None:
         lock = _lock_for(self.cache_file)
         with lock:
-            cache = self._ensure_loaded()
+            self._import_legacy_json()
             key = self.cache_key(rel_path)
-            old = cache.get(key)
+            old = self.get(rel_path, os.path.basename(rel_path))
             payload = dict(data)
             if push_history and isinstance(old, dict) and old.get("positive_prompt"):
                 if old.get("positive_prompt") != payload.get("positive_prompt") or old.get(
@@ -122,11 +165,20 @@ class PromptCache:
             elif isinstance(old, dict) and old.get("history") and "history" not in payload:
                 payload["history"] = old["history"]
 
-            cache[key] = payload
-            filename = os.path.basename(rel_path)
-            if filename in cache and filename != key:
-                del cache[filename]
-            self._write_file(cache)
+            index = _index()
+            index.prompt_set(key, payload)
+            # basename of the *normalised* key: on POSIX, basename() does not
+            # treat "\" as a separator, so basename("nina\\a.jpg") is the whole
+            # string — which normalises straight back onto the row just written.
+            filename = os.path.basename(key)
+            if filename != key:
+                # Drop any legacy filename-keyed duplicate now that rel_path wins.
+                index.prompt_delete(filename)
+
+            cached = _MEM.get(self.cache_file)
+            if cached is not None:
+                cached[key] = payload
+                cached.pop(filename, None) if filename != key else None
         self._sync_index(rel_path, payload)
 
     def restore_history(self, rel_path: str, index: int = 0) -> Optional[Dict[str, Any]]:
@@ -162,20 +214,23 @@ class PromptCache:
     def delete(self, rel_path: str, filename: str) -> None:
         lock = _lock_for(self.cache_file)
         with lock:
-            cache = self._ensure_loaded()
+            self._import_legacy_json()
             key = self.cache_key(rel_path)
-            cache.pop(key, None)
-            cache.pop(filename, None)
-            self._write_file(cache)
+            _index().prompt_delete(key, filename)
+            cached = _MEM.get(self.cache_file)
+            if cached is not None:
+                cached.pop(key, None)
+                cached.pop(filename, None)
         try:
-            from promptstudio.storage.db import ArchiveIndex
-
-            ArchiveIndex.get().clear_prompt(rel_path)
+            _index().clear_prompt(rel_path)
         except Exception as e:
             log.warning("prompt index clear failed for %s: %s", rel_path, e)
 
     def count_ready(self) -> int:
-        return len(self.load())
+        lock = _lock_for(self.cache_file)
+        with lock:
+            self._import_legacy_json()
+        return _index().prompt_count()
 
     def _engine_id(self) -> str:
         from promptstudio.prompts.engine import ENGINE_ID
@@ -183,15 +238,21 @@ class PromptCache:
         return ENGINE_ID
 
     def has_prompt(self, rel_path: str, filename: str, cache: Optional[dict] = None) -> bool:
-        data = cache if cache is not None else self.load()
-        entry = self._lookup(data, rel_path, filename)
+        entry = (
+            self._lookup(cache, rel_path, filename)
+            if cache is not None
+            else self.get(rel_path, filename)
+        )
         if not entry:
             return False
         return entry.get("parameters", {}).get("vision_engine") == self._engine_id()
 
     def is_stale(self, rel_path: str, filename: str, cache: Optional[dict] = None) -> bool:
-        data = cache if cache is not None else self.load()
-        entry = self._lookup(data, rel_path, filename)
+        entry = (
+            self._lookup(cache, rel_path, filename)
+            if cache is not None
+            else self.get(rel_path, filename)
+        )
         if not entry:
             return False
         params = entry.get("parameters") or {}
@@ -200,6 +261,12 @@ class PromptCache:
         return not engine_ok or not pipeline_ok
 
     def annotate_photos(self, photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        # Most callers arrive with has_prompt/prompt_stale already set from the
+        # photos table; only pay for the cache when something is missing.
+        if all(
+            "has_prompt" in p and "prompt_stale" in p for p in photos
+        ):
+            return photos
         cache = self.load()
         engine_id = self._engine_id()
         for photo in photos:

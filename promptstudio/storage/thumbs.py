@@ -61,12 +61,16 @@ def ensure_thumbnail(
 
             # The classifier already found the most interesting moment — reuse it
             # so the grid tile shows the reveal rather than the intro title card.
-            if write_best_video_frame_jpeg(
+            # Only when it actually ran: with at_sec=None this falls through to
+            # a full timeline decode, which would make the cheap branches below
+            # unreachable and put a 16-frame decode on every gallery scroll.
+            peak_sec = _classified_peak_time(full_path)
+            if peak_sec is not None and write_best_video_frame_jpeg(
                 full_path,
                 out_path,
                 max_edge=max_size,
                 jpeg_quality=82,
-                at_sec=_classified_peak_time(full_path),
+                at_sec=peak_sec,
             ):
                 return out_path
 
@@ -84,6 +88,13 @@ def ensure_thumbnail(
                         return out_path
                 except Exception:
                     pass
+
+            # Unclassified and no cover — rank frames. Last because it is the
+            # only branch that decodes the whole timeline.
+            if write_best_video_frame_jpeg(
+                full_path, out_path, max_edge=max_size, jpeg_quality=82
+            ):
+                return out_path
         except Exception as e:
             log.warning("video thumbnail failed for %s: %s", rel_path, e)
 

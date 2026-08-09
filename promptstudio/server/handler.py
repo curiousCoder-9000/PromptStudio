@@ -24,6 +24,7 @@ from promptstudio.config import (
     SAVED_DIR,
     TRASH_ENABLED,
 )
+from promptstudio.jobs import LEASES
 from promptstudio.logging_setup import get_logger
 from promptstudio.prompts.batch import BatchPromptManager
 from promptstudio.prompts.cache import PromptCache
@@ -36,6 +37,8 @@ from promptstudio.scraping.sync_manager import SyncManager
 from promptstudio.server.multipart import parse_multipart_data
 from promptstudio.storage.archive import ArchiveStore, ensure_creator_folder
 from promptstudio.storage.favorites import FavoritesStore
+from promptstudio.storage.journal import list_kinds as list_journal_kinds
+from promptstudio.storage.journal import read_runs as read_journal_runs
 from promptstudio.storage.trash import TrashStore
 
 log = get_logger(__name__)
@@ -129,6 +132,9 @@ def _check_ollama_health(timeout: float = 1.5) -> Dict[str, Any]:
     except Exception:
         pass
     result.update(check_comfy_health(timeout=timeout))
+    # Who holds each exclusive resource — the first thing to look at when
+    # a job reports busy and nothing appears to be running.
+    result["leases"] = LEASES.snapshot()
     return result
 
 
@@ -956,7 +962,15 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                         }
                     )
                 else:
-                    self._send_json({"status": "busy"}, 409)
+                    # The checks above are advisory; the lease inside
+                    # start_batch is what actually decides, so report its reason.
+                    self._send_json(
+                        {
+                            "status": "busy",
+                            "message": _batch.last_refusal or "Batch already running",
+                        },
+                        409,
+                    )
             except (ValueError, json.JSONDecodeError):
                 self.send_error(400, "Invalid JSON body")
             return
@@ -984,6 +998,10 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 if isinstance(include_videos, str):
                     include_videos = include_videos.lower() in ("1", "true", "yes")
                 include_videos = bool(include_videos)
+                rescore_stale = data.get("rescore_stale", False)
+                if isinstance(rescore_stale, str):
+                    rescore_stale = rescore_stale.lower() in ("1", "true", "yes")
+                rescore_stale = bool(rescore_stale)
                 limit = data.get("limit")
                 limit = int(limit) if limit is not None else None
                 result = _classify.start(
@@ -992,6 +1010,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     include_videos=include_videos,
                     limit=limit,
                     only_unscored=only_unscored,
+                    rescore_stale=rescore_stale,
                 )
                 status = result.get("status")
                 code = 200
@@ -1605,6 +1624,25 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(stats)
             return
 
+        if path == "/api/journal":
+            # Run history for background jobs. Without ?kind, lists what exists.
+            kind = (query.get("kind", [""])[0] or "").strip()
+            if not kind:
+                self._send_json({"kinds": list_journal_kinds()})
+                return
+            if kind not in list_journal_kinds():
+                self._send_json({"kind": kind, "runs": [], "kinds": list_journal_kinds()})
+                return
+            try:
+                limit = int(query.get("limit", ["20"])[0] or 20)
+            except ValueError:
+                limit = 20
+            limit = max(1, min(limit, 200))
+            self._send_json(
+                {"kind": kind, "limit": limit, "runs": read_journal_runs(kind, limit=limit)}
+            )
+            return
+
         if path == "/api/sync/status":
             self._send_json(_sync.get_status())
             return
@@ -1641,12 +1679,30 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     )
                 except Exception:
                     status["pending"] = 0
+                # Files scored by a superseded prompt. Without this the client
+                # has no way to know rescore_stale would do anything.
+                try:
+                    from promptstudio.scraping.outfit_classifier import (
+                        active_prompt_versions,
+                    )
+                    from promptstudio.storage.db import ArchiveIndex
+
+                    status["stale"] = len(
+                        ArchiveIndex.get().list_stale_glam(
+                            active_prompt_versions(), creator=creator
+                        )
+                    )
+                except Exception:
+                    status["stale"] = 0
             elif status.get("running"):
                 total = int(status.get("total") or 0)
                 done = int(status.get("completed") or 0)
                 status["pending"] = max(0, total - done)
             else:
                 status["pending"] = 0
+            # Keep the response shape stable — clients should not have to
+            # distinguish "no stale files" from "we didn't look".
+            status.setdefault("stale", 0)
             self._send_json(status)
             return
 

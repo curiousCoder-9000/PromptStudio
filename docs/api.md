@@ -10,7 +10,8 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/stats` | Photos, creators, `prompts_ready` |
-| `GET` | `/api/health` | Ollama + Comfy reachability + models |
+| `GET` | `/api/health` | Ollama + Comfy reachability + models + job leases |
+| `GET` | `/api/journal` | Run history for a background job kind |
 | `GET` | `/api/creators` | Creator folders with counts + cover + sync meta |
 | `GET` | `/api/creator/style` | Learned style prefix for a creator |
 | `POST` | `/api/creator/style/rebuild` | Rebuild style from cached prompts |
@@ -24,8 +25,8 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/prompt/batch` | Background batch analyze (`creator`, `force`, `limit`, `paths`) |
 | `GET` | `/api/prompt/batch/status` | Batch job progress (cheap — snapshot, no archive scan) |
 | `POST` | `/api/prompt/batch/cancel` | Cooperative cancel after the current photo |
-| `POST` | `/api/classify/start` | Background glam classify for one creator (`creator`, `only_unscored`, `force`, `include_videos`, `limit`) |
-| `GET` | `/api/classify/status` | Classify job progress (`kept` / `rejected` / `failed`) |
+| `POST` | `/api/classify/start` | Background glam classify for one creator (`creator`, `only_unscored`, `force`, `include_videos`, `limit`, `rescore_stale`) |
+| `GET` | `/api/classify/status` | Classify job progress (`kept` / `rejected` / `failed`, `pending`, `stale`, `score_hist`) |
 | `POST` | `/api/classify/cancel` | Cooperative cancel after current item |
 | `DELETE` | `/api/photo` | Soft delete → `_trash/` (`permanent=1` to unlink) |
 | `GET` | `/api/trash` | List trashed entries (`limit`, `offset`) + size/retention |
@@ -92,11 +93,56 @@ Probes Ollama at `http://localhost:11434/api/tags` (1.5s timeout).
   "ollama": true,
   "model": "qwen2.5vl:7b",
   "model_ready": true,
-  "models": ["qwen2.5vl:7b", "moondream:latest"]
+  "models": ["qwen2.5vl:7b", "moondream:latest"],
+  "leases": { "ollama": "classify", "instagram": null, "comfy": null }
 }
 ```
 
 When Ollama is down: `{ "ollama": false, ... }`. Also includes `comfy` / `url` for ComfyUI reachability.
+
+`leases` names the job holding each exclusive resource, or `null` if free — the
+first thing to check when a job reports `busy` and nothing looks like it is
+running. Owners: `classify`, `batch_prompt`, `sync`.
+
+### `GET /api/journal?kind=<kind>&limit=20`
+
+Run history for a background job. Without `kind`, lists the kinds present on
+disk. Kinds: `classify`, `batch_prompt`, `sync`.
+
+```json
+{
+  "kind": "classify",
+  "limit": 20,
+  "runs": [
+    {
+      "run_id": "classify_20260809T041626Z_a1b2",
+      "kind": "classify",
+      "creator": "someone",
+      "total": 42,
+      "started_at": "2026-08-09T04:16:26+00:00",
+      "finished_at": "2026-08-09T04:19:02+00:00",
+      "outcome": "ok",
+      "duration_sec": 156.2,
+      "items": 42,
+      "failures": 2,
+      "item_count": 42,
+      "score_hist": { "-1": 2, "0": 1, "1": 4, "2": 9, "3": 26 },
+      "top_score_share": 0.65,
+      "unscored_rate": 0.0476,
+      "events": [{ "ts": "…", "name": "rate_limit", "backoff_sec": 60 }]
+    }
+  ]
+}
+```
+
+Newest run first; an in-flight run has `finished_at: null`. Per-item records are
+**counted** (`item_count`), not returned — a 4000-photo run must not become 4000
+objects in a response. Read the raw lines at
+`<archive>/_journal/<kind>.jsonl` when per-item detail is needed.
+
+`outcome` is `ok` | `error` | `cancelled`. `top_score_share` is the distribution
+guard: a classifier emitting one value for most of the archive carries almost no
+information, which is how an 85%-glam-3 prompt shipped unnoticed.
 
 ### `POST /api/prompt/mode-e`
 

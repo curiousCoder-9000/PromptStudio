@@ -324,6 +324,15 @@ def test_legacy_path_keeps_looking_after_a_confident_low_score():
 
 # ── end to end, vision stubbed ───────────────────────────────────────
 
+def _panels(peak_tier, *, peak=9, base=1, n=9):
+    """Full panel set with one peak — the guard rejects sparse replies."""
+    return [
+        {"i": i, "has_woman": True, "exposure_tier": peak_tier if i == peak else base}
+        for i in range(1, n + 1)
+    ]
+
+
+
 
 @pytest.fixture
 def stub_vision(monkeypatch):
@@ -358,7 +367,15 @@ def test_reveal_in_the_final_panel_drives_the_score(tmp_path, stub_vision):
         "figure_visible": True,
         "confidence": 0.82,
         "brief_reason": "panel 9 bikini",
-    })
+    },
+        frame_reply={
+            "has_woman": True,
+            "exposure_tier": 4,
+            "figure_visible": True,
+            "confidence": 0.88,
+            "brief_reason": "bikini, full resolution",
+        },
+    )
 
     verdict = oc.classify_video(path)
 
@@ -367,11 +384,37 @@ def test_reveal_in_the_final_panel_drives_the_score(tmp_path, stub_vision):
     assert verdict.glam_score == 3
     assert verdict.source == "video_sheet"
     assert verdict.matches_keep()
-    # One call for the whole reel; tier 4 at high confidence needs no confirm.
-    assert len(calls) == 1
-    assert verdict.evidence["frames_sent_to_vision"] == 1
+    # A high tier read off the FINAL shot is the reveal case the pipeline exists
+    # for, so it is confirmed at full resolution before being trusted — a 256px
+    # panel is not enough to tell a bikini from a skin-toned dress.
+    assert len(calls) == 2
+    assert verdict.evidence["frames_sent_to_vision"] == 2
+    assert verdict.evidence["confirm"]["tier"] == 4
+    assert verdict.evidence["peak_in_last_shot"] is True
     assert verdict.evidence["outfit_changes"] is True
     assert verdict.evidence["peak_time_sec"] >= 2.9
+
+
+def test_high_tier_away_from_the_final_shot_needs_no_confirm(tmp_path, stub_vision):
+    """One call is the budget when an unambiguous peak sits mid-clip.
+
+    The companion to the reveal case: confirming everything would double the
+    cost of the whole archive, so the escalation has to be selective.
+    """
+    path = _make_reel(tmp_path / "reel.mp4")
+    calls = stub_vision({
+        "panels": _panels(4, peak=1),
+        "peak_panel": 1,
+        "reel_exposure": 4,
+        "confidence": 0.9,
+        "brief_reason": "panel 1 bikini",
+    })
+
+    verdict = oc.classify_video(path)
+    assert verdict.exposure_tier == 4
+    assert verdict.evidence["peak_in_last_shot"] is False
+    assert len(calls) == 1
+    assert verdict.evidence["frames_sent_to_vision"] == 1
 
 
 def test_modest_reel_is_not_inflated(tmp_path, stub_vision):
@@ -396,7 +439,7 @@ def test_boundary_tier_confirms_at_full_resolution(tmp_path, stub_vision):
     path = _make_reel(tmp_path / "reel.mp4")
     calls = stub_vision(
         {
-            "panels": [{"i": 9, "has_woman": True, "exposure_tier": 3}],
+            "panels": _panels(3),
             "peak_panel": 9,
             "reel_exposure": 3,
             "confidence": 0.6,
@@ -426,7 +469,7 @@ def test_confirm_losing_the_subject_keeps_the_sheet_reading(tmp_path, stub_visio
     path = _make_reel(tmp_path / "reel.mp4")
     stub_vision(
         {
-            "panels": [{"i": 9, "has_woman": True, "exposure_tier": 3}],
+            "panels": _panels(3),
             "peak_panel": 9,
             "reel_exposure": 3,
             "confidence": 0.6,
@@ -503,7 +546,7 @@ def test_sheet_temp_files_are_cleaned_up(tmp_path, stub_vision, monkeypatch):
 
     monkeypatch.setattr(oc, "compose_contact_sheet", spy)
     stub_vision({
-        "panels": [{"i": 1, "has_woman": True, "exposure_tier": 4}],
+        "panels": _panels(4, peak=1),
         "peak_panel": 1,
         "reel_exposure": 4,
         "confidence": 0.9,
@@ -517,7 +560,7 @@ def test_sheet_temp_files_are_cleaned_up(tmp_path, stub_vision, monkeypatch):
 def test_structured_output_schema_is_sent(tmp_path, stub_vision):
     path = _make_reel(tmp_path / "reel.mp4")
     calls = stub_vision({
-        "panels": [{"i": 1, "has_woman": True, "exposure_tier": 4}],
+        "panels": _panels(4, peak=1),
         "peak_panel": 1,
         "reel_exposure": 4,
         "confidence": 0.9,

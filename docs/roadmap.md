@@ -215,6 +215,37 @@ that document; S-numbers map to [review_backend_architecture.md](review_backend_
 
 ---
 
+## Phase 12b — Backend durability, observability & dedupe ✅
+
+**Goal:** stop losing derived state, make failures visible, and remove the
+guesswork from job contention. Findings and measurements:
+[review_backend_architecture.md](review_backend_architecture.md).
+
+| Deliverable | ID | Status |
+|-------------|----|--------|
+| `storage/atomic.py` — atomic writes for all ten state files | S1 | Done |
+| HTTP error boundary — JSON 500 + logged traceback, not a dropped socket | S2 | Done |
+| `logging_setup.py` — rotating file log; every `print()` converted | S3 | Done |
+| Prompts into a `prompts` table (JSON imported once, kept as rollback) — **7x faster saves**, filename-collision bug gone | S4 | Done |
+| FTS5 index over prompt text — built and maintained, **search left on LIKE** | S5 | Built, off |
+| `jobs.py` resource leases (`ollama` / `instagram` / `comfy`) — closes the start race | S6 | Done |
+| WAL + `busy_timeout`; `read_sidecar()` — **4 reads/photo → 1**, rebuild 2.15s → 0.70s | S8 | Done |
+| `storage/journal.py` — append-only run history + `GET /api/journal` | F2 | Done |
+| Perceptual-hash near-duplicate detection + `scripts/find_duplicates.py` | F1a | Done |
+| Router refactor — 36-branch if-chain into a route table | S7 | Deferred |
+| Embeddings (SigLIP 2 + sqlite-vec) for semantic search / kNN pre-scoring | F1b | Todo |
+
+**Two recommendations were reversed by measurement**, and both are recorded
+rather than quietly dropped: FTS5 lost 3x to the LIKE scan on common query
+terms, and incremental rebuild became pointless once the redundant sidecar reads
+were removed. Neither is shipped on.
+
+**S7 is deferred on purpose.** It is maintainability-only — no correctness or
+performance payoff — and the review's own advice was to do it incrementally as
+routes are touched rather than as a big-bang restructure.
+
+---
+
 ## Phase 13 — Instrument, then close the loop 🔜
 
 **Goal:** measure whether the pipeline works, stop losing what it produces, and
@@ -228,9 +259,9 @@ Theme A items are specified in
 | Quality dashboard — prompt edit rate, regenerate rate, score distribution per `prompt_version` (`GET /api/insights`) | B1 | Todo |
 | **Provenance** — record the seed actually used (`resolve_seed`, required builder arg, returned by the API, echoed in the UI) | A0 | **Done** |
 | **Storage** — `generations` table in `archive.db`, full prompts, drop the 20-per-source cap, retire `resolve_archive_file` | A0 | Todo |
-| Atomic JSON writes everywhere — extract `atomic_write_json` from `creator_queue._save`, apply to the other nine writers | S1 | Todo |
-| Top-level error boundary — unhandled route errors return JSON 500 instead of dropping the connection | S2 | Todo |
-| `logging` + rotating file handler; walk the 21 `except: pass` sites | S3 | Todo |
+| **Atomic JSON writes everywhere** — `storage/atomic.py`, applied to all ten writers | S1 | **Done** |
+| **Top-level error boundary** — unhandled route errors return JSON 500 instead of dropping the connection | S2 | **Done** |
+| **`logging` + rotating file handler** — 34 `print()` converted; `except: pass` sweep still open | S3 | **Done** |
 | `export --derived` / import — prompts, glam scores, favorites, styles, labels, generation index | E1 | Todo |
 | Rate generations (keep / discard / ⭐) — `PUT /api/generation/rate` | A3 | Todo |
 | Outputs gallery — `GET /api/generations/list`, filter by creator/date/checkpoint/rating, full provenance | A1 | Todo |
@@ -271,10 +302,12 @@ Clone the `BatchPromptManager` shape for A2 — cooperative cancel, progress chi
 and resume-after-refresh are already built and tested; only the runner changes.
 A2 must respect the existing single-flight rule on the Comfy resource.
 
-**A2 is the sixth job manager.** That is precisely the trigger
-[review_backend_architecture.md](review_backend_architecture.md) S6 names for
-extracting `BackgroundJob` + a resource lease — do S6 first or A2 adds another
-round of pairwise `is_running()` checks.
+**A2 is the sixth job manager.** The lease half of
+[review_backend_architecture.md](review_backend_architecture.md) S6 is **done**
+(`promptstudio/jobs.py`), so A2 declares `comfy` and acquires it rather than
+adding another round of pairwise `is_running()` checks. The `BackgroundJob`
+base class is still deferred — A2 is the point where extracting it finally pays,
+since it would be the fifth copy of the same singleton/status/cancel scaffolding.
 
 C2 is near-free: `post_id` is in every sidecar and `group_by_post_id()` already
 exists at `storage/metadata.py:100`; only the gallery ignores it.

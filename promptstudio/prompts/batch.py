@@ -2,15 +2,20 @@
 
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from promptstudio.jobs import LEASES, OLLAMA
 from promptstudio.logging_setup import get_logger
 from promptstudio.prompts.cache import PromptCache
 from promptstudio.prompts.engine import ENGINE_ID, get_prompt_for_image
 from promptstudio.storage.archive import ArchiveStore
+from promptstudio.storage.journal import RunJournal
 
 log = get_logger(__name__)
+
+LEASE_OWNER = "batch_prompt"
 
 LogFn = Optional[Callable[[str], None]]
 
@@ -22,6 +27,8 @@ class BatchPromptManager:
     def __init__(self) -> None:
         self._job_lock = threading.Lock()
         self._cancel = threading.Event()
+        # Why the last start_batch() returned False, for the API's 409 message.
+        self.last_refusal = ""
         self._status: Dict[str, Any] = self._idle_status()
 
     @staticmethod
@@ -132,9 +139,23 @@ class BatchPromptManager:
             pending = pending[:limit]
         if not pending:
             return False
+
+        # Same lease the classify job takes: whichever asks first gets Ollama,
+        # decided under one lock rather than by two independent is_running()
+        # polls that could both see "free".
+        blocker = LEASES.acquire([OLLAMA], LEASE_OWNER)
+        if blocker:
+            self.last_refusal = (
+                f"{LEASES.holder(blocker) or 'another job'} is using the vision model"
+            )
+            return False
+
         with self._job_lock:
             if self._status.get("running"):
+                LEASES.release(LEASE_OWNER)
+                self.last_refusal = "Batch already running"
                 return False
+            self.last_refusal = ""
             self._cancel.clear()
             self._status = self._idle_status()
             self._status.update(
@@ -147,34 +168,60 @@ class BatchPromptManager:
             )
 
         def runner() -> None:
-            for photo in pending:
-                if self._cancel.is_set():
+            journal = RunJournal.for_kind("batch_prompt")
+            with journal.run(
+                creator=creator, total=len(pending), force=bool(force)
+            ) as run:
+                for photo in pending:
+                    if self._cancel.is_set():
+                        with self._job_lock:
+                            self._status["cancelled"] = True
+                            done = self._status["completed"]
+                        run.event("cancelled", completed=done)
+                        break
+                    rel = photo["rel_path"]
                     with self._job_lock:
-                        self._status["cancelled"] = True
-                    break
-                rel = photo["rel_path"]
+                        self._status["current"] = rel
+                    started = time.monotonic()
+                    try:
+                        get_prompt_for_image(
+                            photo["full_path"],
+                            photo["creator"],
+                            force_refresh=force,
+                            rel_path=rel,
+                        )
+                        with self._job_lock:
+                            self._status["completed"] += 1
+                        run.item(
+                            path=rel,
+                            ok=True,
+                            ms=int((time.monotonic() - started) * 1000),
+                        )
+                    except Exception as exc:
+                        log.warning("batch prompt failed for %s: %s", rel, exc)
+                        with self._job_lock:
+                            self._status["failed"] += 1
+                        run.item(
+                            path=rel,
+                            ok=False,
+                            reason=str(exc)[:200],
+                            ms=int((time.monotonic() - started) * 1000),
+                        )
+                    with self._job_lock:
+                        self._status["pending"] = max(
+                            0,
+                            self._status["total"]
+                            - self._status["completed"]
+                            - self._status["failed"],
+                        )
                 with self._job_lock:
-                    self._status["current"] = rel
-                try:
-                    get_prompt_for_image(
-                        photo["full_path"],
-                        photo["creator"],
-                        force_refresh=force,
-                        rel_path=rel,
+                    run.summary(
+                        completed=self._status["completed"],
+                        failed=self._status["failed"],
+                        engine=ENGINE_ID,
                     )
-                    with self._job_lock:
-                        self._status["completed"] += 1
-                except Exception as exc:
-                    log.warning("batch prompt failed for %s: %s", rel, exc)
-                    with self._job_lock:
-                        self._status["failed"] += 1
-                with self._job_lock:
-                    self._status["pending"] = max(
-                        0,
-                        self._status["total"]
-                        - self._status["completed"]
-                        - self._status["failed"],
-                    )
+        def finish() -> None:
+            LEASES.release(LEASE_OWNER)
             with self._job_lock:
                 self._status["running"] = False
                 self._status["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -190,7 +237,19 @@ class BatchPromptManager:
                     self._status["pending"] = 0
             self._cancel.clear()
 
-        threading.Thread(target=runner, daemon=True).start()
+        def guarded_runner() -> None:
+            # Without this, an exception escaping the loop stranded the lease
+            # and left running=True forever — the job could never be restarted.
+            try:
+                runner()
+            except Exception as exc:
+                log.exception("batch prompt job crashed")
+                with self._job_lock:
+                    self._status["error"] = str(exc)
+            finally:
+                finish()
+
+        threading.Thread(target=guarded_runner, daemon=True).start()
         return True
 
 

@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
 import threading
 import urllib.parse
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from promptstudio.config import (
     ARCHIVE_DB_FILE,
     EXCLUDED_FOLDERS,
+    FTS_SEARCH,
     IMAGE_EXTENSIONS,
     MEDIA_EXTENSIONS,
     PROMPT_PIPELINE_VERSION,
@@ -70,6 +73,39 @@ CREATE TABLE IF NOT EXISTS deleted_posts (
   platform TEXT NOT NULL DEFAULT 'instagram'
 );
 CREATE INDEX IF NOT EXISTS idx_deleted_creator ON deleted_posts(creator);
+CREATE TABLE IF NOT EXISTS prompts (
+  rel_path TEXT PRIMARY KEY,
+  filename TEXT,
+  payload TEXT NOT NULL,
+  vision_engine TEXT,
+  pipeline_version TEXT,
+  updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_prompts_filename ON prompts(filename);
+CREATE INDEX IF NOT EXISTS idx_prompts_engine ON prompts(vision_engine);
+"""
+
+# Perceptual hashes live in their own table rather than a column on `photos`:
+# they are computed by a separate offline pass, are absent for most rows most of
+# the time, and would otherwise widen the row that every gallery query reads.
+# TEXT because a 64-bit hash does not fit SQLite's signed INTEGER.
+_PHASH_SCHEMA = """
+CREATE TABLE IF NOT EXISTS phashes (
+  rel_path TEXT PRIMARY KEY,
+  phash TEXT NOT NULL,
+  computed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_phashes_hash ON phashes(phash);
+"""
+
+# Standalone rather than an external-content FTS table: the content table is
+# tiny, and standalone avoids rowid-sync triggers that silently rot if a write
+# path forgets them.
+_FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS prompts_fts USING fts5(
+  rel_path UNINDEXED,
+  blob
+);
 """
 
 _IDENTITY_COLUMNS = (
@@ -81,7 +117,40 @@ _IDENTITY_COLUMNS = (
     ("source", "TEXT NOT NULL DEFAULT 'instagram'"),
 )
 
+# The verdict behind glam_score. Previously only the collapsed 0-3 int reached
+# SQLite and everything else lived in per-file sidecars, so "re-score what the
+# old prompt judged" or "retry the ones that timed out" meant walking the
+# archive and parsing thousands of JSON files. These make both a WHERE clause.
+_GLAM_COLUMNS = (
+    ("glam_has_woman", "INTEGER NOT NULL DEFAULT 0"),
+    ("glam_sexy", "INTEGER NOT NULL DEFAULT 0"),
+    ("glam_confidence", "REAL"),
+    # 0-4 ordinal from the v4 prompts; -1 for legacy boolean verdicts.
+    ("glam_tier", "INTEGER NOT NULL DEFAULT -1"),
+    ("glam_prompt_version", "TEXT"),
+    # Last failure for this file. NULL once it scores; set means retryable.
+    ("glam_error", "TEXT"),
+    ("glam_scored_at", "TEXT"),
+)
+
 DEFAULT_SOURCE = "instagram"
+
+_PROMPTS_IMPORTED_KEY = "prompts_imported_from_json"
+_FTS_TOKEN = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _fts_query(raw: str) -> str:
+    """Build an FTS5 MATCH expression from free text.
+
+    Every token becomes a quoted prefix term, so "red bik" finds "red bikini".
+    Quoting is what makes this injection-proof: FTS5 operators (NEAR, OR, ^, -)
+    inside a quoted string are literal, and non-alphanumerics never survive
+    tokenization. Returns "" when there is nothing searchable.
+    """
+    tokens = _FTS_TOKEN.findall(raw.lower())
+    if not tokens:
+        return ""
+    return " AND ".join(f'"{t}"*' for t in tokens)
 
 
 def is_media_file(name: str) -> bool:
@@ -92,16 +161,37 @@ def normalize_rel_path(rel_path: str) -> str:
     return rel_path.replace("\\", "/").lstrip("/")
 
 
-def taken_at_for_image(full_path: str, filename: str) -> str:
-    """Resolve sortable timestamp: meta → filename UTC → mtime."""
+def read_sidecar(full_path: str, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Sidecar metadata for a media file, or {}.
+
+    Pass an already-loaded `meta` to reuse it. Indexing one file needs four
+    different fields out of the sidecar, and each used to load and parse it
+    independently — 4x the file opens for one photo.
+    """
+    if meta is not None:
+        return meta
+    if not full_path:
+        return {}
     try:
         from promptstudio.storage.metadata import load_post_metadata
 
-        meta = load_post_metadata(full_path) if full_path else None
-        if meta and meta.get("taken_at"):
-            return str(meta["taken_at"])
-        if meta and meta.get("downloaded_at"):
-            return str(meta["downloaded_at"])
+        return load_post_metadata(full_path) or {}
+    except Exception:
+        return {}
+
+
+def taken_at_for_image(
+    full_path: str,
+    filename: str,
+    meta: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Resolve sortable timestamp: meta → filename UTC → mtime."""
+    try:
+        side = read_sidecar(full_path, meta)
+        if side.get("taken_at"):
+            return str(side["taken_at"])
+        if side.get("downloaded_at"):
+            return str(side["downloaded_at"])
     except Exception:
         pass
     m = _FILENAME_TS.search(filename)
@@ -154,11 +244,251 @@ class ArchiveIndex:
         os.makedirs(os.path.dirname(self.db_path) or self.base_dir, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._apply_pragmas()
+        self.fts_enabled = False
         with self._lock:
             self._conn.executescript(_SCHEMA)
+            self._conn.executescript(_PHASH_SCHEMA)
+            self._init_fts()
             self._migrate_identity_columns()
             self._migrate_deleted_posts()
             self._conn.commit()
+
+    def _apply_pragmas(self) -> None:
+        """Connection tuning. Best-effort — an old SQLite must not stop startup.
+
+        WAL matters most: under the default rollback journal a long write (a
+        rebuild, a batch glam update) blocks readers, which here means the whole
+        gallery API stalls behind it.
+        """
+        for pragma in (
+            "PRAGMA journal_mode=WAL",
+            "PRAGMA busy_timeout=5000",
+            # WAL already survives process crash; FULL only buys power-loss
+            # durability for an index that can be rebuilt from disk.
+            "PRAGMA synchronous=NORMAL",
+        ):
+            try:
+                self._conn.execute(pragma)
+            except sqlite3.DatabaseError as e:
+                log.debug("pragma failed (%s): %s", pragma, e)
+
+    def _init_fts(self) -> None:
+        """Create the FTS5 index if this SQLite build has FTS5.
+
+        Caller MUST hold self._lock. Absence is not fatal — search falls back to
+        the old LIKE scan, just slower.
+        """
+        try:
+            self._conn.executescript(_FTS_SCHEMA)
+            self.fts_enabled = True
+        except sqlite3.DatabaseError as e:
+            self.fts_enabled = False
+            log.warning("FTS5 unavailable, prompt search falls back to LIKE: %s", e)
+
+    # ── prompt storage ───────────────────────────────────────────────
+
+    @staticmethod
+    def _prompt_row(rel_path: str, entry: Dict[str, Any]) -> Tuple:
+        params = entry.get("parameters") or {}
+        return (
+            rel_path,
+            os.path.basename(rel_path),
+            json.dumps(entry, ensure_ascii=False),
+            params.get("vision_engine"),
+            params.get("pipeline_version"),
+            datetime.now(timezone.utc).isoformat(),
+        )
+
+    def _reindex_prompt(self, rel_path: str, entry: Optional[Dict[str, Any]]) -> None:
+        """Caller MUST hold self._lock."""
+        if not self.fts_enabled:
+            return
+        self._conn.execute("DELETE FROM prompts_fts WHERE rel_path = ?", (rel_path,))
+        if entry is None:
+            return
+        blob = prompt_search_blob(entry)
+        if blob:
+            self._conn.execute(
+                "INSERT INTO prompts_fts(rel_path, blob) VALUES (?, ?)", (rel_path, blob)
+            )
+
+    def prompt_set(self, rel_path: str, entry: Dict[str, Any]) -> None:
+        """Upsert one prompt. O(1) — the JSON file rewrote all ~4400 per save."""
+        rel_path = normalize_rel_path(rel_path)
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO prompts(rel_path, filename, payload, vision_engine, "
+                "pipeline_version, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(rel_path) DO UPDATE SET "
+                "filename=excluded.filename, payload=excluded.payload, "
+                "vision_engine=excluded.vision_engine, "
+                "pipeline_version=excluded.pipeline_version, "
+                "updated_at=excluded.updated_at",
+                self._prompt_row(rel_path, entry),
+            )
+            self._reindex_prompt(rel_path, entry)
+            self._conn.commit()
+
+    def prompt_get(self, rel_path: str, filename: str = "") -> Optional[Dict[str, Any]]:
+        rel_path = normalize_rel_path(rel_path)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload FROM prompts WHERE rel_path = ?", (rel_path,)
+            ).fetchone()
+            if row is None and filename:
+                # Legacy JSON keyed some entries by bare filename. Only trust it
+                # when exactly one creator owns that name — otherwise two
+                # creators with photo_1.jpg would read each other's prompt.
+                rows = self._conn.execute(
+                    "SELECT payload FROM prompts WHERE filename = ? LIMIT 2", (filename,)
+                ).fetchall()
+                row = rows[0] if len(rows) == 1 else None
+        if row is None:
+            return None
+        try:
+            data = json.loads(row["payload"])
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def prompt_delete(self, rel_path: str, filename: str = "") -> None:
+        rel_path = normalize_rel_path(rel_path)
+        with self._lock:
+            self._conn.execute("DELETE FROM prompts WHERE rel_path = ?", (rel_path,))
+            if filename:
+                self._conn.execute("DELETE FROM prompts WHERE filename = ?", (filename,))
+            self._reindex_prompt(rel_path, None)
+            self._conn.commit()
+
+    def prompt_count(self) -> int:
+        with self._lock:
+            return int(
+                self._conn.execute("SELECT COUNT(*) AS c FROM prompts").fetchone()["c"]
+            )
+
+    def prompt_all(self) -> Dict[str, Any]:
+        """Whole cache as a dict, for callers that still think in whole-cache terms."""
+        out: Dict[str, Any] = {}
+        with self._lock:
+            rows = self._conn.execute("SELECT rel_path, payload FROM prompts").fetchall()
+        for row in rows:
+            try:
+                data = json.loads(row["payload"])
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(data, dict):
+                out[row["rel_path"]] = data
+        return out
+
+    def prompt_replace_all(self, cache: Dict[str, Any]) -> int:
+        """Bulk replace. Used by the JSON import and the legacy save() path."""
+        rows = [
+            self._prompt_row(normalize_rel_path(k), v)
+            for k, v in (cache or {}).items()
+            if isinstance(v, dict)
+        ]
+        with self._lock:
+            self._conn.execute("DELETE FROM prompts")
+            if self.fts_enabled:
+                self._conn.execute("DELETE FROM prompts_fts")
+            if rows:
+                self._conn.executemany(
+                    "INSERT OR REPLACE INTO prompts(rel_path, filename, payload, "
+                    "vision_engine, pipeline_version, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+                if self.fts_enabled:
+                    fts_rows = [
+                        (r[0], prompt_search_blob(json.loads(r[2])))
+                        for r in rows
+                    ]
+                    self._conn.executemany(
+                        "INSERT INTO prompts_fts(rel_path, blob) VALUES (?, ?)",
+                        [(p, b) for p, b in fts_rows if b],
+                    )
+            self._conn.commit()
+        return len(rows)
+
+    # ── perceptual hashes ────────────────────────────────────────────
+
+    def set_phash(self, rel_path: str, value: int) -> None:
+        from promptstudio.storage.dedupe import phash_hex
+
+        rel = normalize_rel_path(rel_path)
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO phashes(rel_path, phash, computed_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(rel_path) DO UPDATE SET "
+                "phash=excluded.phash, computed_at=excluded.computed_at",
+                (rel, phash_hex(value), datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+
+    def set_phashes(self, items: Sequence[Tuple[str, int]]) -> int:
+        """Bulk upsert — one transaction for a whole hashing pass."""
+        from promptstudio.storage.dedupe import phash_hex
+
+        now = datetime.now(timezone.utc).isoformat()
+        rows = [(normalize_rel_path(rel), phash_hex(value), now) for rel, value in items]
+        if not rows:
+            return 0
+        with self._lock:
+            self._conn.executemany(
+                "INSERT INTO phashes(rel_path, phash, computed_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(rel_path) DO UPDATE SET "
+                "phash=excluded.phash, computed_at=excluded.computed_at",
+                rows,
+            )
+            self._conn.commit()
+        return len(rows)
+
+    def get_phash(self, rel_path: str) -> Optional[int]:
+        from promptstudio.storage.dedupe import phash_from_hex
+
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT phash FROM phashes WHERE rel_path = ?",
+                (normalize_rel_path(rel_path),),
+            ).fetchone()
+        return phash_from_hex(row["phash"]) if row else None
+
+    def all_phashes(self) -> Dict[str, int]:
+        from promptstudio.storage.dedupe import phash_from_hex
+
+        with self._lock:
+            rows = self._conn.execute("SELECT rel_path, phash FROM phashes").fetchall()
+        out: Dict[str, int] = {}
+        for row in rows:
+            value = phash_from_hex(row["phash"])
+            if value is not None:
+                out[row["rel_path"]] = value
+        return out
+
+    def paths_missing_phash(self) -> List[str]:
+        """Indexed media with no hash yet, so a pass can resume."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT p.rel_path FROM photos p "
+                "LEFT JOIN phashes h ON h.rel_path = p.rel_path "
+                "WHERE h.rel_path IS NULL ORDER BY p.rel_path"
+            ).fetchall()
+        return [row["rel_path"] for row in rows]
+
+    def delete_phash(self, rel_path: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM phashes WHERE rel_path = ?",
+                (normalize_rel_path(rel_path),),
+            )
+            self._conn.commit()
+
+    def prompt_import_done(self) -> bool:
+        return self._meta_get(_PROMPTS_IMPORTED_KEY) == "1"
+
+    def mark_prompt_import_done(self) -> None:
+        self._meta_set(_PROMPTS_IMPORTED_KEY, "1")
 
     def _migrate_identity_columns(self) -> None:
         """Add post_id/shortcode/glam_score to existing DBs."""
@@ -166,7 +496,7 @@ class ArchiveIndex:
             row[1]
             for row in self._conn.execute("PRAGMA table_info(photos)").fetchall()
         }
-        for name, col_type in _IDENTITY_COLUMNS:
+        for name, col_type in _IDENTITY_COLUMNS + _GLAM_COLUMNS:
             if name not in cols:
                 self._conn.execute(f"ALTER TABLE photos ADD COLUMN {name} {col_type}")
         self._conn.execute(
@@ -180,6 +510,11 @@ class ArchiveIndex:
         )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_photos_source ON photos(source)"
+        )
+        # Drives "re-score everything the old prompt judged" without a rescan.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photos_glam_version "
+            "ON photos(glam_prompt_version)"
         )
 
     def _migrate_deleted_posts(self) -> None:
@@ -227,26 +562,25 @@ class ArchiveIndex:
             self._conn.close()
 
     @staticmethod
-    def _identity_from_file(full_path: str) -> Tuple[str, str]:
+    def _identity_from_file(
+        full_path: str,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[str, str]:
         """Return (post_id, shortcode) from sidecar metadata if present."""
         try:
-            from promptstudio.storage.metadata import load_post_metadata
-
-            meta = load_post_metadata(full_path) or {}
-            return str(meta.get("post_id") or ""), str(meta.get("shortcode") or "")
+            side = read_sidecar(full_path, meta)
+            return str(side.get("post_id") or ""), str(side.get("shortcode") or "")
         except Exception:
             return "", ""
 
     @staticmethod
-    def _glam_from_file(full_path: str) -> int:
+    def _glam_from_file(full_path: str, meta: Optional[Dict[str, Any]] = None) -> int:
         """Return glam_score from sidecar (-1 if missing)."""
         try:
-            from promptstudio.storage.metadata import load_post_metadata
-
-            meta = load_post_metadata(full_path) or {}
-            if "glam_score" in meta:
-                return int(meta.get("glam_score"))
-            glam = meta.get("glam")
+            side = read_sidecar(full_path, meta)
+            if "glam_score" in side:
+                return int(side.get("glam_score"))
+            glam = side.get("glam")
             if isinstance(glam, dict) and "score" in glam:
                 return int(glam.get("score"))
         except Exception:
@@ -313,12 +647,16 @@ class ArchiveIndex:
                         mtime = os.path.getmtime(full)
                     except OSError:
                         mtime = 0.0
-                    taken = taken_at_for_image(full, filename)
+                    # One read, four consumers. Each of these used to load and
+                    # parse the sidecar itself: 4 opens per photo, 18k opens
+                    # across a 4.5k-file archive, every time the index is built.
+                    side = read_sidecar(full)
+                    taken = taken_at_for_image(full, filename, side)
                     entry = cache.get(rel) or cache.get(filename)
                     has_p, stale, blob = prompt_flags(entry, engine_id)
                     fav = 1 if rel in favs else 0
-                    post_id, shortcode = self._identity_from_file(full)
-                    glam = self._glam_from_file(full)
+                    post_id, shortcode = self._identity_from_file(full, side)
+                    glam = self._glam_from_file(full, side)
                     rows.append(
                         (
                             rel,
@@ -333,7 +671,7 @@ class ArchiveIndex:
                             post_id or None,
                             shortcode or None,
                             glam,
-                            self._source_from_file(full),
+                            self._source_from_file(full, side),
                         )
                     )
 
@@ -379,16 +717,23 @@ class ArchiveIndex:
             mtime = os.path.getmtime(full)
         except OSError:
             mtime = 0.0
+        # Load the sidecar at most once for the up-to-four fields that come out
+        # of it. Left as None when every one of them was supplied, so callers
+        # that pass everything still touch no extra files.
+        side_meta: Optional[Dict[str, Any]] = None
+        if taken_at is None or post_id is None or shortcode is None or glam_score is None:
+            side_meta = read_sidecar(full)
+
         if taken_at is None:
-            taken_at = taken_at_for_image(full, filename)
+            taken_at = taken_at_for_image(full, filename, side_meta)
         if post_id is None or shortcode is None:
-            meta_pid, meta_sc = self._identity_from_file(full)
+            meta_pid, meta_sc = self._identity_from_file(full, side_meta)
             if post_id is None:
                 post_id = meta_pid or None
             if shortcode is None:
                 shortcode = meta_sc or None
         if glam_score is None:
-            side = self._glam_from_file(full)
+            side = self._glam_from_file(full, side_meta)
             if side >= 0:
                 glam_score = side
 
@@ -419,7 +764,8 @@ class ArchiveIndex:
             if source is None and existing and "source" in existing.keys():  # noqa: SIM118
                 source = existing["source"]
             if not source:
-                source = self._source_from_file(full)
+                # side_meta may be None here; read_sidecar loads on demand.
+                source = self._source_from_file(full, side_meta)
             self._conn.execute(
                 "INSERT INTO photos("
                 "rel_path, creator, filename, taken_at, mtime, "
@@ -473,22 +819,141 @@ class ArchiveIndex:
         *,
         has_woman: int = 0,
         sexy: int = 0,
+        confidence: Optional[float] = None,
+        tier: int = -1,
+        prompt_version: Optional[str] = None,
+        error: Optional[str] = None,
     ) -> None:
-        """Update glam_score for an existing row (upsert minimal if missing)."""
+        """Record a glam verdict (upsert minimal if the row is not indexed yet).
+
+        `has_woman` and `sexy` used to be accepted and silently dropped — only
+        the collapsed int was written. Everything the classifier decided now
+        lands in columns so it can be queried.
+
+        Pass `error` for a failed classify: the score stays -1 and the row
+        becomes findable via list_glam_errors() instead of being indistinguishable
+        from something never attempted.
+        """
         rel = normalize_rel_path(rel_path)
         score = int(glam_score)
+        scored_at = datetime.now(timezone.utc).isoformat()
+        fields = (
+            score,
+            1 if has_woman else 0,
+            1 if sexy else 0,
+            float(confidence) if confidence is not None else None,
+            int(tier),
+            prompt_version or None,
+            error or None,
+            scored_at,
+        )
         with self._lock:
             cur = self._conn.execute(
-                "UPDATE photos SET glam_score = ? WHERE rel_path = ?",
-                (score, rel),
+                "UPDATE photos SET glam_score = ?, glam_has_woman = ?, "
+                "glam_sexy = ?, glam_confidence = ?, glam_tier = ?, "
+                "glam_prompt_version = ?, glam_error = ?, glam_scored_at = ? "
+                "WHERE rel_path = ?",
+                (*fields, rel),
             )
-            if cur.rowcount == 0:
-                # Row not indexed yet — full upsert
-                pass
-            else:
+            if cur.rowcount:
                 self._conn.commit()
                 return
+        # Row not indexed yet — create it, then attach the verdict.
         self.upsert_photo(rel, glam_score=score)
+        with self._lock:
+            self._conn.execute(
+                "UPDATE photos SET glam_score = ?, glam_has_woman = ?, "
+                "glam_sexy = ?, glam_confidence = ?, glam_tier = ?, "
+                "glam_prompt_version = ?, glam_error = ?, glam_scored_at = ? "
+                "WHERE rel_path = ?",
+                (*fields, rel),
+            )
+            self._conn.commit()
+
+    def get_glam_verdict(self, rel_path: str) -> Dict[str, Any]:
+        """Everything recorded about this file's last classify attempt."""
+        rel = normalize_rel_path(rel_path)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT glam_score, glam_has_woman, glam_sexy, glam_confidence, "
+                "glam_tier, glam_prompt_version, glam_error, glam_scored_at "
+                "FROM photos WHERE rel_path = ?",
+                (rel,),
+            ).fetchone()
+        if not row:
+            return {}
+        return {
+            "glam_score": int(row["glam_score"] if row["glam_score"] is not None else -1),
+            "has_woman": bool(row["glam_has_woman"]),
+            "sexy": bool(row["glam_sexy"]),
+            "confidence": row["glam_confidence"],
+            "tier": int(row["glam_tier"] if row["glam_tier"] is not None else -1),
+            "prompt_version": row["glam_prompt_version"],
+            "error": row["glam_error"],
+            "scored_at": row["glam_scored_at"],
+        }
+
+    def list_stale_glam(
+        self,
+        current_versions: Sequence[str],
+        *,
+        creator: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[str]:
+        """rel_paths scored by a prompt version that is no longer current.
+
+        Improving a prompt used to mean re-running the whole archive with
+        --force, because nothing recorded which version produced a score.
+        """
+        versions = [v for v in current_versions if v]
+        if not versions:
+            return []
+        placeholders = ", ".join("?" for _ in versions)
+        sql = (
+            "SELECT rel_path FROM photos WHERE glam_score >= 0 AND "
+            f"(glam_prompt_version IS NULL OR glam_prompt_version NOT IN ({placeholders}))"
+        )
+        params: List[Any] = list(versions)
+        if creator:
+            sql += " AND creator = ?"
+            params.append(creator)
+        sql += " ORDER BY rel_path"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [r["rel_path"] for r in rows]
+
+    def list_glam_errors(
+        self,
+        *,
+        creator: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Unscored files that failed with a recorded reason — retry candidates."""
+        sql = (
+            "SELECT rel_path, glam_error, glam_scored_at FROM photos "
+            "WHERE glam_error IS NOT NULL AND glam_error != ''"
+        )
+        params: List[Any] = []
+        if creator:
+            sql += " AND creator = ?"
+            params.append(creator)
+        sql += " ORDER BY glam_scored_at DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [
+            {
+                "rel_path": r["rel_path"],
+                "error": r["glam_error"],
+                "scored_at": r["glam_scored_at"],
+            }
+            for r in rows
+        ]
 
     def delete_photo(self, rel_path: str) -> None:
         rel = normalize_rel_path(rel_path)
@@ -532,13 +997,14 @@ class ArchiveIndex:
         return (platform or DEFAULT_SOURCE).strip().lower() or DEFAULT_SOURCE
 
     @staticmethod
-    def _source_from_file(full_path: str) -> str:
+    def _source_from_file(
+        full_path: str,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """Return the sidecar's `source`, defaulting to instagram for legacy files."""
         try:
-            from promptstudio.storage.metadata import load_post_metadata
-
-            meta = load_post_metadata(full_path) or {}
-            return str(meta.get("source") or "").strip().lower() or DEFAULT_SOURCE
+            side = read_sidecar(full_path, meta)
+            return str(side.get("source") or "").strip().lower() or DEFAULT_SOURCE
         except Exception:
             return DEFAULT_SOURCE
 
@@ -809,8 +1275,22 @@ class ArchiveIndex:
 
     def list_creators(self) -> List[Dict[str, Any]]:
         from promptstudio.scraping.checkpoints import SyncCheckpoints
+        from promptstudio.scraping.outfit_classifier import active_prompt_versions
 
         sync = SyncCheckpoints().load()
+        # Scored by a prompt version that is no longer current — the "re-score
+        # outdated" count. Empty version list means we cannot tell, so nothing
+        # is reported stale rather than everything.
+        versions = [v for v in active_prompt_versions() if v]
+        if versions:
+            placeholders = ", ".join("?" for _ in versions)
+            stale_sql = (
+                "SUM(CASE WHEN glam_score >= 0 AND (glam_prompt_version IS NULL "
+                f"OR glam_prompt_version NOT IN ({placeholders})) "
+                "THEN 1 ELSE 0 END) AS stale_count, "
+            )
+        else:
+            stale_sql = "0 AS stale_count, "
         with self._lock:
             rows = self._conn.execute(
                 "SELECT creator, "
@@ -818,8 +1298,10 @@ class ArchiveIndex:
                 "SUM(CASE WHEN IFNULL(glam_score, -1) >= 0 THEN 1 ELSE 0 END) AS scored_count, "
                 "SUM(CASE WHEN IFNULL(glam_score, -1) < 0 THEN 1 ELSE 0 END) AS unscored_count, "
                 "SUM(CASE WHEN glam_score BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS reject_count, "
+                + stale_sql +
                 "MIN(filename) AS cover "
-                "FROM photos GROUP BY creator ORDER BY photo_count DESC"
+                "FROM photos GROUP BY creator ORDER BY photo_count DESC",
+                versions,
             ).fetchall()
         creators = []
         for row in rows:
@@ -830,6 +1312,7 @@ class ArchiveIndex:
             scored = int(row["scored_count"] or 0)
             unscored = int(row["unscored_count"] or 0)
             rejects = int(row["reject_count"] or 0)
+            stale = int(row["stale_count"] or 0)
             creators.append(
                 {
                     "name": name,
@@ -837,6 +1320,7 @@ class ArchiveIndex:
                     "scored_count": scored,
                     "unscored_count": unscored,
                     "reject_count": rejects,
+                    "stale_count": stale,
                     "cover_url": f"/media/{name}/{urllib.parse.quote(cover)}",
                     "cover_thumb_url": thumb_url(f"{name}/{cover}"),
                     "last_synced_at": entry.get("updated_at") or None,
@@ -913,11 +1397,31 @@ class ArchiveIndex:
             params.extend(f"%{ext}" for ext in IMAGE_EXTENSIONS)
         if search:
             q = search.lower().strip()
-            where.append(
-                "(LOWER(creator) LIKE ? OR LOWER(filename) LIKE ? OR IFNULL(prompt_search, '') LIKE ?)"
-            )
             like = f"%{q}%"
-            params.extend([like, like, like])
+            fts_query = _fts_query(q) if (self.fts_enabled and FTS_SEARCH) else ""
+            if fts_query:
+                # Prompt text goes through FTS5 instead of a leading-wildcard
+                # LIKE. Creator and filename stay on LIKE: they are short, and
+                # people type fragments of a handle rather than whole tokens.
+                #
+                # OFF BY DEFAULT — measured, not assumed. See docs/review_backend
+                # _architecture.md S5: FTS wins ~1.4x on selective terms but
+                # loses ~3x on common ones, because `IN (subquery)` materialises
+                # every match while LIKE short-circuits per row. At archive
+                # sizes where LIKE costs single-digit ms, that trade is a loss.
+                # The index is still maintained so this can flip when the
+                # archive is large enough to change the answer.
+                where.append(
+                    "(LOWER(creator) LIKE ? OR LOWER(filename) LIKE ? OR rel_path IN "
+                    "(SELECT rel_path FROM prompts_fts WHERE prompts_fts MATCH ?))"
+                )
+                params.extend([like, like, fts_query])
+            else:
+                where.append(
+                    "(LOWER(creator) LIKE ? OR LOWER(filename) LIKE ? "
+                    "OR IFNULL(prompt_search, '') LIKE ?)"
+                )
+                params.extend([like, like, like])
 
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
         sort = (sort or "name").lower()

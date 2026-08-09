@@ -61,7 +61,7 @@ via **ad-hoc pairwise checks** rather than a lease.
 
 ## 3. Findings, ranked
 
-### S1 — Every derived state file can be truncated by a crash 🟠
+### S1 — Every derived state file can be truncated by a crash 🟠 ✅ done
 
 Ten writers use bare `open(path, "w")`. `creator_queue.py:122` is the **only**
 one that does it correctly — mkstemp → `fsync` → `os.replace`, with a docstring
@@ -76,7 +76,7 @@ parse error and returns `{}`. The failure mode is *silent total loss*.
 **Fix:** extract `atomic_write_json(path, data)` from `creator_queue._save` and
 use it in all ten places. Half a day, removes a whole class of data loss.
 
-### S2 — An unhandled exception drops the connection instead of returning 500 🟠
+### S2 — An unhandled exception drops the connection instead of returning 500 🟠 ✅ done
 
 `do_GET`/`do_POST`/`do_PUT`/`do_DELETE` have no top-level try/except. An
 unhandled error propagates to `socketserver.handle_error`, which logs a traceback
@@ -88,7 +88,7 @@ generally treats both as offline.
 route and params, and returns a JSON 500. ~20 lines, and it makes every future
 bug visible instead of invisible.
 
-### S3 — There is no logging 🟠
+### S3 — There is no logging 🟠 ✅ done
 
 34 `print()` calls, zero uses of `logging`. 56 broad `except Exception:` handlers,
 21 of which immediately `pass`.
@@ -103,7 +103,7 @@ archive. Then walk the 21 `except: pass` sites and either log or narrow them.
 They are not all wrong — several are genuinely optional paths — but they should
 say so.
 
-### S4 — The prompt cache is the wrong data structure 🟡
+### S4 — The prompt cache is the wrong data structure 🟡 ✅ done
 
 `prompts_cache.json` is loaded whole into memory and **rewritten in full on every
 single prompt save**. At ~4400 entries that is an O(n) serialize per O(1) logical
@@ -116,7 +116,37 @@ the same filename can collide.
 the JSON kept as an import path for one release. Fixes durability (S1), write
 cost, and the dual source of truth in one move.
 
-### S5 — Search cannot use an index 🟡
+### S5 — Search cannot use an index 🟡 ⚠️ built, left off — the measurement said no
+
+**The recommendation above was wrong, and the benchmark is why it is not
+enabled.** FTS5 is built and the index is maintained, but `query_photos` still
+uses the LIKE scan by default (`PROMPTSTUDIO_FTS_SEARCH=0`).
+
+Measured on synthetic archives with a realistic vocabulary (3000 distinct
+words), same machine, same query shape:
+
+| rows | query | matches | LIKE | FTS5 | |
+|-----:|-------|--------:|-----:|-----:|---|
+| 4 400 | rare word | 51 | 6.6 ms | **4.5 ms** | FTS wins 1.5x |
+| 4 400 | common word | 2 946 | **3.1 ms** | 9.4 ms | LIKE wins 3x |
+| 40 000 | rare word | 511 | 44 ms | **30 ms** | FTS wins 1.5x |
+| 40 000 | common word | 26 902 | **35 ms** | 99 ms | LIKE wins 3x |
+
+The integration is `rel_path IN (SELECT … MATCH …)`, which materialises every
+match before probing; LIKE short-circuits per row and stops at the page limit.
+So FTS only wins when the query is *selective*, and loses badly when it is
+not — and "not selective" is exactly what a search box sees while someone is
+still typing.
+
+At 4400 rows LIKE costs 3–7 ms, which is imperceptible. Shipping a 3x
+regression on the common path to win 1.5x on the rare one is a bad trade, so
+the flag defaults off. Revisit if the archive grows an order of magnitude, or
+rewrite the integration to push the page limit into the FTS scan.
+
+**Kept anyway:** the index is maintained on every prompt write (one extra row),
+so enabling it later is a flag flip rather than a backfill.
+
+<details><summary>original recommendation</summary>
 
 `query_photos` builds `LOWER(prompt_search) LIKE '%q%'`. A leading wildcard means
 no index is usable: every search is a full table scan plus a `LOWER()` per row.
@@ -126,8 +156,9 @@ query runs twice (once for `COUNT(*)`, once for the page).
 **Fix:** SQLite **FTS5** virtual table over `prompt_search`, kept in sync by
 trigger. Turns substring scanning into a real inverted index and gives you
 phrase/prefix queries for free.
+</details>
 
-### S6 — Five job managers, one missing abstraction 🟡
+### S6 — Five job managers, one missing abstraction 🟡 ✅ leases done, base class deferred
 
 `SyncManager`, `BatchPromptManager`, `ClassifyJobManager`, `ComfyJobManager` and
 `CreatorScrapeQueue` each independently reimplement: double-checked-locking
@@ -149,6 +180,27 @@ The actual model is simple: there are three **exclusive external resources**
 `try_acquire(resource, owner) -> bool` under one lock. Each job declares what it
 needs. The 8 scattered checks collapse into one, and the race closes.
 
+**Shipped:** `promptstudio/jobs.py` — a `LeaseRegistry` over `ollama`,
+`instagram`, `comfy`. Acquisition of all of a job's resources happens under one
+lock, so it is atomic and the race is closed (a 16-thread contention test
+asserts exactly one winner). `classify_job._vision_busy_elsewhere()` is gone;
+classify and batch-prompt now contend for the same `ollama` lease and the
+refusal names the holder. `GET /api/health` reports `leases`.
+
+Two things found while wiring it:
+
+* The batch runner had **no try/finally**. An exception escaping the loop left
+  `running=True` forever — the job could never be restarted without a server
+  bounce — and would now also have stranded the lease. Both fixed.
+* Comfy is declared but deliberately *not* made exclusive with Ollama. They do
+  share a GPU, but today they can run together; making that exclusive is a
+  product decision, not a refactor.
+
+**Deferred:** the `BackgroundJob` base class. The duplicated
+singleton/status/cancel scaffolding is real but cosmetic, and collapsing it
+touches all five managers at once — poor value against the conflict risk while
+another session is editing the same files. The lease was the correctness half.
+
 ### S7 — `handler.py` is a 1620-line if-chain 🟡
 
 36 route branches; `do_POST` alone is 827 lines. Business logic (queue policy,
@@ -159,7 +211,7 @@ so it is only reachable through HTTP and only testable through HTTP.
 into the package it belongs to. Mechanical, low-risk, and it makes the logic
 unit-testable. Do it incrementally — one route group per PR — not as a big bang.
 
-### S8 — SQLite is running on defaults 🟢
+### S8 — SQLite is running on defaults 🟢 ✅ done
 
 No `journal_mode=WAL`, no `busy_timeout`, no `synchronous` tuning. One connection
 shared across all request threads behind a global `RLock`, so every API call
@@ -172,13 +224,32 @@ a rebuild is a stop-the-world event for the API.
 **Fix:** `PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;` at connect, and
 make `rebuild()` an mtime-diffed upsert rather than delete-all.
 
+**Shipped:** WAL, `busy_timeout=5000`, `synchronous=NORMAL`.
+
+**Incremental rebuild: measured, then dropped.** Profiling `rebuild()` found the
+cost was never the SQL — it was that four different fields of each sidecar
+(`taken_at`, identity, glam, source) each loaded and parsed `*.meta.json`
+independently. 4 opens per photo; 18 000 across a 4500-file archive, on every
+build *and* on every per-photo `upsert_photo`.
+
+| 4500 files | sidecar reads | rebuild |
+|---|--:|--:|
+| before | 18 000 (4.0/file) | 2.15 s |
+| after `read_sidecar()` | 4 500 (1.0/file) | **0.70 s** |
+
+At 0.7 s the mtime-diff is not worth its correctness risk: a skip keyed on media
+mtime misses a sidecar rewritten by an out-of-process classify run, and
+`rebuild()` exists precisely to repair the index from disk. `tests/
+test_index_sidecar_reads.py` asserts the read counts, since the behaviour is
+invisible in the output.
+
 ---
 
 ## 4. Feature proposals
 
 Ranked by value ÷ effort. The first two are the ones I would actually build.
 
-### F1 — Embedding index: visual similarity, real semantic search, near-dup collapse ⭐
+### F1 — Embedding index ⭐ ⚠️ pHash half shipped; embeddings not started
 
 `roadmap.md` defers CLIP with "not needed for the generate → Comfy → compare
 loop." That was a reasonable call, but the cost side has changed: **sqlite-vec**
@@ -204,7 +275,32 @@ cheaper than embeddings and catches the most common case.
 
 Effort: a day for the embedding job, a day for sqlite-vec plumbing and the UI.
 
-### F2 — Run journal (JSONL) for every background job ⭐
+**Shipped (the cheap half):** `storage/dedupe.py` — 64-bit DCT perceptual hash,
+no new dependencies, stored in its own `phashes` table. `scripts/
+find_duplicates.py` reports groups and suggests a keeper; it never deletes,
+because grouping is a heuristic and deletion belongs in the UI where it lands in
+the trash.
+
+Measured separation on synthetic photos — the threshold is not on a knife edge:
+
+| transformation | distance |
+|---|--:|
+| re-encode (JPEG q40) | 0 bits |
+| resize to half | 0 bits |
+| +45 brightness | 2 bits |
+| ~6% crop | 4 bits |
+| *unrelated photo* | *30–32 bits* |
+
+Default threshold 8 sits in a 24-bit gap. Grouping the whole archive is 0.02 s
+at 4.4k files and 0.71 s at 50k; `find_similar()` is 0.4 ms, fast enough to back
+a "more like this" endpoint later.
+
+**Still open:** embeddings (SigLIP 2 + sqlite-vec) for text→image search and
+kNN glam pre-scoring. pHash finds the *same* picture; it cannot find a
+*similar* one, and it does nothing for search. That needs the ML dependency
+decision.
+
+### F2 — Run journal (JSONL) for every background job ⭐ ✅ done
 
 One append-only `runs.jsonl` per job kind: start, per-item outcome, backoff
 events, final status. Cheap to write, trivially greppable, and it turns three
@@ -251,18 +347,22 @@ Keying on a content hash makes the cache self-healing. Low priority.
 
 ## 5. Suggested order
 
-1. **S1 + S2 + S3** — atomic writes, error boundary, logging. One "make failures
-   visible" PR. Cheap, and everything after it is easier to debug.
-2. **F2** — run journal, once logging exists.
-3. **S4 + S5** — prompt cache into SQLite, FTS5 for search. One storage PR;
-   S4 subsumes part of S1 and both touch the same table.
-4. **S6** — job/lease abstraction, before a sixth job type gets added.
+1. ~~**S1 + S2 + S3** — atomic writes, error boundary, logging.~~ **Done.**
+2. ~~**F2** — run journal.~~ **Done** — `storage/journal.py`, wired into classify,
+   batch-prompt and sync; served by `GET /api/journal?kind=<kind>`.
+   ~~**S8** — WAL + busy_timeout.~~ **Done.**
+3. ~~**S4** — prompt cache into SQLite.~~ **Done** — 7x faster writes, and the
+   filename-collision bug is gone. ~~**S5** — FTS5.~~ **Built, default off**;
+   the benchmark said the LIKE scan is faster for common queries at this size.
+4. ~~**S6** — job/lease abstraction.~~ **Done** (leases; base class deferred).
 5. **F1** — embeddings. The big feature; build it on the clean foundation.
 6. **S7** — router refactor, incrementally, whenever a route is touched anyway.
 
-**S8** (WAL, `busy_timeout`, incremental rebuild) is two lines of pragma plus a
-contained change to `rebuild()` — fold it into whichever storage PR lands first.
-**F3–F6** are opportunistic; none of them block anything.
+~~**S8**~~ done. **S7** (router) is deliberately still open: it is a
+maintainability change with no correctness or performance payoff, and the
+recommendation above was to do it incrementally as routes are touched rather
+than as a big-bang restructure of a file another session is editing.
+**F1** needs a dependency decision. **F3–F6** are opportunistic.
 
 `app.js` at 5074 lines has the same monolith problem as `handler.py` and is out
 of scope here, but it will need the same treatment.

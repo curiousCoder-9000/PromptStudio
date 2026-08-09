@@ -28,6 +28,7 @@ import json
 import os
 import re
 import time
+import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
@@ -48,18 +49,22 @@ from promptstudio.config import (
     CLASSIFY_SHEET_MAX_EDGE,
     CLASSIFY_STRUCTURED,
     CLASSIFY_TIMEOUT,
+    GLAM_SEXY_MIN,
     IMAGE_EXTENSIONS,
     MODEL_NAME,
     OLLAMA_URL,
     SAVED_DIR,
     VIDEO_EXTENSIONS,
 )
+from promptstudio.logging_setup import get_logger
 from promptstudio.scraping.video_frames import (
     compose_contact_sheet,
     extract_frame_at,
     find_video_cover_image,
     select_best_video_frames,
 )
+
+log = get_logger(__name__)
 
 CLASSIFY_PROMPT_VERSION = "v2-skin-exposure"
 CLASSIFY_REEL_PROMPT_VERSION = "v3-reel-frames"
@@ -71,6 +76,17 @@ TIER_TO_GLAM = {0: 0, 1: 0, 2: 1, 3: 2, 4: 3}
 
 # Failures that mean "no frames", as opposed to "the model call failed".
 _NO_FRAMES_ERRORS = frozenset({"no_usable_reel_frames", "no frame scores"})
+
+# The sheet reply parsed but yielded no usable panel row — the model did not
+# read the captions it was shown. Deliberately *not* in _NO_FRAMES_ERRORS: the
+# video decoded fine, so falling back to the cover would score the "before"
+# outfit, the exact failure the contact sheet exists to avoid. Falls back to a
+# ranked frame scored with the same ordinal vocabulary instead.
+#
+# Only the empty case trips this. Under-reporting does not: a model that omits
+# the panels it judged empty is behaving sensibly, and max-over-panels treats an
+# absent panel exactly like tier 0, so the reading stays correct.
+_SHEET_UNREADABLE = "sheet_panels_unreadable"
 
 _TIER_ANCHORS = (
     "     0 = no woman present\n"
@@ -191,7 +207,9 @@ LEGACY_FRAME_SCHEMA: Dict[str, Any] = {
         "sexy_revealing_outfit": {"type": "boolean"},
         "good_breasts": {"type": "boolean"},
         "confidence": {"type": "number"},
-        "brief_reason": {"type": "string"},
+        # Capped: an unbounded reason can run past num_predict and truncate the
+        # JSON mid-object, which costs a retry and can leave the item unscored.
+        "brief_reason": {"type": "string", "maxLength": 120},
     },
 }
 
@@ -203,7 +221,9 @@ FRAME_V4_SCHEMA: Dict[str, Any] = {
         "exposure_tier": {"type": "integer", "minimum": 0, "maximum": 4},
         "figure_visible": {"type": "boolean"},
         "confidence": {"type": "number"},
-        "brief_reason": {"type": "string"},
+        # Capped: an unbounded reason can run past num_predict and truncate the
+        # JSON mid-object, which costs a retry and can leave the item unscored.
+        "brief_reason": {"type": "string", "maxLength": 120},
     },
 }
 
@@ -228,7 +248,9 @@ SHEET_SCHEMA: Dict[str, Any] = {
         "outfit_changes": {"type": "boolean"},
         "figure_visible": {"type": "boolean"},
         "confidence": {"type": "number"},
-        "brief_reason": {"type": "string"},
+        # Capped: an unbounded reason can run past num_predict and truncate the
+        # JSON mid-object, which costs a retry and can leave the item unscored.
+        "brief_reason": {"type": "string", "maxLength": 120},
     },
 }
 
@@ -272,13 +294,24 @@ class PostVerdict:
     evidence: Dict[str, Any] = field(default_factory=dict)
 
     def matches_keep(self) -> bool:
-        if self.exposure_tier >= 0:
-            return self.has_woman and self.exposure_tier >= 3 and self.confidence >= 0.5
-        return (
-            self.has_woman
-            and (self.sexy_revealing_outfit or self.good_breasts)
-            and self.confidence >= 0.5
-        )
+        """Keep == exactly what the gallery Sexy filter shows.
+
+        There used to be two definitions: this one gated on confidence >= 0.5
+        while ``glam_score`` ignored confidence entirely, so a tier-3 read at
+        0.4 appeared in the Sexy filter while the CLI report, the job counters
+        and the sidecar all called it a reject. The v4 prompt tells the model to
+        report confidence below 0.5 whenever it is ambiguous, which turned an
+        edge case into a routine one.
+
+        Confidence is not discarded — it drives the confirm cascade, which
+        re-reads uncertain frames at full resolution before a score is written.
+        Once that has run, the threshold is the policy knob and belongs in one
+        place: GLAM_SEXY_MIN.
+        """
+        if not self.ok:
+            return False
+        score = self.glam_score if self.glam_score >= 0 else self.compute_glam_score()
+        return score >= GLAM_SEXY_MIN
 
     def compute_glam_score(self) -> int:
         """Map vision output → 0–3 glam score (gallery sexy filter uses >= 2)."""
@@ -347,6 +380,36 @@ def _parse_json_object(raw: str) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
+def _is_bad_request(exc: Exception) -> bool:
+    """True for HTTP 400 — how Ollama rejects an unsupported request field."""
+    return isinstance(exc, urllib.error.HTTPError) and exc.code == 400
+
+
+def _describe_request_error(exc: Exception) -> str:
+    """str(HTTPError) omits the body, which is where Ollama says what broke.
+
+    The body is a stream and can only be read once. Cache it on the exception:
+    without that, a retry against the same error object re-reads an exhausted
+    stream and the diagnostic degrades to a bare "HTTP Error 400: Bad Request"
+    by the time it reaches the caller.
+    """
+    text = str(exc)
+    if isinstance(exc, urllib.error.HTTPError):
+        body = getattr(exc, "_ps_body", None)
+        if body is None:
+            try:
+                body = exc.read().decode("utf-8", "replace").strip()
+            except Exception:
+                body = ""
+            try:
+                exc._ps_body = body
+            except AttributeError:
+                pass
+        if body:
+            text = f"{text}: {body[:200]}"
+    return text
+
+
 def _ollama_vision_json(
     image_path: str | Sequence[str],
     prompt: str = CLASSIFY_PROMPT,
@@ -400,11 +463,15 @@ def _ollama_vision_json(
             with urllib.request.urlopen(req, timeout=CLASSIFY_TIMEOUT) as response:
                 raw = (json.loads(response.read().decode("utf-8")).get("response") or "").strip()
         except Exception as e:
-            last_error = str(e)
+            last_error = _describe_request_error(e)
             # A rejected `format` will not start working on retry — drop the
             # constraint and let the regex fallback handle the free-text reply.
-            if "format" in payload and "format" in last_error.lower():
+            # Match on the HTTP status, not the message: urllib renders an
+            # HTTPError as just "HTTP Error 400: Bad Request", so a substring
+            # test for "format" never fired and the fallback was unreachable.
+            if "format" in payload and _is_bad_request(e):
                 payload.pop("format", None)
+                last_error += " (retrying without structured output)"
         else:
             data = _parse_json_object(raw)
             if data is not None:
@@ -562,6 +629,7 @@ def _aggregate_sheet_panels(
     Tiers on panels the model marked as having no woman are ignored.
     """
     panels: List[Dict[str, Any]] = []
+    seen: set[int] = set()
     raw_panels = data.get("panels")
     if isinstance(raw_panels, list):
         for entry in raw_panels:
@@ -574,6 +642,12 @@ def _aggregate_sheet_panels(
                 continue
             if not 1 <= idx <= n_panels:
                 continue
+            # First reading per index wins. A model that repeats `i` has stopped
+            # tracking the captions, and taking the max would let one panel it
+            # re-read three times outvote the eight it never looked at.
+            if idx in seen:
+                continue
+            seen.add(idx)
             has_woman = bool(entry.get("has_woman"))
             panels.append(
                 {
@@ -593,15 +667,21 @@ def _aggregate_sheet_panels(
     return int(peak["exposure_tier"]), int(peak["i"]), panels
 
 
-def _needs_confirm(tier: int, confidence: float) -> bool:
+def _needs_confirm(
+    tier: int,
+    confidence: float,
+    peak_in_last_shot: bool = False,
+) -> bool:
     """
     Escalate to a full-resolution look at the peak frame.
 
     Contact-sheet panels are ~256px wide, which is enough for "how much skin"
     but not for sheer-vs-opaque. Confirm exactly where it matters: on the
-    tier 2/3 boundary that decides the Sexy filter, or when the model is unsure.
+    tier 2/3 boundary that decides the Sexy filter, when the model is unsure,
+    or when a high tier came from the final shot — the reveal case the whole
+    pipeline exists for, and the one most worth being right about.
     """
-    return tier in (2, 3) or confidence < 0.5
+    return tier in (2, 3) or confidence < 0.5 or (peak_in_last_shot and tier >= 3)
 
 
 def _classify_reel_sheet(video_path: str, vision_budget: int) -> PostVerdict:
@@ -627,7 +707,10 @@ def _classify_reel_sheet(video_path: str, vision_budget: int) -> PostVerdict:
             evidence=evidence,
         )
 
-    evidence["frames_considered"] = len(sheet.picks)
+    # Frames decoded to choose the panels — not the panel count. Recording
+    # picks here made the sheet path look like it had considered 9 frames when
+    # it had ranked 16, the same misleading debug data the legacy path had.
+    evidence["frames_considered"] = int(sheet.considered) or len(sheet.picks)
     evidence["frame_times_sec"] = [round(p.t_sec, 2) for p in sheet.picks]
     evidence["frame_metrics"] = [p.to_dict() for p in sheet.picks]
     evidence["sheet"] = sheet.to_dict()
@@ -657,6 +740,25 @@ def _classify_reel_sheet(video_path: str, vision_budget: int) -> PostVerdict:
         evidence["panels"] = panels
         evidence["peak_panel"] = peak_panel
         evidence["outfit_changes"] = bool(data.get("outfit_changes"))
+        evidence["panels_read"] = len(panels)
+        if len(panels) < len(sheet.picks):
+            # Visible in the sidecar even when we still trust the reading: a
+            # reel scored from 4 of 9 panels should not look like one scored
+            # from all 9.
+            evidence["panels_incomplete"] = True
+
+        # No usable row at all means the captions were not read. Scoring from
+        # the model's own `reel_exposure` here would trust the one number the
+        # design deliberately treats as unauditable.
+        if not panels:
+            return PostVerdict(
+                path=video_path,
+                source="video_sheet",
+                error=_SHEET_UNREADABLE,
+                prompt_version=CLASSIFY_SHEET_VERSION,
+                evidence=evidence,
+            )
+
         model_rollup = data.get("reel_exposure")
         if model_rollup is not None:
             evidence["model_reel_exposure"] = model_rollup
@@ -666,15 +768,6 @@ def _classify_reel_sheet(video_path: str, vision_budget: int) -> PostVerdict:
                     evidence["rollup_disagreement"] = True
             except (TypeError, ValueError):
                 pass
-
-        if not panels:
-            # Schema satisfied but no usable panel rows — fall back to the
-            # model's own rollup rather than silently scoring 0.
-            try:
-                tier = max(0, min(4, int(model_rollup)))
-            except (TypeError, ValueError):
-                tier = 0
-            evidence["panels_missing"] = True
 
         peak_t = 0.0
         if 1 <= peak_panel <= len(sheet.picks):
@@ -699,7 +792,13 @@ def _classify_reel_sheet(video_path: str, vision_budget: int) -> PostVerdict:
         verdict.glam_score = verdict.compute_glam_score()
 
         # Cascade: re-read the peak frame at full resolution when it matters.
-        if vision_budget >= 2 and peak_t > 0 and _needs_confirm(tier, confidence):
+        if (
+            vision_budget >= 2
+            and peak_t > 0
+            and _needs_confirm(
+                tier, confidence, bool(evidence.get("peak_in_last_shot"))
+            )
+        ):
             confirm_path = extract_frame_at(video_path, peak_t)
             if confirm_path:
                 confirm = _classify_frame_ordinal(confirm_path, source="video")
@@ -844,6 +943,50 @@ def _classify_reel_frames(video_path: str, vision_budget: int) -> PostVerdict:
                 pass
 
 
+def _classify_sheet_fallback_frame(
+    video_path: str,
+    sheet_evidence: Dict[str, Any],
+) -> PostVerdict:
+    """
+    Score one ranked frame when the sheet reply was unusable.
+
+    Deliberately the *ordinal* single-frame path, not `_classify_reel_frames`:
+    that one still uses the generous v3 prompt, so falling back to it would
+    trade an unreadable sheet for a reading we know inflates. One frame with the
+    v4 tier vocabulary stays comparable with every other reel in the archive.
+    """
+    evidence = dict(sheet_evidence)
+    evidence["mode"] = "sheet_fallback_frame"
+
+    picks = select_best_video_frames(video_path, top_n=1, write_jpeg=True)
+    if not picks or not picks[0].path:
+        return PostVerdict(
+            path=video_path,
+            source="video",
+            error="no_usable_reel_frames",
+            prompt_version=CLASSIFY_SHEET_VERSION,
+            evidence=evidence,
+        )
+
+    pick = picks[0]
+    try:
+        verdict = _classify_frame_ordinal(pick.path, source="video")
+    finally:
+        if os.path.isfile(pick.path):
+            try:
+                os.remove(pick.path)
+            except OSError:
+                pass
+
+    verdict.path = video_path
+    evidence["frames_sent_to_vision"] = (
+        int(evidence.get("frames_sent_to_vision", 0)) + 1
+    )
+    evidence["frame_times_sec"] = [round(float(pick.t_sec), 2)]
+    verdict.evidence = evidence
+    return verdict
+
+
 def classify_video(
     video_path: str,
     max_frames: Optional[int] = None,
@@ -863,6 +1006,8 @@ def classify_video(
 
     if CLASSIFY_REEL_SHEET:
         verdict = _classify_reel_sheet(video_path, vision_budget)
+        if not verdict.ok and verdict.error == _SHEET_UNREADABLE:
+            verdict = _classify_sheet_fallback_frame(video_path, verdict.evidence)
     else:
         verdict = _classify_reel_frames(video_path, vision_budget)
 
@@ -918,9 +1063,33 @@ _GLAM_EVIDENCE_KEYS = (
     "sheet",
     "rollup_disagreement",
 )
-from promptstudio.logging_setup import get_logger
 
-log = get_logger(__name__)
+
+def current_prompt_version(path: str) -> str:
+    """The prompt version a fresh classify of `path` would record.
+
+    Config decides this — CLASSIFY_REEL_SHEET and CLASSIFY_PHOTO_ORDINAL both
+    change the vocabulary — so callers must not hardcode it.
+    """
+    if path.lower().endswith(VIDEO_EXTENSIONS):
+        return CLASSIFY_SHEET_VERSION if CLASSIFY_REEL_SHEET else CLASSIFY_REEL_PROMPT_VERSION
+    return CLASSIFY_FRAME_V4_VERSION if CLASSIFY_PHOTO_ORDINAL else CLASSIFY_PROMPT_VERSION
+
+
+def active_prompt_versions() -> List[str]:
+    """Every version a fresh classify could produce, for staleness queries.
+
+    Includes the sheet's single-frame fallback and confirm version, which a reel
+    legitimately ends up tagged with — treating those as stale would re-run them
+    forever.
+    """
+    versions = {
+        current_prompt_version("x.jpg"),
+        current_prompt_version("x.mp4"),
+    }
+    if CLASSIFY_REEL_SHEET:
+        versions.add(CLASSIFY_FRAME_V4_VERSION)
+    return sorted(versions)
 
 
 def persist_glam_score(rel_path: str, verdict: PostVerdict, full_path: str = "") -> None:
@@ -936,10 +1105,18 @@ def persist_glam_score(rel_path: str, verdict: PostVerdict, full_path: str = "")
             score,
             has_woman=1 if verdict.has_woman else 0,
             sexy=1 if verdict.sexy_revealing_outfit else 0,
+            confidence=verdict.confidence if verdict.ok else None,
+            tier=verdict.exposure_tier,
+            prompt_version=verdict.prompt_version if verdict.ok else None,
+            # Recorded only on failure, so a row with glam_error set is a retry
+            # candidate rather than something that was never attempted.
+            error=None if verdict.ok else (verdict.error or "unknown"),
         )
     except Exception as e:
         log.warning("glam index write failed for %s: %s", rel_path, e)
-    if full_path and os.path.isfile(full_path):
+    # Sidecar only on success. A failed retry must not overwrite a good score
+    # with -1 — the failure is recorded in the DB's glam_error column instead.
+    if verdict.ok and full_path and os.path.isfile(full_path):
         try:
             from promptstudio.storage.metadata import load_post_metadata, save_post_metadata
 
@@ -1033,7 +1210,7 @@ def decide_account(posts: Sequence[PostVerdict]) -> tuple[str, str]:
     if len(matches) >= need:
         return (
             "keep",
-            f"{len(matches)}/{len(usable)} posts match woman+sexy outfit+good breasts",
+            f"{len(matches)}/{len(usable)} posts score glam >= {GLAM_SEXY_MIN}",
         )
     if len(matches) == 0 and len(clear_rejects) >= need:
         reasons = "; ".join(p.brief_reason or "no match" for p in clear_rejects[:3])

@@ -22,10 +22,14 @@ from promptstudio.config import (
     INCLUDE_VIDEOS_DEFAULT,
     SYNC_STATUS_FILE,
 )
+from promptstudio.jobs import INSTAGRAM, LEASES
 from promptstudio.logging_setup import get_logger
 from promptstudio.storage.atomic import atomic_write_json
+from promptstudio.storage.journal import RunHandle, RunJournal
 
 log = get_logger(__name__)
+
+LEASE_OWNER = "sync"
 
 
 class SyncManager:
@@ -37,6 +41,7 @@ class SyncManager:
     def __init__(self) -> None:
         self._job_lock = threading.Lock()
         self._cancel = threading.Event()
+        self._run: Optional[RunHandle] = None
         self._status: Dict[str, Any] = self._load_status()
         self._recover_stuck_running()
         self._auto_drain_scheduled = False
@@ -150,6 +155,16 @@ class SyncManager:
                 f"Rate limited — waiting {backoff_sec}s (streak {consecutive})"
             )
             self._save_status()
+            run = self._run
+        # Timestamped in the journal so backoff interarrival can be measured
+        # instead of guessed when tuning the pacing constants.
+        if run is not None:
+            run.event(
+                "rate_limit",
+                consecutive=consecutive,
+                backoff_sec=backoff_sec,
+                username=self._status.get("scrape_username"),
+            )
 
     def _set_scrape_meta(
         self,
@@ -173,8 +188,15 @@ class SyncManager:
 
     def start_job(self, job_type: str, fn: Callable[..., Any]) -> bool:
         """Start a background job. Returns False if one is already running."""
+        # One Instagram session, one job. Taken before the status flip so two
+        # simultaneous requests cannot both observe running=False and proceed.
+        blocker = LEASES.acquire([INSTAGRAM], LEASE_OWNER)
+        if blocker:
+            return False
+
         with self._job_lock:
             if self._status.get("running"):
+                LEASES.release(LEASE_OWNER)
                 return False
             self._cancel.clear()
             self._status = {
@@ -197,12 +219,20 @@ class SyncManager:
 
         def runner() -> None:
             logs: list = []
+            journal = RunJournal.for_kind("sync")
+            run_cm = journal.run(job_type=job_type)
+            run = run_cm.__enter__()
+            with self._job_lock:
+                self._run = run
 
             def log(msg: str) -> None:
                 logs.append(msg)
                 with self._job_lock:
                     self._status["progress"] = msg
                     self._save_status()
+                # The per-step trail is the whole point: "stopped at account 12"
+                # is only answerable if each step left a timestamped record.
+                run.event("progress", msg=str(msg)[:300])
 
             def on_rate_limit(consecutive: int, backoff_sec: int) -> None:
                 self.record_rate_limit(consecutive, backoff_sec)
@@ -256,6 +286,21 @@ class SyncManager:
                     self._status["scrape_source"] = None
                     self._save_status()
             finally:
+                with self._job_lock:
+                    status = dict(self._status)
+                    self._run = None
+                run.summary(
+                    outcome_progress=status.get("progress"),
+                    error=status.get("error"),
+                    rate_limit_hits=status.get("rate_limit_hits"),
+                    result=status.get("result"),
+                )
+                # __exit__(None, ...) — the handler above already recorded the
+                # failure into status, so nothing is propagating here.
+                run_cm.__exit__(None, None, None)
+                # Released before the drain is scheduled, or the next queued
+                # creator would find the session still leased by this job.
+                LEASES.release(LEASE_OWNER)
                 self._cancel.clear()
                 # Drain next creator-queue job if allowed
                 try:

@@ -23,6 +23,26 @@ The glam classifier scores every archived media file 0–3 with one Ollama visio
 
 ---
 
+## Status (updated 2026-08-09, after the V2 reel work)
+
+[`design_reel_classifier_v2.md`](design_reel_classifier_v2.md) and the commits that followed it closed several of the findings below. Verified against the code, not assumed:
+
+| § | Finding | Status |
+|---|---------|--------|
+| 2.1 | Score barely discriminates | **Partly** — reels rescored with the v4 ordinal prompt (generosity language removed, tier→glam thresholds). Photos still run the v2 generous prompt behind `CLASSIFY_PHOTO_ORDINAL=0`. Unmeasurable until §2.2 |
+| 2.2 | No ground truth, no metric | **Open** — eval set deferred. Partly mitigated: the classify job now reports `score_hist`, `top_score_share` and `unscored_rate`, so a collapsed distribution is visible per run |
+| 2.3 | Two definitions of "keep" | **Resolved** — `matches_keep` is now `glam_score >= GLAM_SEXY_MIN` |
+| 2.4 | DB discards all but the int | **Open** — `set_glam_score` still drops `has_woman` / `sexy` |
+| 2.5 | Prompt versioning inert | **Open** — `list_pending` still skips on `glam_score >= 0`; no `prompt_version` column |
+| 2.6 | Fragile output plumbing | **Resolved** — schema-constrained decoding with a working regex fallback, `keep_alive`, retries with backoff, response body surfaced in errors. The *queryable* error taxonomy is part of 2.4 and remains open |
+| 2.7 | Content-blind frame ranking | **Resolved** — skin fraction in the rank, sharpness flattened by `sqrt`, HSV shot segmentation, per-shot panel allocation, tail coverage |
+| 2.8 | Cost model inverted | **Open** |
+| 2.9 | Following-classify weakest link | **Open** — `list_local_images` is still images-only |
+
+Of the §3 recommendations: 3.1 (constrained decoding) and 3.6 (shot-aware frames) are implemented; 3.3 landed as a 0–4 `exposure_tier` mapped onto the existing 0–3 column rather than the continuous `glam_100`; 3.2 (logprobs), 3.4 (model upgrade) and 3.5 (embeddings + learned head) are untouched.
+
+---
+
 ## 1. Current state (grounded in code)
 
 ### 1.1 Pipeline
@@ -67,7 +87,15 @@ Eleven env knobs in [`config.py:172-183`](../promptstudio/config.py) — `GLAM_S
 
 Ranked by impact on output quality.
 
-### 2.1 The score barely discriminates — this is the actual problem
+### 2.1 The score barely discriminates — this is the actual problem — **partly addressed**
+
+> Cause 1 (generous prompt) and cause 3 (max-over-frames on a biased reading)
+> are addressed for **reels**: the v4 ordinal prompt drops the generosity
+> language, and max-over-panels now runs over an auditable per-panel array from
+> a sheet that spans the whole clip. Cause 2 is reshaped rather than removed —
+> the OR over two booleans became tier thresholds. **Photos are unchanged** and
+> still run the v2 generous prompt. Whether any of this improved separation is
+> unknown until §2.2 exists.
 
 Snapshot from [`design_reel_classifier.md`](design_reel_classifier.md) §2.5: **284 / 21 / 24 / 4** across g3 / g2 / g1 / g0. A signal that fires at maximum on 85% of items cannot rank a gallery, and the Sexy filter at `>= 2` becomes a near no-op.
 
@@ -90,7 +118,12 @@ Two label sources already exist and are never joined against `glam_score`:
 - `photos.favorite` ([`db.py:42`](../promptstudio/storage/db.py)) — explicit positives
 - `_trash/` ([`config.py:101`](../promptstudio/config.py)) — explicit negatives, retained 30 days
 
-### 2.3 Two contradictory definitions of "keep"
+### 2.3 Two contradictory definitions of "keep" — **resolved**
+
+> `matches_keep()` is now `ok and glam_score >= GLAM_SEXY_MIN`, so every surface
+> agrees with the gallery filter. Confidence still matters, but it drives the
+> confirm cascade rather than a second, hidden threshold. The description below
+> is the state before that change.
 
 ```python
 def matches_keep(self):                                  # :127
@@ -128,7 +161,14 @@ if score is not None and int(score) >= 0:
 
 Improving the prompt therefore never triggers a rescore. The archive silently accumulates mixed verdict generations, and — because of §2.4 — there is no way to find the stale ones short of a full `--force` pass over everything.
 
-### 2.6 Output plumbing is fragile where it needn't be
+### 2.6 Output plumbing is fragile where it needn't be — **resolved**
+
+> Now schema-constrained (§3.1) with the regex path kept as a real fallback,
+> plus `keep_alive`, bounded retries with backoff, and the HTTP response body
+> included in error text. One caveat worth carrying forward: the first version
+> of the fallback matched on `"format" in str(exc)`, which can never be true —
+> urllib renders an `HTTPError` as `HTTP Error 400: Bad Request` and drops the
+> body. Match on `HTTPError.code`, not the message.
 
 [`_ollama_vision_json`](../promptstudio/scraping/outfit_classifier.py) (`:190-223`) generates free text with `num_predict: 180`, strips code fences with two regexes, then greedy-matches `\{[\s\S]*\}`. A long `brief_reason` truncates the JSON → `_error` → `ok=False` → `glam_score` stays `-1` permanently.
 
@@ -138,7 +178,13 @@ Also missing:
 - **No error taxonomy.** `verdict.error` is a free-text string that is never persisted anywhere queryable.
 - **No `keep_alive`.** A long serial job can pay model-reload cost between items.
 
-### 2.7 Reel frame ranking is content-blind
+### 2.7 Reel frame ranking is content-blind — **resolved**
+
+> The ranker is now `sqrt(sharp) × (0.3 + skin) × bright_factor` over candidates
+> segmented into shots by HSV histogram correlation, with panels allocated per
+> shot and the final shot always represented. `sqrt` is the load-bearing part:
+> the reveal happens during motion, so it must be able to beat a razor-sharp
+> intro. See [`design_reel_classifier_v2.md`](design_reel_classifier_v2.md) §3.2.
 
 ```python
 def frame_rank_score(bright, sharp):                     # video_frames.py:49
@@ -278,13 +324,15 @@ Persist per-shot scores in the existing `evidence` dict (`:323`) so a bad call i
 
 | Stage | Work | Gate / rationale |
 |-------|------|------------------|
-| **0 — Measure** | Stratified eval set (~300 items), labels seeded from `photos.favorite` + `_trash`, topped up via a keyboard-labelling contact sheet. Metric = **average precision** (ranking), not accuracy. Freeze as a fixture under `tests/`. | Everything below is unmeasurable without it. It also produces the training labels Stage 3 needs, so it is not overhead. |
-| **1 — Plumbing** | §3.1 `format` schema + `keep_alive`; retry/backoff; `glam_error` + `prompt_version` DB columns; stop dropping flags in `set_glam_score`. | Cheap, no modelling risk. Unblocks the unscored backlog and turns Stage 2 rescoring into a query. |
-| **2 — Scoring** | §3.3 ordinal rubric + §3.2 logprobs → `glam_100`; unify `matches_keep`; keep 0–3 as a derived view. Optionally §3.4 model swap, measured against Stage 0. | Fixes saturation; makes the gallery threshold tunable without re-inference. |
-| **3 — Learned head** | §3.5 SigLIP-2 embeddings cached in DB + logistic head on Stage 0 labels. VLM demoted to explainer + boundary cases. | Biggest accuracy and cost win. Depends on Stage 0 labels. |
-| **4 — Reels & edges** | §3.6 shot-aware frames + percentile aggregation; carousel dedupe; include videos in following-classify (§2.9). | Reel-specific; independent of Stages 2–3, can run in parallel. |
+| **0 — Measure** | Stratified eval set (~300 items), labels seeded from `photos.favorite` + `_trash`, topped up via a keyboard-labelling contact sheet. Metric = **average precision** (ranking), not accuracy. Freeze as a fixture under `tests/`. | **Deferred by decision.** Everything below is unmeasurable without it. It also produces the training labels Stage 3 needs, so it is not overhead. |
+| **1 — Plumbing** | ~~§3.1 `format` schema + `keep_alive`; retry/backoff~~ **done**; `glam_error` + `prompt_version` DB columns and `set_glam_score` flags **still open**. | Cheap, no modelling risk. The DB half is what turns Stage 2 rescoring into a query, and it is the part that did not land. |
+| **2 — Scoring** | §3.3 ordinal rubric **done** (as `exposure_tier` 0–4 mapped onto the 0–3 column, not `glam_100`); ~~unify `matches_keep`~~ **done**; §3.2 logprobs and the continuous score **open**. Optionally §3.4 model swap, measured against Stage 0. | Saturation is addressed for reels only. Without `glam_100` the gallery threshold is still 4 buckets, so re-tuning it remains coarse. |
+| **3 — Learned head** | §3.5 SigLIP-2 embeddings cached in DB + logistic head on Stage 0 labels. VLM demoted to explainer + boundary cases. | **Open.** Biggest accuracy and cost win. Depends on Stage 0 labels. |
+| **4 — Reels & edges** | ~~§3.6 shot-aware frames~~ **done** (max-over-panels rather than percentile — the panel array made max auditable); carousel dedupe and videos in following-classify (§2.9) **still open**. | Reel-specific; ran ahead of Stages 1–3 rather than after them. |
 
 **Stage 0 is the gate.** Not because the other work is hard, but because the current state is what happens without it: a detector tuned three times for recall, used as a ranker, with no instrument that would have shown when it stopped separating anything.
+
+**Update (2026-08-09):** Stages 1, 2 and 4 landed in part *before* Stage 0, by decision. The reel path is materially better *designed* than it was — but that is the only claim available, because the instrument that would turn it into "better" still does not exist. The `top_score_share` counter added to the classify job is a thin substitute: it catches a distribution collapsing again, which is the specific regression that went unnoticed last time, but says nothing about whether the scores are right.
 
 ---
 

@@ -217,8 +217,20 @@ EXCLUDED_FOLDERS = {
     "_generations",
     "_classify",
     "_trash",
+    "_journal",
 }
 METADATA_SUFFIX = ".meta.json"
+
+# FTS5 prompt search. Off by default: measured slower than the LIKE scan for
+# common query terms at current archive sizes (see docs/review_backend_
+# architecture.md S5). The index is maintained either way, so this is a flip.
+FTS_SEARCH = _env_bool("PROMPTSTUDIO_FTS_SEARCH", "0")
+
+# ── Run journal (append-only JSONL history of background jobs) ───
+JOURNAL_ENABLED = _env_bool("PROMPTSTUDIO_JOURNAL", "1")
+JOURNAL_DIR = os.path.join(SAVED_DIR, "_journal")
+JOURNAL_MAX_BYTES = int(os.environ.get("PROMPTSTUDIO_JOURNAL_MAX_BYTES", str(10 * 1024 * 1024)))
+JOURNAL_BACKUPS = int(os.environ.get("PROMPTSTUDIO_JOURNAL_BACKUPS", "3"))
 
 # ── Logging ──────────────────────────────────────────────────────
 # Lives beside the archive, not in the repo, so it survives a checkout and

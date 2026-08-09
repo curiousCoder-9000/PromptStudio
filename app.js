@@ -262,6 +262,7 @@ const elements = {
     creatorStyleTerms: document.getElementById('creatorStyleTerms'),
     creatorClassifyMeta: document.getElementById('creatorClassifyMeta'),
     classifyCreatorBtn: document.getElementById('classifyCreatorBtn'),
+    rescoreStaleBtn: document.getElementById('rescoreStaleBtn'),
     reviewRejectsBtn: document.getElementById('reviewRejectsBtn'),
     cancelClassifyBtn: document.getElementById('cancelClassifyBtn'),
     rebuildStyleBtn: document.getElementById('rebuildStyleBtn'),
@@ -1292,6 +1293,16 @@ function updateClassifyPanelUi() {
         elements.classifyCreatorBtn.innerHTML = runningHere
             ? '<i class="fa-solid fa-spinner fa-spin"></i> Classifying…'
             : '<i class="fa-solid fa-fire"></i> Classify unscored';
+    }
+    if (elements.rescoreStaleBtn) {
+        // Hidden entirely at zero: this only appears after a prompt version
+        // bump leaves older verdicts behind, which is rare and needs context.
+        const stale = meta && meta.stale_count != null ? Number(meta.stale_count) || 0 : 0;
+        elements.rescoreStaleBtn.style.display = stale > 0 ? '' : 'none';
+        elements.rescoreStaleBtn.disabled =
+            !creator || runningHere || runningElsewhere || state.ollamaOnline === false;
+        elements.rescoreStaleBtn.innerHTML =
+            `<i class="fa-solid fa-clock-rotate-left"></i> Re-score outdated (${stale})`;
     }
     if (elements.reviewRejectsBtn) {
         const rejects = meta && meta.reject_count != null ? Number(meta.reject_count) || 0 : 0;
@@ -3269,7 +3280,13 @@ function setupEventListeners() {
     }
 
     if (elements.classifyCreatorBtn) {
-        elements.classifyCreatorBtn.addEventListener('click', startCreatorClassify);
+        // Wrapped: the click Event must not reach the options argument.
+        elements.classifyCreatorBtn.addEventListener('click', () => startCreatorClassify());
+    }
+    if (elements.rescoreStaleBtn) {
+        elements.rescoreStaleBtn.addEventListener('click', () =>
+            startCreatorClassify({ rescoreStale: true })
+        );
     }
     if (elements.syncLatestCreatorBtn) {
         elements.syncLatestCreatorBtn.addEventListener('click', syncLatestSelectedCreator);
@@ -5016,7 +5033,7 @@ async function pollClassifyStatus() {
     }
 }
 
-async function startCreatorClassify() {
+async function startCreatorClassify({ rescoreStale = false } = {}) {
     if (!state.selectedCreator) {
         showToast('Select a creator first');
         return;
@@ -5030,6 +5047,7 @@ async function startCreatorClassify() {
                 creator: state.selectedCreator,
                 only_unscored: true,
                 include_videos: true,
+                rescore_stale: rescoreStale,
             }),
         });
         const data = await res.json();
@@ -5047,7 +5065,9 @@ async function startCreatorClassify() {
             updateClassifyPanelUi();
             pollClassifyStatus();
         } else if (data.status === 'nothing_to_do') {
-            showToast('All media already scored for this creator');
+            showToast(rescoreStale
+                ? 'Everything already scored with the current prompt'
+                : 'All media already scored for this creator');
             const meta = selectedCreatorMeta();
             if (meta && (meta.reject_count || 0) > 0) {
                 enterRejectReviewMode();

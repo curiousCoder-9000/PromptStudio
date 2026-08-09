@@ -28,6 +28,38 @@ Override model: `$env:OLLAMA_VISION_MODEL="moondream"` (or any installed vision 
 
 ---
 
+## First look when something misbehaves
+
+Since the observability sweep there are three places to check before reading code:
+
+| Question | Where |
+|----------|-------|
+| What went wrong, with a stack trace | `<archive>/promptstudio.log` (rotating, 5 MB × 3) |
+| Why did last night's job stop / drift | `<archive>/_journal/<kind>.jsonl` or `GET /api/journal?kind=sync` |
+| Why does a job say "busy" when nothing is running | `GET /api/health` → `leases` |
+
+```powershell
+# Tail the log
+Get-Content $env:USERPROFILE\Pictures\InstagramSaved\promptstudio.log -Tail 50 -Wait
+
+# Last classify run: outcome, failures, score distribution
+py -c "import json,urllib.request as u; print(json.dumps(json.load(u.urlopen('http://localhost:5000/api/journal?kind=classify&limit=1'))['runs'][0], indent=2))"
+
+# Who holds the Ollama / Instagram lease
+py -c "import json,urllib.request as u; print(json.load(u.urlopen('http://localhost:5000/api/health'))['leases'])"
+```
+
+A route that raises now returns a JSON **500** and logs the traceback with the
+route — it no longer drops the connection, so "the app went offline" in the
+browser genuinely means the server is down, not that a handler threw.
+
+**Classifier looks wrong?** Check `top_score_share` on the last classify run. If
+one glam value is most of the archive, the prompt has collapsed the output
+space and no amount of frame-selection tuning will help — see
+[design_reel_classifier_v2.md](design_reel_classifier_v2.md) §2.3.
+
+---
+
 ## Common issues
 
 ### UnicodeEncodeError (PowerShell)

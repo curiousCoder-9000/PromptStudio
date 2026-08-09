@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -15,25 +16,20 @@ from promptstudio.config import (
     SAVED_DIR,
     VIDEO_EXTENSIONS,
 )
+from promptstudio.jobs import LEASES, OLLAMA
 from promptstudio.logging_setup import get_logger
 from promptstudio.scraping.outfit_classifier import (
+    active_prompt_versions,
     classify_media,
     ollama_reachable,
     persist_glam_score,
 )
 from promptstudio.storage.db import ArchiveIndex, normalize_rel_path
+from promptstudio.storage.journal import RunJournal
 
 log = get_logger(__name__)
 
-
-def _vision_busy_elsewhere() -> bool:
-    """True if batch prompt analysis is currently using Ollama."""
-    try:
-        from promptstudio.prompts.batch import BatchPromptManager
-
-        return BatchPromptManager.get().is_running()
-    except Exception:
-        return False
+LEASE_OWNER = "classify"
 
 
 class ClassifyJobManager:
@@ -132,8 +128,14 @@ class ClassifyJobManager:
         force: bool = False,
         include_videos: bool = True,
         limit: Optional[int] = None,
+        rescore_stale: bool = False,
     ) -> List[Dict[str, Any]]:
-        """List media paths for creator that still need classification."""
+        """List media paths for creator that still need classification.
+
+        `rescore_stale` also picks up files scored by a prompt version that is
+        no longer current. Without it, improving a prompt never re-runs anything
+        and the only way to adopt it is --force over the whole archive.
+        """
         creator = (creator or "").strip().lstrip("@")
         if not creator:
             return []
@@ -146,6 +148,11 @@ class ClassifyJobManager:
 
         exts = MEDIA_EXTENSIONS if include_videos else IMAGE_EXTENSIONS
         index = ArchiveIndex.get()
+        stale: set[str] = set()
+        if rescore_stale and not force:
+            stale = set(
+                index.list_stale_glam(active_prompt_versions(), creator=creator)
+            )
         pending: List[Dict[str, Any]] = []
 
         try:
@@ -164,7 +171,7 @@ class ClassifyJobManager:
                 continue
             if not force:
                 score = index.get_glam_score(rel)
-                if score is not None and int(score) >= 0:
+                if score is not None and int(score) >= 0 and rel not in stale:
                     continue
             pending.append(
                 {
@@ -187,6 +194,7 @@ class ClassifyJobManager:
         include_videos: bool = True,
         limit: Optional[int] = None,
         only_unscored: bool = True,
+        rescore_stale: bool = False,
     ) -> Dict[str, Any]:
         """
         Start a classify job.
@@ -204,12 +212,6 @@ class ClassifyJobManager:
                 "message": f"Ollama not reachable (need model {MODEL_NAME})",
             }
 
-        if _vision_busy_elsewhere():
-            return {
-                "status": "busy",
-                "message": "Prompt batch is using the vision model — wait or cancel it first",
-            }
-
         # force overrides only_unscored
         use_force = bool(force) or not only_unscored
         pending = self.list_pending(
@@ -217,12 +219,27 @@ class ClassifyJobManager:
             force=use_force,
             include_videos=include_videos,
             limit=limit,
+            rescore_stale=bool(rescore_stale),
         )
         if not pending:
             return {"status": "nothing_to_do", "pending": 0, "creator": creator}
 
+        # Taken only once there is work to do, and released in the runner's
+        # finally. Atomic against a concurrent batch start — the old
+        # is_running() poll left a window where both could pass.
+        blocker = LEASES.acquire([OLLAMA], LEASE_OWNER)
+        if blocker:
+            return {
+                "status": "busy",
+                "message": (
+                    f"{LEASES.holder(blocker) or 'another job'} is using the "
+                    "vision model — wait or cancel it first"
+                ),
+            }
+
         with self._job_lock:
             if self._status.get("running"):
+                LEASES.release(LEASE_OWNER)
                 return {
                     "status": "busy",
                     "message": "Classify job already running",
@@ -251,57 +268,103 @@ class ClassifyJobManager:
             }
 
         def runner() -> None:
+            journal = RunJournal.for_kind("classify")
             try:
-                for item in pending:
-                    if self._cancel.is_set():
+                with journal.run(
+                    creator=creator,
+                    total=len(pending),
+                    force=bool(use_force),
+                    include_videos=bool(include_videos),
+                    model=MODEL_NAME,
+                ) as run:
+                    for item in pending:
+                        if self._cancel.is_set():
+                            with self._job_lock:
+                                self._status["cancelled"] = True
+                                self._status["error"] = "cancelled"
+                            run.event("cancelled", completed=self._status["completed"])
+                            break
+                        rel = item["rel_path"]
+                        full = item["full_path"]
                         with self._job_lock:
-                            self._status["cancelled"] = True
-                            self._status["error"] = "cancelled"
-                        break
-                    rel = item["rel_path"]
-                    full = item["full_path"]
-                    with self._job_lock:
-                        self._status["current"] = rel
-                    if not os.path.isfile(full):
-                        with self._job_lock:
-                            self._status["failed"] += 1
-                            self._status["completed"] += 1
-                            self._record_score(-1)
-                        continue
-                    try:
-                        verdict = classify_media(full)
-                    except Exception as exc:
-                        log.warning("classify failed for %s: %s", rel, exc)
-                        with self._job_lock:
-                            self._status["failed"] += 1
-                            self._status["completed"] += 1
-                            self._record_score(-1)
-                        continue
+                            self._status["current"] = rel
+                        if not os.path.isfile(full):
+                            with self._job_lock:
+                                self._status["failed"] += 1
+                                self._status["completed"] += 1
+                                self._record_score(-1)
+                            run.item(path=rel, ok=False, reason="missing_file")
+                            continue
 
-                    if verdict.ok:
-                        persist_glam_score(rel, verdict, full_path=full)
-                        keep = bool(verdict.matches_keep())
-                        score = int(verdict.glam_score)
-                        if score < 0:
-                            score = int(verdict.compute_glam_score())
-                        with self._job_lock:
-                            self._status["completed"] += 1
-                            if keep:
-                                self._status["kept"] += 1
-                            else:
-                                self._status["rejected"] += 1
-                            self._record_score(score)
-                    else:
-                        # Leave glam_score as -1 (unscored / retry later)
-                        with self._job_lock:
-                            self._status["failed"] += 1
-                            self._status["completed"] += 1
-                            self._record_score(-1)
+                        started = time.monotonic()
+                        try:
+                            verdict = classify_media(full)
+                        except Exception as exc:
+                            log.warning("classify failed for %s: %s", rel, exc)
+                            with self._job_lock:
+                                self._status["failed"] += 1
+                                self._status["completed"] += 1
+                                self._record_score(-1)
+                            run.item(path=rel, ok=False, reason=str(exc)[:200])
+                            continue
+                        elapsed_ms = int((time.monotonic() - started) * 1000)
+
+                        if verdict.ok:
+                            persist_glam_score(rel, verdict, full_path=full)
+                            keep = bool(verdict.matches_keep())
+                            score = int(verdict.glam_score)
+                            if score < 0:
+                                score = int(verdict.compute_glam_score())
+                            with self._job_lock:
+                                self._status["completed"] += 1
+                                if keep:
+                                    self._status["kept"] += 1
+                                else:
+                                    self._status["rejected"] += 1
+                                self._record_score(score)
+                            run.item(
+                                path=rel,
+                                ok=True,
+                                glam=score,
+                                tier=verdict.exposure_tier,
+                                keep=keep,
+                                source=verdict.source,
+                                prompt_version=verdict.prompt_version,
+                                calls=(verdict.evidence or {}).get("frames_sent_to_vision"),
+                                ms=elapsed_ms,
+                            )
+                        else:
+                            # glam_score stays -1, but record *why* so the row is
+                            # findable via list_glam_errors() instead of looking
+                            # identical to something never attempted.
+                            persist_glam_score(rel, verdict, full_path=full)
+                            with self._job_lock:
+                                self._status["failed"] += 1
+                                self._status["completed"] += 1
+                                self._record_score(-1)
+                            run.item(
+                                path=rel,
+                                ok=False,
+                                reason=verdict.error[:200],
+                                ms=elapsed_ms,
+                            )
+
+                    # Distribution is the signal that a prompt change collapsed
+                    # the output space; keep it per run so drift is visible.
+                    with self._job_lock:
+                        run.summary(
+                            score_hist=dict(self._status.get("score_hist") or {}),
+                            top_score_share=self._status.get("top_score_share"),
+                            unscored_rate=self._status.get("unscored_rate"),
+                            kept=self._status.get("kept"),
+                            rejected=self._status.get("rejected"),
+                        )
             except Exception as exc:
                 with self._job_lock:
                     self._status["error"] = str(exc)
                 log.exception("classify job crashed")
             finally:
+                LEASES.release(LEASE_OWNER)
                 with self._job_lock:
                     self._status["running"] = False
                     self._status["finished_at"] = datetime.now(timezone.utc).isoformat()

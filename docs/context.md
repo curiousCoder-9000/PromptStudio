@@ -52,19 +52,24 @@ Deps: `instaloader`, `opencv-python-headless`, `Pillow`, `python-dotenv` (`requi
 ```
 promptstudio/
   config.py              # ALL env defaults, paths, pacing, models
+  logging_setup.py       # lazy logging config; handlers on the promptstudio logger
+  jobs.py                # LeaseRegistry — exclusive ollama/instagram/comfy leases
   server/
     handler.py           # Every HTTP route lives here
     multipart.py         # cgi-free multipart upload parser
   storage/
     archive.py           # ArchiveStore façade (creators, photos, upload/delete)
-    db.py                # ArchiveIndex SQLite catalog + query
+    atomic.py            # atomic_write_json — ALL derived-state writes go here
+    db.py                # ArchiveIndex: photos + prompts + phashes + tombstones
+    dedupe.py            # perceptual hash + near-duplicate grouping
+    journal.py           # append-only JSONL run history per job kind
     favorites.py         # favorites.json write-through
     metadata.py          # *.meta.json sidecars (post_id, shortcode)
     thumbs.py            # /media/thumb generation under _thumbs/
     trash.py             # TrashStore soft delete + restore under _trash/
   prompts/
     engine.py            # Ollama: structured vision → rewrite → exports
-    cache.py             # prompts_cache.json in-memory write-through + history
+    cache.py             # prompts table in archive.db (JSON imported once) + history
     styles.py            # creator_styles.json style prefixes
     batch.py             # background BatchPromptManager
     comfy_mode.py        # Mode E (outfit/scene only) rewrite
@@ -120,14 +125,16 @@ tests/
 |------|------|
 | `<creator>/*.jpg\|png\|webp\|mp4` | Media (creator = IG handle) |
 | `<creator>/*.meta.json` | Sidecar: `post_id`, `shortcode`, `caption`, `taken_at` |
-| `archive.db` | SQLite gallery catalog |
-| `prompts_cache.json` | Vision prompt bundles (keyed `creator/file`) |
+| `archive.db` | SQLite catalog: `photos`, `prompts`, `prompts_fts`, `phashes`, `deleted_posts` (WAL) |
+| `prompts_cache.json` | **Legacy.** Imported into `archive.db` once, then left as a rollback snapshot — no longer updated |
 | `favorites.json` | Favorite flags |
 | `creator_styles.json` | Learned style prefixes |
 | `sync_state.json` | Per-creator last shortcode / counts |
 | `following_queue.json` | Multi-day following crawl budget |
 | `sync_status.json` | Last sync job status |
 | `generations_index.json` | Comfy outputs index |
+| `promptstudio.log` | Rotating app log (`PROMPTSTUDIO_LOG_FILE=` to disable) |
+| `_journal/<kind>.jsonl` | Append-only run history: `classify`, `batch_prompt`, `sync` |
 | `_thumbs/` | JPEG thumbs |
 | `_generations/` | Comfy outputs |
 | `_classify/` | Classifier staging (excluded from gallery) |
@@ -138,7 +145,7 @@ tests/
 
 **Session:** `INSTALOADER_SESSION_DIR` for user `INSTAGRAM_SESSION_USER` (required in `.env` for scrape).
 
-**Excluded folder names:** `_no_person_detected`, `_thumbs`, `_generations`, `_classify`, `_trash`.
+**Excluded folder names:** `_no_person_detected`, `_thumbs`, `_generations`, `_classify`, `_trash`, `_journal`.
 
 ---
 
@@ -245,7 +252,7 @@ Idempotent: skip by `post_id`/`shortcode` in DB + meta. Catch-up stop after `IG_
 | Change env/paths/defaults | `promptstudio/config.py` |
 | Vision / rewrite / exports | `promptstudio/prompts/engine.py` |
 | Mode E / Comfy prompt shaping | `promptstudio/prompts/comfy_mode.py` |
-| Prompt cache schema | `promptstudio/prompts/cache.py` |
+| Prompt cache schema | `promptstudio/prompts/cache.py` (+ `prompts` table in `storage/db.py`) |
 | Gallery query/sort/index | `promptstudio/storage/db.py`, `archive.py` |
 | Soft delete / restore / purge | `promptstudio/storage/trash.py` (+ `archive.delete_photo`) |
 | Download / rate-limit / filters | `scraping/downloader.py`, `filters.py`, `queue.py` |
@@ -254,6 +261,10 @@ Idempotent: skip by `post_id`/`shortcode` in DB + meta. Catch-up stop after `IG_
 | UI behavior | `app.js` |
 | UI chrome/theme | `style.css`, `index.html` |
 | New CLI | thin wrapper in `scripts/` calling package |
+| Writing any state file | `storage/atomic.py` — never bare `open(path, "w")` |
+| Cross-job exclusion | `promptstudio/jobs.py` leases — not `is_running()` checks |
+| Debugging a long job | `<archive>/_journal/<kind>.jsonl`, `GET /api/journal` |
+| Duplicate detection | `storage/dedupe.py`, `scripts/find_duplicates.py` |
 | Add a test | `tests/test_*.py` (pytest, `store`/`make_photo` fixtures) or `tests/ui/` |
 
 ---

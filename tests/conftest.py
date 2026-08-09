@@ -72,6 +72,15 @@ def clean_archive():
     # a leftover row would let a "tombstone cleared" assertion pass falsely.
     with index._lock:
         index._conn.execute("DELETE FROM deleted_posts")
+        # Prompts live in the DB now, so wiping the archive directory no longer
+        # clears them — without this they leak between tests.
+        index._conn.execute("DELETE FROM prompts")
+        index._conn.execute("DELETE FROM phashes")
+        if index.fts_enabled:
+            index._conn.execute("DELETE FROM prompts_fts")
+        index._conn.execute(
+            "DELETE FROM meta WHERE key = 'prompts_imported_from_json'"
+        )
         index._conn.commit()
     index.rebuild()
     yield
