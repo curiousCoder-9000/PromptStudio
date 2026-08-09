@@ -81,6 +81,30 @@ def _as_bool(value: Any, *, default: bool = False) -> bool:
     return bool(value)
 
 
+class _BadSource(ValueError):
+    """An unrecognised ?source= value. Carries its own 400 message."""
+
+
+def _parse_source_filter(query: Dict[str, List[str]]) -> Optional[str]:
+    """Read `?source=` as a filter, or None for "every source".
+
+    Empty and `all` both mean unfiltered. Anything else must be a registered
+    source: silently returning the whole archive when the caller asked for X is
+    the failure mode that looks like success, so an unknown value is a 400.
+    """
+    from promptstudio.scraping.sources import known_sources, normalize_source
+
+    raw = (query.get("source", [""])[0] or "").strip().lower()
+    if not raw or raw == "all":
+        return None
+    name = normalize_source(raw)
+    if name not in known_sources():
+        raise _BadSource(
+            f"Unknown source '{raw}'. Known: {', '.join(sorted(known_sources()))}, all"
+        )
+    return name
+
+
 def _creator_queue_blocks_oneshot() -> Optional[Dict[str, Any]]:
     """If scrape queue has pending jobs and is not paused, block one-shot sync.
 
@@ -988,10 +1012,10 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/classify/start":
             try:
                 data = self._read_json_body()
+                # No creator means the whole archive. Requiring one capped
+                # coverage at whatever the user remembered to run folder by
+                # folder, while batch analyze has always been archive-wide.
                 creator = (data.get("creator") or "").strip().lstrip("@")
-                if not creator:
-                    self.send_error(400, "creator required")
-                    return
                 limit = data.get("limit")
                 result = _classify.start(
                     creator,
@@ -1480,7 +1504,12 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path == "/api/creators":
-            self._send_json(_archive.list_creators())
+            try:
+                source = _parse_source_filter(query)
+            except _BadSource as e:
+                self.send_error(400, str(e))
+                return
+            self._send_json(_archive.list_creators(source=source))
             return
 
         if path == "/api/trash":
@@ -1545,6 +1574,11 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             verdict = (query.get("verdict", [""])[0] or "").strip().lower()
             if verdict not in VERDICT_FILTERS:
                 verdict = None
+            try:
+                source = _parse_source_filter(query)
+            except _BadSource as e:
+                self.send_error(400, str(e))
+                return
             sort = (query.get("sort", ["name"])[0] or "name").lower()
             if sort not in (
                 "name",
@@ -1573,6 +1607,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 favorite_only=favorite_only,
                 media_type=media_type,
                 verdict=verdict,
+                source=source,
                 sort=sort,
                 limit=limit,
                 offset=offset,
@@ -1591,6 +1626,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     "has_more": offset + len(public_photos) < total,
                     "sort": sort,
                     "verdict": verdict or "",
+                    "source": source or "",
                 }
             )
             return

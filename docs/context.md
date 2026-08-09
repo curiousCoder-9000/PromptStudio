@@ -128,7 +128,7 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
 |------|------|
 | `<creator>/*.jpg\|png\|webp\|mp4` | Media (creator = IG handle) |
 | `<creator>/*.meta.json` | Sidecar: `post_id`, `shortcode`, `caption`, `taken_at` |
-| `archive.db` | SQLite catalog: `photos`, `prompts`, `prompts_fts`, `phashes`, `media_verdicts`, `deleted_posts` (WAL) |
+| `archive.db` | SQLite catalog: `photos` (incl. `prompt_search` model text + `caption_search` creator text), `prompts`, `prompts_fts`, `phashes`, `media_verdicts`, `deleted_posts` (WAL) |
 | `prompts_cache.json` | **Legacy.** Imported into `archive.db` once, then left as a rollback snapshot — no longer updated |
 | `favorites.json` | Favorite flags |
 | `creator_styles.json` | Learned style prefixes |
@@ -203,7 +203,7 @@ Base: `http://localhost:5000`. Full schemas → [api.md](api.md).
 | GET | `/api/health` | Ollama + Comfy reachability |
 | GET | `/api/stats` | photos, creators, `prompts_ready` |
 | GET | `/api/creators` | folders + sync badges |
-| GET | `/api/photos` | `creator`, `search`, `unanalyzed`, `favorite`, `media_type` (`photo`/`video`), `sort`, `offset`, `limit` |
+| GET | `/api/photos` | `creator`, `search` (prompts **+ caption**), `unanalyzed`, `favorite`, `media_type` (`photo`/`video`), `verdict`, `sort` (incl. `tier`), `offset`, `limit` |
 | GET/PUT | `/api/prompt` | get bundle / save edits |
 | POST | `/api/prompt/restore` | history index |
 | POST | `/api/prompt/mode-e` | Mode E rewrite; `apply` |

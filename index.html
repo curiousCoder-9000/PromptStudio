@@ -36,6 +36,11 @@
                 <button id="batchPromptBtn" class="btn btn-secondary" title="Analyze all uncached photos with Ollama Vision">
                     <i class="fa-solid fa-bolt"></i> Batch Analyze
                 </button>
+                <!-- Archive-wide twin of the per-creator sidebar action. The
+                     overnight run is the one you want over everything. -->
+                <button id="classifyAllBtn" class="btn btn-secondary" title="Classify every unclassified photo and reel across all creators">
+                    <i class="fa-solid fa-wand-sparkles"></i> Classify All
+                </button>
                 <button id="syncInstagramBtn" class="btn btn-secondary" title="Download creators, saved posts, following">
                     <i class="fa-solid fa-cloud-arrow-down"></i> Download
                 </button>
@@ -101,6 +106,9 @@
                     <i class="fa-solid fa-magnifying-glass"></i>
                     <input type="text" id="creatorSearchInput" placeholder="Filter creators…" autocomplete="off">
                 </div>
+                <!-- Source pills. Built from /api/sources so a new registered
+                     source appears without a markup edit. -->
+                <div class="source-pill-row" id="sourcePillRow" role="group" aria-label="Filter by source"></div>
                 <div class="creator-list" id="creatorList">
                     <!-- Dynamic Creator Items -->
                 </div>
@@ -160,11 +168,24 @@
                             <option value="oldest">Oldest download</option>
                             <option value="posted">Newest post</option>
                             <option value="posted_oldest">Oldest post</option>
+                            <option value="tier">Tier (harshest first)</option>
                         </select>
                         <select id="mediaTypeSelect" class="sort-select" title="Filter media type">
                             <option value="all">All Media</option>
                             <option value="photo">Photos</option>
                             <option value="video">Reels</option>
+                        </select>
+                        <!-- Verdict as a browse axis. The tier is a measurement, so
+                             it is useful for finding things, not only for triage —
+                             review mode has its own strip and is unaffected. -->
+                        <select id="verdictFilterSelect" class="sort-select" title="Filter by keep/reject verdict">
+                            <option value="">Any verdict</option>
+                            <option value="keep">Keeps</option>
+                            <option value="reject">Rejects</option>
+                            <option value="unusable">Unusable (T0)</option>
+                            <option value="modest">Modest (T1)</option>
+                            <option value="unclassified">Not classified</option>
+                            <option value="error">Classify errors</option>
                         </select>
                         <button class="filter-chip" id="favoritesFilterBtn" type="button" title="Show favorites only">
                             <i class="fa-solid fa-star"></i> Favorites

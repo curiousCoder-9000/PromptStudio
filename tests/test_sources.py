@@ -434,7 +434,7 @@ def test_ingest_writes_sidecar_indexes_and_drops_raw_metadata():
         json.dump(X_RAW, fh)
 
     ctx = SourceContext(save_dir=SAVED_DIR, log=lambda _m: None)
-    converted, errors = source._ingest([name], target, SAVED_DIR, ctx)
+    converted, errors, _newest = source._ingest([name], target, SAVED_DIR, ctx)
 
     assert (converted, errors) == (1, 0)
     # gallery-dl's raw sidecar is consumed, ours replaces it
@@ -447,6 +447,84 @@ def test_ingest_writes_sidecar_indexes_and_drops_raw_metadata():
     # ...and the row is indexed under the right platform
     rel = f"{target.folder}/{name}"
     assert ArchiveIndex.get().get_photo_source(rel) == "x"
+
+
+# ── resume checkpoints (docs/design_source_filter.md §6) ────────────────
+
+def _run_ingest_for(source, handle, name, raw):
+    """Ingest one fake file for `handle` and return its SourceTarget."""
+    from PIL import Image
+
+    target = source.parse_target(handle)
+    folder = os.path.join(SAVED_DIR, target.folder)
+    os.makedirs(folder, exist_ok=True)
+    full = os.path.join(folder, name)
+    Image.new("RGB", (16, 16), (4, 5, 6)).save(full, "JPEG")
+    with open(full + ".json", "w", encoding="utf-8") as fh:
+        json.dump(raw, fh)
+    ctx = SourceContext(save_dir=SAVED_DIR, log=lambda _m: None)
+    converted, _errors, newest = source._ingest([name], target, SAVED_DIR, ctx)
+    source._record_checkpoint(target, converted, newest)
+    return target
+
+
+def test_gallery_dl_run_writes_a_folder_keyed_checkpoint():
+    """Without this, X and Reddit creators show no sync badge at all."""
+    from promptstudio.scraping.checkpoints import SyncCheckpoints
+
+    target = _run_ingest_for(XSource(), "nina_k", "x_ck_1.jpg", X_RAW)
+
+    state = SyncCheckpoints().load()
+    assert target.folder == "nina_k__x"
+    assert target.folder in state, "checkpoint must be keyed on the archive folder"
+    assert state[target.folder]["downloaded_count"] == 1
+    assert state[target.folder]["last_post_id"] == "1772623353000"
+    assert state[target.folder]["updated_at"]
+
+
+def test_same_handle_on_two_platforms_keeps_separate_checkpoints():
+    """Folder keying is what stops @nina on IG overwriting @nina on X."""
+    from promptstudio.scraping.checkpoints import SyncCheckpoints
+
+    # Instagram writes under the bare handle (folder == handle there).
+    SyncCheckpoints().update("nina_k", shortcode="IGSHORT", post_id="111")
+    _run_ingest_for(XSource(), "nina_k", "x_ck_2.jpg", X_RAW)
+
+    state = SyncCheckpoints().load()
+    assert state["nina_k"]["last_post_id"] == "111"
+    assert state["nina_k__x"]["last_post_id"] == "1772623353000"
+
+
+def test_checkpoint_is_not_written_when_nothing_downloaded():
+    from promptstudio.scraping.checkpoints import SyncCheckpoints
+
+    source = XSource()
+    target = source.parse_target("nina_k")
+    source._record_checkpoint(target, 0, {})
+    assert target.folder not in SyncCheckpoints().load()
+
+
+def test_checkpoint_update_is_atomic_under_concurrent_writers():
+    """Per-source lanes make this reachable — see docs/design_scrape_lanes.md §6."""
+    import threading
+
+    from promptstudio.scraping.checkpoints import SyncCheckpoints
+
+    ck = SyncCheckpoints()
+    names = [f"creator_{i}" for i in range(12)]
+
+    def write(handle):
+        ck.update(handle, shortcode=handle, post_id=handle, downloaded_delta=1)
+
+    threads = [threading.Thread(target=write, args=(n,)) for n in names]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    state = ck.load()
+    missing = [n for n in names if n not in state]
+    assert not missing, f"lost updates for {missing}"
 
 
 def test_null_date_sidecar_is_handled():
@@ -473,7 +551,7 @@ def test_ingest_substitutes_mtime_when_extractor_gave_no_date():
         json.dump({"id": "abc", "extension": "jpg"}, fh)
 
     ctx = SourceContext(save_dir=SAVED_DIR, log=lambda _m: None)
-    converted, _ = source._ingest([name], target, SAVED_DIR, ctx)
+    converted, _errors, _newest = source._ingest([name], target, SAVED_DIR, ctx)
     assert converted == 1
     # Empty taken_at would sort this to the top of the gallery forever.
     assert load_post_metadata(full)["taken_at"]

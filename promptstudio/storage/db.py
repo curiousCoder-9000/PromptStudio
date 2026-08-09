@@ -52,6 +52,11 @@ CREATE TABLE IF NOT EXISTS photos (
   has_prompt INTEGER NOT NULL DEFAULT 0,
   prompt_stale INTEGER NOT NULL DEFAULT 0,
   prompt_search TEXT,
+  -- The creator's own words, kept apart from prompt_search on purpose: the
+  -- caption is fixed for the life of the file while the prompt blob is
+  -- rewritten on every regenerate, so merging them would mean re-deriving
+  -- the caption on every prompt save for no gain.
+  caption_search TEXT,
   post_id TEXT,
   shortcode TEXT,
   source TEXT NOT NULL DEFAULT 'instagram'
@@ -181,6 +186,8 @@ _IDENTITY_COLUMNS = (
     # Downloaders often set mtime to the Instagram post date, so mtime cannot
     # drive "newest downloaded first".
     ("added_at", "REAL"),
+    # Creator-written text (caption, author) — see caption_search_blob.
+    ("caption_search", "TEXT"),
 )
 
 DEFAULT_SOURCE = "instagram"
@@ -288,6 +295,25 @@ def prompt_search_blob(entry: Optional[Dict[str, Any]]) -> str:
     ).lower()
 
 
+def caption_search_blob(meta: Optional[Dict[str, Any]]) -> str:
+    """Searchable text the *creator* wrote, from the sidecar.
+
+    Everything in `prompt_search` is model-generated, so until this existed the
+    only human-written text in the archive — hashtags, location, brand names —
+    could not be found. `#` is kept: searching "#ootd" should work, and a bare
+    "ootd" still matches on substring.
+    """
+    if not meta:
+        return ""
+    parts = [
+        str(meta.get("caption") or ""),
+        # Present on gallery-dl sources; the real author of a repost/retweet,
+        # which is not the folder name and is otherwise unsearchable.
+        str(meta.get("author") or ""),
+    ]
+    return " ".join(p for p in parts if p).strip().lower()
+
+
 def prompt_flags(
     entry: Optional[Dict[str, Any]], engine_id: str
 ) -> Tuple[int, int, str]:
@@ -325,6 +351,7 @@ class ArchiveIndex:
             self._migrate_identity_columns()
             self._migrate_deleted_posts()
             self._migrate_added_at()
+            self._migrate_caption_search()
             self._conn.commit()
 
     def _apply_pragmas(self) -> None:
@@ -710,7 +737,11 @@ class ArchiveIndex:
             self._conn.commit()
 
     def creator_verdict_counts(
-        self, *, cut: Optional[int] = None, stale_versions: Sequence[str] = ()
+        self,
+        *,
+        cut: Optional[int] = None,
+        stale_versions: Sequence[str] = (),
+        source: Optional[str] = None,
     ) -> Dict[str, Dict[str, int]]:
         """Per-creator keep/reject/unclassified counters for the sidebar.
 
@@ -718,11 +749,34 @@ class ArchiveIndex:
         purpose: the 0 boundary is a quality gate anyone would accept, while the
         1 boundary is a taste call that has never been measured. The review UI
         lets you act on them separately, so the counts have to arrive separately.
+
+        `source` scopes the counters to one platform. Without it a merged folder
+        would show its Instagram rejects while the user is filtered to X — a
+        number that is confidently wrong, which is worse than a missing one.
         """
-        cut_v = self._reject_cut(cut)
+        sql, params = self._verdict_counts_sql(
+            cut=cut, stale_versions=stale_versions, source=source
+        )
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return {
+            row["creator"]: {key: int(row[key] or 0) for key in _EMPTY_VERDICT_COUNTS}
+            for row in rows
+        }
+
+    def _verdict_counts_sql(
+        self,
+        *,
+        cut: Optional[int] = None,
+        stale_versions: Sequence[str] = (),
+        source: Optional[str] = None,
+    ) -> Tuple[str, List[Any]]:
+        """Build the per-creator verdict rollup. Returns (sql, params)."""
+        verdict = _VERDICT_CASE.format(cut=self._reject_cut(cut))
+        params: List[Any] = []
+
         stale = [v for v in stale_versions if v]
         stale_expr = "0"
-        params: List[Any] = []
         if stale:
             placeholders = ",".join("?" for _ in stale)
             stale_expr = (
@@ -731,38 +785,32 @@ class ArchiveIndex:
                 "THEN 1 ELSE 0 END"
             )
             params.extend(stale)
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT p.creator AS creator, "
-                f"SUM(CASE WHEN {_VERDICT_CASE.format(cut=cut_v)} = 'keep' "
-                "THEN 1 ELSE 0 END) AS keep_count, "
-                f"SUM(CASE WHEN {_VERDICT_CASE.format(cut=cut_v)} = 'reject' "
-                "THEN 1 ELSE 0 END) AS reject_count, "
-                "SUM(CASE WHEN v.rel_path IS NULL THEN 1 ELSE 0 END) "
-                "AS unclassified_count, "
-                "SUM(CASE WHEN v.rel_path IS NOT NULL AND v.tier < 0 "
-                "AND v.manual IS NULL THEN 1 ELSE 0 END) AS error_count, "
-                "SUM(CASE WHEN v.tier = 0 AND v.manual IS NULL THEN 1 ELSE 0 END) "
-                "AS unusable_count, "
-                "SUM(CASE WHEN v.tier = 1 AND v.manual IS NULL THEN 1 ELSE 0 END) "
-                "AS modest_count, "
-                f"SUM({stale_expr}) AS stale_count "
-                "FROM photos p LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path "
-                "GROUP BY p.creator",
-                params,
-            ).fetchall()
-        return {
-            row["creator"]: {
-                "keep_count": int(row["keep_count"] or 0),
-                "reject_count": int(row["reject_count"] or 0),
-                "unclassified_count": int(row["unclassified_count"] or 0),
-                "error_count": int(row["error_count"] or 0),
-                "unusable_count": int(row["unusable_count"] or 0),
-                "modest_count": int(row["modest_count"] or 0),
-                "stale_count": int(row["stale_count"] or 0),
-            }
-            for row in rows
-        }
+
+        where_sql = ""
+        if source:
+            where_sql = " WHERE p.source = ?"
+            params.append(self._norm_platform(source))
+
+        # Order matches _EMPTY_VERDICT_COUNTS so the row->dict comprehension in
+        # the caller stays a plain key lookup rather than a hand-kept mapping.
+        aggregates = (
+            f"SUM(CASE WHEN {verdict} = 'keep' THEN 1 ELSE 0 END) AS keep_count",
+            f"SUM(CASE WHEN {verdict} = 'reject' THEN 1 ELSE 0 END) AS reject_count",
+            "SUM(CASE WHEN v.rel_path IS NULL THEN 1 ELSE 0 END) AS unclassified_count",
+            "SUM(CASE WHEN v.rel_path IS NOT NULL AND v.tier < 0 "
+            "AND v.manual IS NULL THEN 1 ELSE 0 END) AS error_count",
+            "SUM(CASE WHEN v.tier = 0 AND v.manual IS NULL THEN 1 ELSE 0 END) "
+            "AS unusable_count",
+            "SUM(CASE WHEN v.tier = 1 AND v.manual IS NULL THEN 1 ELSE 0 END) "
+            "AS modest_count",
+            f"SUM({stale_expr}) AS stale_count",
+        )
+        sql = (
+            "SELECT p.creator AS creator, " + ", ".join(aggregates) + " FROM photos p "
+            "LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path"
+            f"{where_sql} GROUP BY p.creator"
+        )
+        return sql, params
 
     def list_unclassified(
         self,
@@ -774,7 +822,10 @@ class ArchiveIndex:
         retry_errors: bool = True,
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Media for `creator` that a classify run should visit.
+        """Media that a classify run should visit.
+
+        An empty `creator` means **the whole archive** — excluded folders are
+        filtered out by the `photos` table itself, which never indexes them.
 
         Indexed LEFT JOIN, not a directory walk: the old implementation listed
         the folder and issued one `get_glam_score` per filename, which is O(n)
@@ -786,14 +837,17 @@ class ArchiveIndex:
         cheap instead of a full-archive rescore.
         """
         creator = (creator or "").strip().lstrip("@")
-        if not creator or creator in EXCLUDED_FOLDERS or creator.startswith((".", "_")):
+        if creator and (creator in EXCLUDED_FOLDERS or creator.startswith((".", "_"))):
             return []
 
         exts = MEDIA_EXTENSIONS if include_videos else IMAGE_EXTENSIONS
         ext_clause = " OR ".join("LOWER(p.filename) LIKE ?" for _ in exts)
-        params: List[Any] = [creator]
+        params: List[Any] = []
+        where = [f"({ext_clause})"]
+        if creator:
+            where.insert(0, "p.creator = ?")
+            params.append(creator)
         params.extend(f"%{ext}" for ext in exts)
-        where = ["p.creator = ?", f"({ext_clause})"]
 
         if not force:
             conds = ["v.rel_path IS NULL"]
@@ -813,7 +867,7 @@ class ArchiveIndex:
         sql = (
             "SELECT p.rel_path, p.creator, p.filename FROM photos p "
             "LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path "
-            f"WHERE {' AND '.join(where)} ORDER BY p.filename ASC"
+            f"WHERE {' AND '.join(where)} ORDER BY p.creator ASC, p.filename ASC"
         )
         if limit is not None:
             sql += " LIMIT ?"
@@ -881,6 +935,33 @@ class ArchiveIndex:
             "CREATE INDEX IF NOT EXISTS idx_photos_added ON photos(added_at)"
         )
         # Drives "re-score everything the old prompt judged" without a rescan.
+
+    def _migrate_caption_search(self) -> None:
+        """Backfill caption_search once from the sidecars.
+
+        The column is added by `_migrate_identity_columns`, but an existing
+        archive would then have it NULL on every row until someone happened to
+        rebuild — i.e. search would silently keep missing captions. One pass of
+        sidecar reads (about 0.7s over 4.5k files, per S8's measurement) is
+        cheaper than telling the user to reindex.
+        """
+        if self._meta_get("caption_search_backfilled") == "1":
+            return
+        rows = self._conn.execute(
+            "SELECT rel_path FROM photos WHERE caption_search IS NULL"
+        ).fetchall()
+        updates = []
+        for row in rows:
+            rel = row["rel_path"]
+            full = os.path.join(self.base_dir, *rel.split("/"))
+            updates.append((caption_search_blob(read_sidecar(full)), rel))
+        if updates:
+            self._conn.executemany(
+                "UPDATE photos SET caption_search = ? WHERE rel_path = ?", updates
+            )
+        self._meta_set("caption_search_backfilled", "1")
+        if updates:
+            log.info("caption search backfilled for %d photos", len(updates))
 
     def _migrate_added_at(self) -> None:
         """Backfill added_at once from filesystem birth/ctime.
@@ -1060,6 +1141,9 @@ class ArchiveIndex:
                             has_p,
                             stale,
                             blob,
+                            # Free here: `side` is the same single sidecar read
+                            # the other four fields already share.
+                            caption_search_blob(side),
                             post_id or None,
                             shortcode or None,
                             self._source_from_file(full, side),
@@ -1071,9 +1155,9 @@ class ArchiveIndex:
             self._conn.executemany(
                 "INSERT INTO photos("
                 "rel_path, creator, filename, taken_at, mtime, added_at, "
-                "favorite, has_prompt, prompt_stale, prompt_search, "
+                "favorite, has_prompt, prompt_stale, prompt_search, caption_search, "
                 "post_id, shortcode, source"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
             self._meta_set(
@@ -1095,6 +1179,7 @@ class ArchiveIndex:
         post_id: Optional[str] = None,
         shortcode: Optional[str] = None,
         source: Optional[str] = None,
+        caption: Optional[str] = None,
     ) -> None:
         rel = normalize_rel_path(rel_path)
         creator, _, filename = rel.partition("/")
@@ -1125,13 +1210,25 @@ class ArchiveIndex:
         with self._lock:
             existing = self._conn.execute(
                 "SELECT favorite, has_prompt, prompt_stale, prompt_search, "
-                "post_id, shortcode, source, added_at FROM photos WHERE rel_path = ?",
+                "caption_search, post_id, shortcode, source, added_at "
+                "FROM photos WHERE rel_path = ?",
                 (rel,),
             ).fetchone()
             fav = favorite if favorite is not None else (int(existing["favorite"]) if existing else 0)
             hp = has_prompt if has_prompt is not None else (int(existing["has_prompt"]) if existing else 0)
             st = prompt_stale if prompt_stale is not None else (int(existing["prompt_stale"]) if existing else 0)
             blob = prompt_search if prompt_search is not None else (existing["prompt_search"] if existing else "")
+            # Caption precedence: explicit arg → the sidecar we already loaded →
+            # whatever the row had. The last case matters: a favorite toggle
+            # passes none of these and must not blank the caption index.
+            if caption is not None:
+                cap_blob = caption_search_blob({"caption": caption})
+            elif side_meta is not None:
+                cap_blob = caption_search_blob(side_meta)
+            elif existing is not None:
+                cap_blob = existing["caption_search"] or ""
+            else:
+                cap_blob = caption_search_blob(read_sidecar(full))
             if post_id is None and existing:
                 post_id = existing["post_id"]
             if shortcode is None and existing:
@@ -1153,15 +1250,16 @@ class ArchiveIndex:
             self._conn.execute(
                 "INSERT INTO photos("
                 "rel_path, creator, filename, taken_at, mtime, added_at, "
-                "favorite, has_prompt, prompt_stale, prompt_search, "
+                "favorite, has_prompt, prompt_stale, prompt_search, caption_search, "
                 "post_id, shortcode, source"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(rel_path) DO UPDATE SET "
                 "creator=excluded.creator, filename=excluded.filename, "
                 "taken_at=excluded.taken_at, mtime=excluded.mtime, "
                 "added_at=COALESCE(photos.added_at, excluded.added_at), "
                 "favorite=excluded.favorite, has_prompt=excluded.has_prompt, "
                 "prompt_stale=excluded.prompt_stale, prompt_search=excluded.prompt_search, "
+                "caption_search=excluded.caption_search, "
                 "post_id=COALESCE(excluded.post_id, photos.post_id), "
                 "shortcode=COALESCE(excluded.shortcode, photos.shortcode), "
                 "source=excluded.source",
@@ -1176,6 +1274,7 @@ class ArchiveIndex:
                     hp,
                     st,
                     blob or "",
+                    cap_blob or "",
                     post_id or None,
                     shortcode or None,
                     self._norm_platform(source),
@@ -1514,38 +1613,50 @@ class ArchiveIndex:
             }
         return photo
 
-    def list_creators(self, *, with_verdicts: bool = True) -> List[Dict[str, Any]]:
+    def list_creators(
+        self,
+        *,
+        with_verdicts: bool = True,
+        source: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Sidebar creator rollup, optionally scoped to one platform.
+
+        `source` narrows `photo_count`, the cover and the verdict counters, and
+        drops creators with no media from that platform. The per-creator
+        `sources` map is deliberately NOT narrowed: the sidebar has to mark a
+        folder as multi-source *while* a filter is active, which a filtered map
+        cannot express.
+
+        Provenance comes from `photos.source`, never from the folder-name
+        suffix — `SCRAPE_FOLDER_SUFFIX=0` merges platforms into one bare folder,
+        and any folder can also hold manual uploads.
+        """
         from promptstudio.scraping.checkpoints import SyncCheckpoints
 
         sync = SyncCheckpoints().load()
-        counts: Dict[str, Dict[str, int]] = {}
-        if with_verdicts:
-            try:
-                from promptstudio.scraping.media_classifier import (
-                    active_prompt_versions,
-                )
+        wanted = self._norm_platform(source) if source else None
+        counts = self._verdict_counts_for_list(with_verdicts, wanted)
+        by_creator = self._creator_source_rollup()
 
-                stale_versions = active_prompt_versions()
-            except Exception:
-                stale_versions = ()
-            counts = self.creator_verdict_counts(stale_versions=stale_versions)
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT creator, "
-                "COUNT(*) AS photo_count, "
-                "MIN(filename) AS cover "
-                "FROM photos GROUP BY creator ORDER BY photo_count DESC"
-            ).fetchall()
         creators = []
-        for row in rows:
-            name = row["creator"]
-            cover = row["cover"]
+        for name, per_source in by_creator.items():
+            picked = per_source.get(wanted) if wanted else None
+            if wanted and not picked:
+                continue
+            # Unfiltered cover comes from the largest source, so a creator with
+            # three X photos and 400 Instagram ones still shows an IG cover.
+            # The COUNT, though, is the total when unfiltered — taking it from
+            # the same `chosen` row would report the biggest source's count as
+            # the folder's size.
+            chosen = picked or max(per_source.values(), key=lambda s: s["n"])
+            cover = chosen["cover"]
+            count = int(picked["n"]) if picked else sum(s["n"] for s in per_source.values())
             entry = sync.get(name.lower()) or sync.get(name) or {}
-            photo_count = int(row["photo_count"] or 0)
             creators.append(
                 {
                     "name": name,
-                    "photo_count": photo_count,
+                    "photo_count": count,
+                    "sources": {src: int(v["n"]) for src, v in per_source.items()},
                     "cover_url": f"/media/{name}/{urllib.parse.quote(cover)}",
                     "cover_thumb_url": thumb_url(f"{name}/{cover}"),
                     "last_synced_at": entry.get("updated_at") or None,
@@ -1553,7 +1664,45 @@ class ArchiveIndex:
                     **(counts.get(name) or _EMPTY_VERDICT_COUNTS),
                 }
             )
+        creators.sort(key=lambda c: (-c["photo_count"], c["name"]))
         return creators
+
+    def _verdict_counts_for_list(
+        self, with_verdicts: bool, source: Optional[str]
+    ) -> Dict[str, Dict[str, int]]:
+        if not with_verdicts:
+            return {}
+        try:
+            from promptstudio.scraping.media_classifier import active_prompt_versions
+
+            stale_versions = active_prompt_versions()
+        except Exception:
+            stale_versions = ()
+        return self.creator_verdict_counts(
+            stale_versions=stale_versions, source=source
+        )
+
+    def _creator_source_rollup(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """`{creator: {source: {"n": count, "cover": filename}}}` in one scan.
+
+        Grouped one level finer than the old creator-only rollup so a single
+        query answers both "how many from this platform" and "which platforms
+        does this folder hold". Sorting moves to Python — creator counts are in
+        the hundreds, which is not where time goes.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT creator, source, COUNT(*) AS n, MIN(filename) AS cover "
+                "FROM photos GROUP BY creator, source"
+            ).fetchall()
+        out: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        for row in rows:
+            src = self._norm_platform(row["source"])
+            out.setdefault(row["creator"], {})[src] = {
+                "n": int(row["n"] or 0),
+                "cover": row["cover"],
+            }
+        return out
 
     def stats(self) -> Dict[str, int]:
         """Gallery counters for /api/stats — all indexed, no filesystem walk.
@@ -1593,6 +1742,7 @@ class ArchiveIndex:
         favorite_only: bool = False,
         media_type: Optional[str] = None,
         verdict: Optional[str] = None,
+        source: Optional[str] = None,
         sort: str = "name",
         limit: Optional[int] = None,
         offset: int = 0,
@@ -1606,6 +1756,9 @@ class ArchiveIndex:
         if creator:
             where.append("p.creator = ?")
             params.append(creator)
+        if source:
+            where.append("p.source = ?")
+            params.append(self._norm_platform(source))
         if favorite_only:
             where.append("p.favorite = 1")
         if unanalyzed:
@@ -1648,17 +1801,23 @@ class ArchiveIndex:
                 # sizes where LIKE costs single-digit ms, that trade is a loss.
                 # The index is still maintained so this can flip when the
                 # archive is large enough to change the answer.
+                # caption_search stays on LIKE even here: it is not in the FTS
+                # index (that mirrors the prompts table), and it is the only
+                # human-written text in the row — dropping it when the flag
+                # flips would make search quietly worse, not faster.
                 where.append(
-                    "(LOWER(p.creator) LIKE ? OR LOWER(p.filename) LIKE ? OR p.rel_path IN "
+                    "(LOWER(p.creator) LIKE ? OR LOWER(p.filename) LIKE ? "
+                    "OR IFNULL(p.caption_search, '') LIKE ? OR p.rel_path IN "
                     "(SELECT rel_path FROM prompts_fts WHERE prompts_fts MATCH ?))"
                 )
-                params.extend([like, like, fts_query])
+                params.extend([like, like, like, fts_query])
             else:
                 where.append(
                     "(LOWER(p.creator) LIKE ? OR LOWER(p.filename) LIKE ? "
+                    "OR IFNULL(p.caption_search, '') LIKE ? "
                     "OR IFNULL(p.prompt_search, '') LIKE ?)"
                 )
-                params.extend([like, like, like])
+                params.extend([like, like, like, like])
 
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
         sort = (sort or "name").lower()

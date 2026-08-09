@@ -5,7 +5,7 @@
 | **Date** | 2026-08-09 |
 | **Source** | [`review_ui_product.md`](review_ui_product.md) §2 |
 | **Relationship to Themes A/B/C/E** | Deliberately **distinct**. [`product_review.md`](product_review.md) owns "close the generation loop"; these are the items that review did not surface, mostly because they ride on code that already exists. |
-| **Status** | All Todo. Sequence in §9. |
+| **Status** | **F1, F2, F5 shipped** (Stage 2 — see [review_ui_product.md](review_ui_product.md) §6). F3, F4, F6, F7, F8 Todo. Sequence in §9. |
 
 Sizes: **S** ≈ days · **M** ≈ 1–2 weeks · **L** ≈ 3+ weeks.
 
@@ -15,7 +15,7 @@ half is done and currently returns nothing.
 
 ---
 
-## F1 — Make captions searchable ⭐ (S)
+## F1 — Make captions searchable ⭐ (S) — ✅ shipped
 
 **Outcome.** `?search=` matches the creator's own words — hashtags, location, brand names,
 product mentions — not just LLM-generated prompt text.
@@ -35,25 +35,29 @@ bikini' returns nothing unless the prompt writer happened to use those words"* a
 the fix to C1 semantic search (Phase 15, needs an embedding store). Part of that gap is
 much cheaper than that: the text was there the whole time.
 
-**Touches**
-- `storage/db.py` — add the caption to `prompt_search_blob`; it already reads the sidecar
-  via `read_sidecar()` during `upsert_photo`, so there is no extra I/O.
-- One-time reindex so existing rows pick it up — `PROMPTSTUDIO_REBUILD_INDEX=1`.
-- `prompts_fts` stays in sync automatically (still off by default, see S5).
+**As built** (differs from the proposal above — recorded rather than quietly changed):
+- A **separate `caption_search` column**, not more text in `prompt_search`. The caption is
+  fixed for the life of the file; the prompt blob is rewritten on every regenerate. Merging
+  them would mean re-deriving the caption on every prompt save for no gain, and it keeps the
+  FTS mirror (which tracks the `prompts` table) coherent.
+- Written by `rebuild()` and `upsert_photo` from the sidecar read that already happens, and
+  passed explicitly by both downloaders — so the ingest hot path gains **zero** file opens
+  and S8's "4 reads → 1" win is untouched.
+- Precedence in `upsert_photo`: explicit `caption=` → the already-loaded sidecar → the
+  existing row. That last case is load-bearing: a favourite toggle passes none of them and
+  must not blank the index.
+- `_migrate_caption_search()` backfills existing archives once, so no forced reindex.
+- `author` is indexed too — on Reddit/X the real author is not the folder name.
 
-**Watch out**
-- The blob is `LOWER`ed and matched with a leading wildcard. Long captions grow the scan
-  cost per row; measure the search hot path before and after (AGENTS.md rule 13) — this
-  is exactly the shape of change that looked free and was not for FTS5.
-- Captions are third-party text. They reach the UI only through the existing escaped
-  paths, but confirm nothing new interpolates them raw.
+**Measured** (AGENTS.md rule 13): +1.1 ms worst-case search at 4,400 rows, +5% at 40,000.
+Full table in [review_ui_product.md](review_ui_product.md) §6.
 
-**Done when.** Searching a hashtag that appears in a caption and in no prompt returns the
-post, and the search benchmark is reported alongside the change.
+**Tests.** `tests/test_caption_search.py` (17), including the favourite-toggle and
+prompt-write cases that would silently blank the column.
 
 ---
 
-## F2 — Archive-wide classify + global review ⭐ (S/M)
+## F2 — Archive-wide classify + global review ⭐ (S/M) — ✅ shipped
 
 **Outcome.** "Classify everything unclassified" as a top-level action, and review mode that
 works with no creator selected.
@@ -64,21 +68,23 @@ picked. Batch Analyze in the navbar is archive-wide; Classify is not. The value 
 keep/reject filter is proportional to coverage, and the archive-wide run is the one you
 would leave going overnight.
 
-**Touches**
-- `scraping/classify_job.py` — allow `creator=""` to mean "every creator"; `list_pending`
-  already delegates to `ArchiveIndex.list_unclassified`, which takes an optional creator.
-- `server/handler.py` — `POST /api/classify/start` stops requiring `creator`.
-- `index.html` / `app.js` — an action beside Batch Analyze; `enterReviewMode(null)`.
+**As built**
+- `creator=""` means the whole archive through `list_unclassified` → `list_pending` →
+  `start()` → `POST /api/classify/start`. A non-creator folder (`_trash`, `_thumbs`) is still
+  `bad_creator`: the scope is either one real creator or everything.
+- **`""` and `None` are different things** and the UI depends on it — `""` is an archive-wide
+  run, `None` is no job. Conflating them renders "Classifying @" with nothing after the `@`.
+- Navbar **Classify All (N)** beside Batch Analyze, with a live count, a disabled reason in
+  the tooltip, and a confirm — it holds the vision model for the duration, which blocks
+  batch analyze.
+- The chip reads `Classifying all creators · 412/3100 · @current_creator`; pending is ordered
+  by creator so that label advances monotonically.
+- Review mode with no creator now sums counters across creators (`scopedVerdictCounts`)
+  instead of showing zeroes on every chip.
 
-**Watch out**
-- The `ollama` lease is archive-wide already, so contention is handled — but a full-archive
-  classify is long. It must report ETA in the chip and survive a refresh (it does; jobs
-  live server-side).
-- Per-creator progress in the chip stops being meaningful — switch the sub-label to
-  `creator N of M`.
-
-**Done when.** A single action classifies every unclassified item across all creators, the
-chip is cancellable, and review mode opens on the whole archive.
+**Tests.** `tests/test_classify_all_creators.py` (12), plus one existing test rewritten:
+`test_missing_creator_is_rejected` asserted the old contract, so it became
+`test_empty_creator_now_means_the_whole_archive` rather than being deleted.
 
 ---
 
@@ -136,7 +142,7 @@ stopped.
 
 ---
 
-## F5 — Verdict and tier as browse axes (S)
+## F5 — Verdict and tier as browse axes (S) — ✅ shipped
 
 **Outcome.** Tier is usable for browsing, not only for triage.
 
@@ -145,20 +151,21 @@ options in `#sortSelect` (`index.html:156-162`). `verdict=` is only sent while
 `state.reviewMode` is true. So "show me every tier-4 shot across all creators" means
 picking a creator and entering a delete-oriented mode.
 
-**Touches**
-- `index.html` — `Tier (harshest first)` in the sort dropdown; a verdict chip row beside
-  Favorites / Unanalyzed.
-- `app.js` — send `verdict=` outside review mode; add both to `PREF_FIELDS` (these are view
-  prefs, unlike `reviewMode`, which must stay unrestored).
-- `renderCreatorList` — a per-creator tier summary so the sidebar says which creators are
-  worth opening.
+**As built**
+- `Tier (harshest first)` in `#sortSelect`, and a verdict `<select>` (not a chip row — seven
+  options would have been seven chips) beside the filter chips, with an `.is-active` state so
+  a silently-filtering select does not look identical to an idle one.
+- `state.browseVerdict` is in `PREF_FIELDS`; `state.reviewMode` deliberately still is not.
+- Pills go loud when filtering by verdict — the verdict is what is being looked at.
+- The per-creator summary landed as the reject pill's **tooltip** (unusable / modest / keep /
+  to-do / outdated), built from counters already on `/api/creators`. A visible breakdown per
+  row would need per-tier counts the endpoint does not return; that is a separate change.
+- **Found on the way:** `body.review-mode` was toggled with no CSS rule attached, so the
+  review strip stacked *under* the normal controls instead of replacing them as designed.
+  With a verdict filter now in both places, two of them disagreeing on screen would be worse
+  than either — `.view-controls` is hidden in review mode.
 
-**Watch out**
-- Verdict pills already render in normal mode in a quiet variant. Adding a filter makes the
-  card top band denser — U11 in the review; do that pass at the same time.
-
-**Done when.** Tier sorting and verdict filtering work from the normal gallery and survive
-a refresh.
+**Tests.** `tests/ui/test_browse_and_paging.js` (17).
 
 ---
 

@@ -46,8 +46,8 @@ class ArchiveStore:
     def ensure_ready(self, force: bool = False) -> None:
         self._index.ensure_ready(force=force)
 
-    def list_creators(self) -> List[Dict[str, Any]]:
-        return self._index.list_creators()
+    def list_creators(self, *, source: Optional[str] = None) -> List[Dict[str, Any]]:
+        return self._index.list_creators(source=source)
 
     def iter_photos(
         self,
@@ -84,6 +84,7 @@ class ArchiveStore:
         favorite_only: bool = False,
         media_type: Optional[str] = None,
         verdict: Optional[str] = None,
+        source: Optional[str] = None,
         sort: str = "name",
     ) -> Tuple[List[Dict[str, Any]], int]:
         return self._index.query_photos(
@@ -93,6 +94,7 @@ class ArchiveStore:
             favorite_only=favorite_only,
             media_type=media_type,
             verdict=verdict,
+            source=source,
             sort=sort,
             limit=limit,
             offset=offset,

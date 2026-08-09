@@ -27,7 +27,7 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/prompt/batch` | Background batch analyze (`creator`, `force`, `limit`, `paths`) |
 | `GET` | `/api/prompt/batch/status` | Batch job progress (cheap — snapshot, no archive scan) |
 | `POST` | `/api/prompt/batch/cancel` | Cooperative cancel after the current photo |
-| `POST` | `/api/classify/start` | Background keep/reject classify for one creator |
+| `POST` | `/api/classify/start` | Background keep/reject classify — one creator, or the whole archive |
 | `GET` | `/api/classify/status` | Classify job progress + tier histogram |
 | `POST` | `/api/classify/cancel` | Cooperative cancel after the current item |
 | `POST` | `/api/classify/verdict` | Pin one file to keep/reject by hand (or clear) |
@@ -137,14 +137,19 @@ nothing was reading it. See [design_media_classifier.md](design_media_classifier
 | `nothing_to_do` | 200 | No pending media (`pending: 0`) |
 | `busy` | 409 | Another job holds the `ollama` lease, or a classify is already running |
 | `ollama_down` | 503 | Ollama unreachable |
-| `bad_creator` | 400 | Missing/empty creator |
+| `bad_creator` | 400 | `creator` names an excluded folder (`_trash`, `_thumbs`, …) |
 
+- **`creator` is optional. Omitted or `""` classifies the whole archive.** The scope
+  is either one real creator or all of them; a `_`-prefixed folder is `bad_creator`.
+  In the status payload `""` (archive-wide run) and `null` (no job) are different
+  values — do not collapse them, or the UI renders "Classifying @" with no handle.
 - `only_unclassified` (default true) visits never-classified media plus previously
   failed attempts. `force` (or `only_unclassified: false`) re-runs everything.
 - `rescore_stale` adds media judged by a superseded prompt version. Without it a
   prompt bump never re-runs anything, and the only way to adopt it is a full
   rescore.
-- Takes the `ollama` lease, so it is mutually exclusive with batch analyze.
+- Takes the `ollama` lease, so it is mutually exclusive with batch analyze — which
+  matters more archive-wide, since the run is long.
 
 ### `GET /api/classify/status`
 
@@ -384,7 +389,10 @@ Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), 
 - `verdict` is **absent** on rows that have never been classified — its presence is the "has a verdict" test.
 - `verdict.verdict` is derived server-side from `tier` against `CLASSIFY_REJECT_MAX_TIER` (or from `manual` when set). Clients must not re-derive it; the threshold is configurable and would drift.
 
-- `search` matches creator, filename, and cached prompt text/tags.
+- `search` matches creator, filename, cached prompt text/tags, and the **post caption**
+  (plus `author` on gallery-dl sources). The caption is the only human-written text in the
+  archive — hashtags, location, brand names — and everything else in the index is
+  model-generated, so `#ootd` or a place name only resolves through it.
 - `unanalyzed=1` returns photos that need analysis (no cache entry or wrong `vision_engine`), same rule as batch.
 - `favorite=1` returns only favorited photos (`favorites.json`).
 - `sort=newest|oldest` uses `taken_at` from `*.meta.json`, then filename UTC stamp, then mtime.

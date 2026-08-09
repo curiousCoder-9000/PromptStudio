@@ -290,9 +290,10 @@ class GalleryDlSource:
         # Convert whatever landed, even on a non-zero exit — a partial run still
         # produced real files that must be indexed.
         added = sorted(self._snapshot(dest) - before)
-        converted, convert_errors = self._ingest(added, target, save_dir, ctx)
+        converted, convert_errors, newest = self._ingest(added, target, save_dir, ctx)
         result.downloaded = converted
         result.errors += convert_errors
+        self._record_checkpoint(target, converted, newest)
 
         self._classify_outcome(code, lines, result, ctx, options=options)
         ctx.log(
@@ -302,6 +303,37 @@ class GalleryDlSource:
             + (" [ABORTED]" if result.aborted else "")
         )
         return result
+
+    @staticmethod
+    def _record_checkpoint(
+        target: SourceTarget,
+        downloaded: int,
+        newest: Dict[str, str],
+    ) -> None:
+        """Stamp `sync_state.json` so the sidebar can show a synced badge.
+
+        Keyed on `target.folder`, not the raw handle. `db.list_creators` looks
+        this up by folder name, and for Instagram folder == handle, so folder
+        keying is backward compatible — while being the only thing that stops
+        `nina` on Instagram and `nina` on X from overwriting each other.
+
+        One call per run, not per file: `update()` rewrites the whole dict, so
+        per-file would be quadratic writes for no extra information.
+        """
+        if downloaded <= 0:
+            return
+        from promptstudio.scraping.checkpoints import SyncCheckpoints
+
+        try:
+            SyncCheckpoints().update(
+                target.folder,
+                shortcode=newest.get("shortcode", ""),
+                post_id=newest.get("post_id", ""),
+                downloaded_delta=downloaded,
+            )
+        except OSError:
+            # A missing badge is cosmetic; the media is already on disk.
+            pass
 
     @staticmethod
     def _snapshot(folder: str) -> set:
@@ -541,12 +573,17 @@ class GalleryDlSource:
         target: SourceTarget,
         save_dir: str,
         ctx: SourceContext,
-    ) -> Tuple[int, int]:
-        """Convert gallery-dl sidecars to PromptStudio sidecars + index rows."""
+    ) -> Tuple[int, int, Dict[str, str]]:
+        """Convert gallery-dl sidecars to PromptStudio sidecars + index rows.
+
+        Third return is the newest post seen this run (by `taken_at`), which the
+        caller records as the resume checkpoint.
+        """
         from promptstudio.storage.db import ArchiveIndex, normalize_rel_path
 
         converted = 0
         errors = 0
+        newest: Dict[str, str] = {}
         index = None
         try:
             index = ArchiveIndex.get()
@@ -567,6 +604,13 @@ class GalleryDlSource:
                     ).isoformat()
                 save_post_metadata(full, meta)
                 converted += 1
+                taken = str(meta.get("taken_at") or "")
+                if taken >= newest.get("taken_at", ""):
+                    newest = {
+                        "taken_at": taken,
+                        "post_id": str(meta.get("post_id") or ""),
+                        "shortcode": str(meta.get("shortcode") or ""),
+                    }
             except Exception as exc:
                 errors += 1
                 ctx.log(f"Metadata mapping failed for {name}: {exc}")
@@ -583,6 +627,7 @@ class GalleryDlSource:
                         post_id=str(meta.get("post_id") or "") or None,
                         shortcode=str(meta.get("shortcode") or "") or None,
                         source=self.name,
+                        caption=str(meta.get("caption") or ""),
                     )
                 except Exception as exc:
                     ctx.log(f"Index upsert warning for {name}: {exc}")
@@ -591,7 +636,7 @@ class GalleryDlSource:
 
         if converted:
             ctx.log(f"Converted metadata for {converted} new file(s)")
-        return converted, errors
+        return converted, errors, newest
 
     @staticmethod
     def _read_gdl_meta(media_path: str) -> Dict[str, Any]:

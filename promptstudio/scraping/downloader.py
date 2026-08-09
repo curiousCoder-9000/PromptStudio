@@ -128,6 +128,9 @@ class InstagramDownloader:
                     taken_at=str(meta.get("taken_at") or ""),
                     post_id=str(meta.get("post_id") or "") or None,
                     shortcode=str(meta.get("shortcode") or "") or None,
+                    # Passed rather than re-read: supplying every sidecar field
+                    # is what keeps this path at zero extra file opens.
+                    caption=str(meta.get("caption") or ""),
                 )
             except Exception as e:
                 self.log(f"Index upsert warning: {e}")

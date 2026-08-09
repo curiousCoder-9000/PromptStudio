@@ -5,7 +5,7 @@
 | **Date** | 2026-08-09 |
 | **Source** | [`review_ui_product.md`](review_ui_product.md) §3 |
 | **Relationship to S1–S8** | [`review_backend_architecture.md`](review_backend_architecture.md) owns the Python side (durability, storage, leases, logging). These are the items it does not cover — frontend runtime, the UI-side monolith, and gaps in the verification net. |
-| **Status** | E1 done in Stage 1. E2–E5 Todo. |
+| **Status** | E1 done (Stage 1). E5b done (Stage 2). E2, E3, E4, E5a Todo. |
 
 ---
 
@@ -127,7 +127,7 @@ needs to see it is the person who stopped opening the panel.
 **Proposal.** A test that reads the archive-wide histogram and fails above the threshold,
 skipped when fewer than N items are classified. Runs locally, not in CI (CI has no archive).
 
-### E5b — No performance regression test
+### E5b — No performance regression test ✅ done
 
 AGENTS.md rule 13 says measure before optimising and report the number — and the repo has
 twice been right to reverse an "obvious" win on measurement (FTS5, incremental rebuild).

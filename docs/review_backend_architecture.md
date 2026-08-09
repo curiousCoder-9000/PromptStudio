@@ -243,6 +243,34 @@ mtime misses a sidecar rewritten by an out-of-process classify run, and
 test_index_sidecar_reads.py` asserts the read counts, since the behaviour is
 invisible in the output.
 
+### S9 — Creator rollup regrouped for the source filter 🟢 ✅ done, index declined
+
+`list_creators()` moved from `GROUP BY creator` to `GROUP BY creator, source` so
+one scan answers both "how many from this platform" and "which platforms does
+this folder hold" ([design_source_filter.md](design_source_filter.md) §3.1).
+Rule 13 says report the number, so:
+
+Worst case seeded — every creator folder multi-source, so the new query has 3×
+the groups of the one it replaces (`py scripts/benchmark_queries.py`):
+
+| creator rollup | 4 400 rows | 40 000 rows |
+|---|--:|--:|
+| legacy `GROUP BY creator` (raw sql) | 1.6 ms | 56.5 ms |
+| new `GROUP BY creator, source` (raw sql) | 2.9 ms | 66.0 ms |
+| `list_creators()`, rollup only | 2.9 ms | 81.9 ms |
+| `list_creators()`, full (rollup + verdicts) | 6.5 ms | 160.0 ms |
+| `list_creators(source='x')`, full | 4.3 ms | 84.7 ms |
+
++1.3 ms at 4 400 rows and +9.5 ms at 40 000 — the regrouping is not where the
+time goes. `creator_verdict_counts()` is: it roughly doubles the full call, and
+a source filter *halves* the full call because both halves get scoped.
+
+**A `(creator, source)` composite index was measured and declined.** It bought
+50.3 → 42.4 ms on the rollup and 94.7 → 85.3 ms on the full call at 40 000 rows
+— ~10%, or 8 ms on a query that runs on creator-list refresh, against index
+maintenance on every `upsert_photo`. Not worth it at this archive size. Revisit
+if the rollup ever shows up in a profile.
+
 ---
 
 ## 4. Feature proposals

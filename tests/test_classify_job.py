@@ -90,8 +90,20 @@ def test_histogram_snapshot_is_a_copy(manager):
 
 # ── guards before any work starts ────────────────────────────────────
 
-def test_missing_creator_is_rejected(manager):
-    assert manager.start("")["status"] == "bad_creator"
+def test_empty_creator_now_means_the_whole_archive(manager):
+    """Contract change (F2): "" used to be rejected, and is now archive-wide.
+
+    With an empty archive there is nothing to visit, so the first real answer
+    is `nothing_to_do` — the point is that it is no longer `bad_creator`.
+    Full coverage in tests/test_classify_all_creators.py.
+    """
+    with patch("promptstudio.scraping.classify_job.ollama_reachable", return_value=True):
+        assert manager.start("")["status"] == "nothing_to_do"
+
+
+def test_a_non_creator_folder_is_still_rejected(manager):
+    """Scope is either one real creator or everything — never `_trash`."""
+    assert manager.start("_thumbs")["status"] == "bad_creator"
 
 
 def test_unreachable_ollama_is_reported_before_scanning(manager):

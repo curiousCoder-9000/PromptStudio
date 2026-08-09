@@ -6,7 +6,7 @@
 | **Scope** | Frontend (`index.html` · `app.js` · `style.css`), UX, and product gaps not covered elsewhere |
 | **Companions** | [`product_review.md`](product_review.md) — value chain, Themes A/B/C/E · [`review_backend_architecture.md`](review_backend_architecture.md) — durability, storage, observability |
 | **Why a third review** | Neither companion audits the UI, and both rest on one premise (§0) that turned out to be false |
-| **Status** | Stage 1 shipped — see the fix log in §5 |
+| **Status** | Stage 1 shipped (§5) · Stage 2 shipped (§6) |
 
 ---
 
@@ -107,8 +107,8 @@ Summary table. **Full detail in [`backlog_engineering.md`](backlog_engineering.m
 E1 poller visibility. **Shipped — see §5.**
 
 **Stage 2 — cheap features with disproportionate effect.** F1 captions · U4/F5 tier as a browse
-axis · U5/F2 archive-wide classify · U2 `IntersectionObserver` + `content-visibility`
-(measure before and after, per AGENTS.md rule 13).
+axis · U5/F2 archive-wide classify · U2 `IntersectionObserver` + `content-visibility`.
+**Shipped — see §6, with measurements.**
 
 **Stage 3.** F3 duplicate review · F4 activity view · U6 `?` overlay · U7 a11y pass · U8 drag-drop.
 
@@ -128,3 +128,46 @@ roughly a week and makes Phase 13 easier to evaluate.
 
 **Not done in Stage 1, deliberately:** U2 needs a measurement first; U4–U11 and all of §2 are
 Stage 2+.
+
+---
+
+## 6. Fix log — Stage 2
+
+| Item | Status | What changed |
+|------|--------|--------------|
+| **E5b** benchmark harness | ✅ | `scripts/benchmark_queries.py` — seeds a synthetic archive and times the gallery hot paths, reusing S5's methodology (3000-word vocabulary, median of 7) so the numbers stay comparable. Not a CI gate; timings on a shared runner are noise. |
+| **F1** captions searchable | ✅ | New `caption_search` column (separate from `prompt_search`: the caption is fixed for the file's life, the prompt blob is rewritten on every regenerate). Populated in `rebuild()` and `upsert_photo` from the sidecar read that already happens, passed explicitly by both downloaders so the hot path gains zero file opens, and backfilled once for existing archives. 17 tests. |
+| **F5 / U4** tier + verdict as browse axes | ✅ | `Tier (harshest first)` in the sort dropdown; a verdict `<select>` beside the filter chips; `browseVerdict` added to `PREF_FIELDS`; verdict pills go loud while filtering; the creator pill's tooltip carries the full keep/reject/to-do breakdown. `body.review-mode` now hides `.view-controls` — the class was toggled with no rule attached, so review mode stacked under the normal controls instead of replacing them. |
+| **F2 / U5** archive-wide classify | ✅ | `creator=""` means the whole archive in `list_unclassified`, `list_pending`, `start()` and `POST /api/classify/start`. New navbar **Classify All (N)** beside Batch Analyze, with a confirm (it holds the vision model) and a live count. The chip reports `all creators · @current`. 12 new tests plus one existing test updated — `""` used to be `bad_creator`. |
+| **U2** gallery render cost | ✅ | `content-visibility: auto` + `contain-intrinsic-size` on `.photo-card`, and the infinite-scroll probe replaced with an `IntersectionObserver` on the existing sentinel (the old handler read `document.body.offsetHeight` every animation frame of every scroll). |
+
+### U2 measurement
+
+Required by AGENTS.md rule 13. A/B'd in one browser session at **780 cards** by
+overriding the property at runtime, median of 5:
+
+| | `content-visibility: visible` | `auto` | |
+|---|---:|---:|---|
+| full `renderGallery()` | 69.2 ms | **27.2 ms** | 2.5× |
+| grid-size relayout | 18.5 ms | **2.7 ms** | 6.9× |
+| `document.body.scrollHeight` | 93,091 px | 93,091 px | unchanged |
+
+The identical scroll height is the part that mattered: `contain-intrinsic-size: auto 260px`
+uses the *remembered* size for anything already rendered, so skipping off-screen cards does
+not move the scrollbar. Extrapolated to a 4,400-item archive the re-render goes from ~390 ms
+to ~154 ms.
+
+**Not done:** true windowing. The DOM-node count is unchanged (9,925 at 780 cards) — this
+buys the layout and paint cost, not the memory. Revisit only if a measurement says the node
+count itself is the problem; the current fix keeps selection, keyboard nav and Ctrl-F working,
+which windowing would break.
+
+### F1 measurement
+
+| | prompt only | + caption | |
+|---|---:|---:|---|
+| 4,400 rows, worst-case search | 8.3 ms | **9.4 ms** | +1.1 ms |
+| 40,000 rows, worst-case search | 119.5 ms | **125.6 ms** | +5% |
+
+Imperceptible at real archive size. Worth noting from the same run: at 40k rows search is
+already 65–120 ms, which is the scale at which S5's FTS5 decision deserves revisiting.

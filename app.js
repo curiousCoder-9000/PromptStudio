@@ -41,6 +41,16 @@ const state = {
     // you into a delete-oriented mode. Same rule as selection and select mode.
     reviewMode: false,
     verdictFilter: 'reject',
+    // Verdict as a *browse* filter, outside review mode. Unlike reviewMode this
+    // IS a view pref: it filters, it never deletes, so restoring it on refresh
+    // is helpful rather than hostile.
+    browseVerdict: '',
+    // Platform provenance filter — '' means every source. Cross-filters the
+    // sidebar AND the gallery, so a merged folder shows only its X half when
+    // X is picked. Comes from photos.source, never the folder-name suffix.
+    sourceFilter: '',
+    // [{name, label}] from /api/sources; null until the first fetch lands.
+    knownSources: null,
     tierLabels: null,
     healthPollTimer: null,
     // Poller keys stopped because the tab went to the background, so only
@@ -251,6 +261,7 @@ const elements = {
     verdictMeterTodo: document.getElementById('verdictMeterTodo'),
     verdictMeterLegend: document.getElementById('verdictMeterLegend'),
     classifyCreatorBtn: document.getElementById('classifyCreatorBtn'),
+    classifyAllBtn: document.getElementById('classifyAllBtn'),
     reviewRejectsBtn: document.getElementById('reviewRejectsBtn'),
     rescoreStaleBtn: document.getElementById('rescoreStaleBtn'),
     cancelClassifyBtn: document.getElementById('cancelClassifyBtn'),
@@ -277,6 +288,7 @@ const elements = {
     favoritesFilterBtn: document.getElementById('favoritesFilterBtn'),
     sortSelect: document.getElementById('sortSelect'),
     mediaTypeSelect: document.getElementById('mediaTypeSelect'),
+    verdictFilterSelect: document.getElementById('verdictFilterSelect'),
     favoritePhotoBtn: document.getElementById('favoritePhotoBtn'),
     promptHistory: document.getElementById('promptHistory'),
     promptHistoryList: document.getElementById('promptHistoryList'),
@@ -311,6 +323,7 @@ const elements = {
     followingList: document.getElementById('followingList'),
     followingEmpty: document.getElementById('followingEmpty'),
     creatorSearchInput: document.getElementById('creatorSearchInput'),
+    sourcePillRow: document.getElementById('sourcePillRow'),
     ollamaBadge: document.getElementById('ollamaBadge'),
     ollamaStatusLabel: document.getElementById('ollamaStatusLabel'),
     savePromptBtn: document.getElementById('savePromptBtn'),
@@ -355,7 +368,11 @@ const PREF_FIELDS = [
     'mediaType',
     'gridSize',
     'favoritesOnly',
-    'unanalyzedOnly'
+    'unanalyzedOnly',
+    'browseVerdict',
+    // A filter, never a destructive mode, so restoring it on refresh is
+    // helpful rather than hostile — same reasoning as browseVerdict.
+    'sourceFilter'
 ];
 
 function loadViewPrefs() {
@@ -394,6 +411,10 @@ function saveViewPrefs() {
 function applyViewPrefsToControls() {
     if (elements.sortSelect) elements.sortSelect.value = state.sortMode || 'name';
     if (elements.mediaTypeSelect) elements.mediaTypeSelect.value = state.mediaType || 'all';
+    if (elements.verdictFilterSelect) {
+        elements.verdictFilterSelect.value = state.browseVerdict || '';
+        elements.verdictFilterSelect.classList.toggle('is-active', Boolean(state.browseVerdict));
+    }
     applyGridSize(state.gridSize);
 
     const chips = [
@@ -489,6 +510,9 @@ function handleVisibilityChange() {
 async function initApp() {
     await fetchHealth();
     await fetchStats();
+    // Before fetchCreators, so the first sidebar render already has pills
+    // rather than flashing them in a frame later.
+    await fetchKnownSources();
     await fetchCreators();
     await fetchPhotos();
     // Resume job chips if work is mid-flight — jobs live on the server, so a
@@ -898,14 +922,29 @@ function closeInsightsModal() {
 
 async function fetchCreators() {
     try {
-        const res = await fetch('/api/creators');
+        const params = new URLSearchParams();
+        if (state.sourceFilter) params.append('source', state.sourceFilter);
+        const qs = params.toString();
+        const res = await fetch(`/api/creators${qs ? '?' + qs : ''}`);
+        if (res.status === 400) {
+            // A stored pref naming a source that is no longer registered.
+            // Drop it rather than leaving the sidebar permanently empty.
+            console.warn('Unknown source filter, clearing:', state.sourceFilter);
+            state.sourceFilter = '';
+            saveViewPrefs();
+            return fetchCreators();
+        }
         state.creators = await res.json();
         elements.creatorCount.textContent = state.creators.length;
+        renderSourcePills();
         renderCreatorList();
         populateUploadCreators();
         // Verdict counters ride along on /api/creators, so the review strip's
         // chip counts refresh whenever the sidebar does.
         if (state.reviewMode) updateReviewBar();
+        // The navbar Classify All count is archive-wide, so it only changes
+        // when these counters do.
+        updateClassifyAllButton();
     } catch (err) {
         console.error('Error fetching creators:', err);
     }
@@ -945,12 +984,21 @@ async function fetchPhotos({ append = false } = {}) {
             params.append('favorite', '1');
         }
         params.append('media_type', state.mediaType || 'all');
+        if (state.sourceFilter) {
+            params.append('source', state.sourceFilter);
+        }
         if (state.reviewMode && state.verdictFilter) {
             params.append('verdict', state.verdictFilter);
             // Harshest first while triaging — the files most likely to be
             // deleted should be the ones on screen without scrolling.
             params.append('sort', 'tier');
         } else {
+            // Outside review, the verdict is a browse filter like any other:
+            // "show me every tier-4 shot" should not require entering a
+            // delete-oriented mode first.
+            if (state.browseVerdict) {
+                params.append('verdict', state.browseVerdict);
+            }
             params.append('sort', state.sortMode || 'name');
         }
         params.append('offset', String(requestOffset));
@@ -1381,6 +1429,113 @@ function clearSelection() {
     if (state.selectMode) renderGallery();
 }
 
+/**
+ * One-time load of the source registry. Pills are built from this rather than
+ * hardcoded, so registering a source in `sources/__init__.py` is enough.
+ */
+async function fetchKnownSources() {
+    if (state.knownSources) return state.knownSources;
+    try {
+        const res = await fetch('/api/sources');
+        const data = await res.json();
+        state.knownSources = Array.isArray(data.sources) ? data.sources : [];
+    } catch (err) {
+        // Without the registry the pills degrade to "All" only — the gallery
+        // still works, it just cannot be filtered.
+        console.error('Error fetching sources:', err);
+        state.knownSources = [];
+    }
+    return state.knownSources;
+}
+
+/**
+ * Source pills above the creator list.
+ *
+ * Counts come from the `sources` map on each creator, which /api/creators keeps
+ * UNFILTERED on purpose — so every pill can show its true total even while a
+ * different pill is active. A pill with no media anywhere is hidden rather than
+ * shown as a permanent zero.
+ */
+function renderSourcePills() {
+    const row = elements.sourcePillRow;
+    if (!row) return;
+    const registry = state.knownSources || [];
+    if (!registry.length) {
+        row.innerHTML = '';
+        return;
+    }
+
+    const totals = new Map();
+    let grand = 0;
+    state.creators.forEach((c) => {
+        const map = (c && c.sources) || {};
+        Object.keys(map).forEach((src) => {
+            const n = Number(map[src]) || 0;
+            totals.set(src, (totals.get(src) || 0) + n);
+            grand += n;
+        });
+    });
+
+    const pills = [{ name: '', label: 'All', count: grand }];
+    registry.forEach((s) => {
+        const count = totals.get(s.name) || 0;
+        // Keep the active pill visible even at zero, or clicking it would make
+        // the control that undoes the filter disappear.
+        if (count > 0 || state.sourceFilter === s.name) {
+            pills.push({ name: s.name, label: s.label || s.name, count });
+        }
+    });
+
+    // A single source is not a choice — don't spend sidebar height on it.
+    if (pills.length <= 2 && !state.sourceFilter) {
+        row.innerHTML = '';
+        return;
+    }
+
+    row.innerHTML = pills
+        .map((p) => {
+            const active = state.sourceFilter === p.name ? ' active' : '';
+            return (
+                `<button type="button" class="source-pill${active}" ` +
+                `data-source="${escapeHtml(p.name)}" ` +
+                `aria-pressed="${state.sourceFilter === p.name}">` +
+                `${escapeHtml(p.label)}` +
+                `<span class="source-pill-count">${Number(p.count)}</span>` +
+                `</button>`
+            );
+        })
+        .join('');
+
+    row.querySelectorAll('.source-pill').forEach((btn) => {
+        btn.addEventListener('click', () => setSourceFilter(btn.dataset.source || ''));
+    });
+}
+
+/**
+ * Switch platform. Clears the selected creator when that creator has nothing
+ * from the new source — otherwise the gallery would sit empty with a creator
+ * highlighted in a sidebar that no longer lists it.
+ */
+function setSourceFilter(source) {
+    if (state.sourceFilter === source) return;
+    state.sourceFilter = source;
+    saveViewPrefs();
+
+    if (state.selectedCreator && source) {
+        const current = state.creators.find((c) => c.name === state.selectedCreator);
+        const has = current && current.sources && Number(current.sources[source]) > 0;
+        if (!has) {
+            state.selectedCreator = null;
+            state.creatorPanelOpen = false;
+            elements.galleryTitle.textContent = 'All Photos';
+            hideCreatorStylePanel();
+        }
+    }
+    clearSelection();
+    fetchCreators();
+    fetchPhotos();
+}
+
 // Render Functions
 function renderCreatorList() {
     elements.creatorList.innerHTML = '';
@@ -1413,7 +1568,7 @@ function renderCreatorList() {
         // the sidebar (which would refetch creator style every 3 seconds).
         item.dataset.creator = c.name;
         item.innerHTML = `
-            <span class="creator-name">@${escapeHtml(c.name)}${syncBadgeHtml(c)}</span>
+            <span class="creator-name">@${escapeHtml(c.name)}${sourceMarkHtml(c)}${syncBadgeHtml(c)}</span>
             <span style="display:inline-flex;align-items:center;gap:6px;">
                 ${rejectPillHtml(c, classifyRunning && classifySt.creator === c.name ? classifySt : null)}
                 <span class="creator-badge">${escapeHtml(c.photo_count)}</span>
@@ -1439,6 +1594,27 @@ function renderCreatorList() {
 }
 
 /**
+ * Marker for a folder holding media from more than one platform.
+ *
+ * Only rendered when there is genuinely a mix — the common case is one source
+ * per folder, and a badge on every row would be noise. The tooltip carries the
+ * per-source breakdown, which is why `sources` stays unfiltered on the API.
+ */
+function sourceMarkHtml(creator) {
+    const map = (creator && creator.sources) || {};
+    const names = Object.keys(map);
+    if (names.length < 2) return '';
+    const detail = names
+        .sort()
+        .map((s) => `${s}: ${Number(map[s]) || 0}`)
+        .join(' · ');
+    return (
+        `<span class="creator-source-mark" title="Multi-source — ${escapeHtml(detail)}">` +
+        `<i class="fa-solid fa-code-branch"></i></span>`
+    );
+}
+
+/**
  * Sidebar pill: live progress while this creator is being classified, then the
  * reject count if there is anything to clean up. Nothing at all when the pile
  * is empty — a "0" on every row is noise, and its absence is the signal.
@@ -1451,7 +1627,19 @@ function rejectPillHtml(creator, runningStatus) {
     }
     const rejects = Number(creator.reject_count) || 0;
     if (!rejects) return '';
-    return `<span class="creator-reject-pill" title="${rejects} reject${rejects === 1 ? '' : 's'} to review">${rejects}</span>`;
+    // Full breakdown in the tooltip: the pill answers "is there cleanup here?",
+    // the tooltip answers "is this creator worth opening?" — both from counters
+    // already riding along on /api/creators, so no extra request.
+    const parts = [
+        `${rejects} reject${rejects === 1 ? '' : 's'} to review`,
+        `${Number(creator.unusable_count) || 0} unusable · ${Number(creator.modest_count) || 0} modest`,
+        `${Number(creator.keep_count) || 0} keep`,
+    ];
+    const todo = Number(creator.unclassified_count) || 0;
+    if (todo) parts.push(`${todo} not classified`);
+    const stale = Number(creator.stale_count) || 0;
+    if (stale) parts.push(`${stale} outdated`);
+    return `<span class="creator-reject-pill" title="${escapeHtml(parts.join('\n'))}">${rejects}</span>`;
 }
 
 function syncBadgeHtml(creator) {
@@ -1519,6 +1707,34 @@ function formatRelativeTime(iso) {
 function selectedCreatorMeta() {
     if (!state.selectedCreator) return null;
     return state.creators.find((c) => c.name === state.selectedCreator) || null;
+}
+
+const VERDICT_COUNT_FIELDS = [
+    'photo_count', 'keep_count', 'reject_count', 'unusable_count',
+    'modest_count', 'unclassified_count', 'stale_count', 'error_count',
+];
+
+/**
+ * Verdict counters for the current scope: one creator, or the whole archive
+ * when none is selected. Summed client-side from /api/creators, which already
+ * carries per-creator counters — an archive-wide endpoint would be a second
+ * source of truth for the same numbers.
+ */
+/** Unclassified items across every creator — drives the navbar action. */
+function scopedArchiveTodo() {
+    return state.creators.reduce(
+        (sum, c) => sum + (Number(c.unclassified_count) || 0), 0
+    );
+}
+
+function scopedVerdictCounts() {
+    const meta = selectedCreatorMeta();
+    const source = meta ? [meta] : state.creators;
+    const out = {};
+    VERDICT_COUNT_FIELDS.forEach((field) => {
+        out[field] = source.reduce((sum, c) => sum + (Number(c[field]) || 0), 0);
+    });
+    return out;
 }
 
 
@@ -1636,6 +1852,35 @@ function promptStatusMeta(photo) {
     return { cls: 'missing', label: 'Missing', icon: 'fa-bolt' };
 }
 
+/**
+ * Watch the "scroll for more" sentinel and page in when it comes near the
+ * viewport. Replaces a scroll listener that measured `document.body
+ * .offsetHeight` every frame — a forced layout on a document that only grows.
+ *
+ * The sentinel is destroyed and recreated by every render, so the observer is
+ * created once and re-pointed rather than re-created (a new observer per page
+ * would leak one per scroll).
+ */
+let loadMoreObserver = null;
+
+function observeLoadMoreSentinel(sentinel) {
+    if (!('IntersectionObserver' in window)) {
+        // No polyfill: the sentinel is a real element, so clicking it still works.
+        sentinel.addEventListener('click', () => loadMorePhotos());
+        sentinel.style.cursor = 'pointer';
+        return;
+    }
+    if (!loadMoreObserver) {
+        loadMoreObserver = new IntersectionObserver((entries) => {
+            if (entries.some((e) => e.isIntersecting)) loadMorePhotos();
+        // 600px matches the old near-bottom threshold, so the next page still
+        // starts loading before the user reaches the end.
+        }, { rootMargin: '600px 0px' });
+    }
+    loadMoreObserver.disconnect();
+    loadMoreObserver.observe(sentinel);
+}
+
 function renderGallery({ append = false, fromIndex = 0 } = {}) {
     if (!append) {
         elements.galleryGrid.innerHTML = '';
@@ -1734,6 +1979,7 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
         sentinel.className = 'gallery-load-more';
         sentinel.textContent = state.photosLoading ? 'Loading…' : 'Scroll for more';
         elements.galleryGrid.appendChild(sentinel);
+        observeLoadMoreSentinel(sentinel);
     }
     updateBulkBar();
 }
@@ -3466,6 +3712,16 @@ function setupEventListeners() {
         });
     }
 
+    if (elements.verdictFilterSelect) {
+        elements.verdictFilterSelect.value = state.browseVerdict || '';
+        elements.verdictFilterSelect.addEventListener('change', () => {
+            state.browseVerdict = elements.verdictFilterSelect.value || '';
+            elements.verdictFilterSelect.classList.toggle('is-active', Boolean(state.browseVerdict));
+            saveViewPrefs();
+            fetchPhotos();
+        });
+    }
+
     if (elements.rebuildStyleBtn) {
         elements.rebuildStyleBtn.addEventListener('click', rebuildSelectedCreatorStyle);
     }
@@ -3548,18 +3804,10 @@ function setupEventListeners() {
         });
     }
 
-    // Infinite scroll — load next page near bottom of window
-    let scrollTick = false;
-    window.addEventListener('scroll', () => {
-        if (scrollTick) return;
-        scrollTick = true;
-        requestAnimationFrame(() => {
-            scrollTick = false;
-            const nearBottom =
-                window.innerHeight + window.scrollY >= document.body.offsetHeight - 600;
-            if (nearBottom) loadMorePhotos();
-        });
-    });
+    // Infinite scroll is driven by an IntersectionObserver on the sentinel —
+    // see observeLoadMoreSentinel. The old handler read document.body
+    // .offsetHeight on every animation frame of every scroll, which forces a
+    // synchronous layout of a document that only ever grows.
 
     elements.syncInstagramBtn.addEventListener('click', openSyncModal);
     elements.closeSyncModalBtn.addEventListener('click', closeSyncModal);
@@ -5141,7 +5389,9 @@ function verdictCardClass(photo) {
 function verdictBadgeHtml(photo) {
     const v = photo && photo.verdict;
     if (!v) return '';
-    const quiet = state.reviewMode ? '' : ' quiet';
+    // Loud whenever the verdict is what the user is looking at — in review, or
+    // when they have filtered the normal gallery by it.
+    const quiet = (state.reviewMode || state.browseVerdict) ? '' : ' quiet';
     const manual = v.manual
         ? '<i class="fa-solid fa-hand-pointer verdict-pill-manual" title="Set by hand"></i> '
         : '';
@@ -5167,8 +5417,12 @@ function updateClassifyPanelUi() {
     const creator = state.selectedCreator;
     const meta = selectedCreatorMeta();
     const st = state.classifyStatus;
-    const runningHere = !!(st && st.running && st.creator === creator);
-    const runningElsewhere = !!(st && st.running && st.creator && st.creator !== creator);
+    // creator === "" means an archive-wide run, which covers this creator too —
+    // distinct from creator === null, which means no job at all.
+    const runningAll = !!(st && st.running && st.creator === '');
+    const runningHere = !!(st && st.running && (runningAll || st.creator === creator));
+    const runningElsewhere =
+        !!(st && st.running && !runningAll && st.creator && st.creator !== creator);
 
     const total = meta ? Number(meta.photo_count) || 0 : 0;
     const keep = meta ? Number(meta.keep_count) || 0 : 0;
@@ -5187,7 +5441,8 @@ function updateClassifyPanelUi() {
             elements.verdictMeterLegend.textContent = '—';
         } else if (runningHere) {
             elements.verdictMeterLegend.textContent =
-                `Classifying ${st.completed}/${st.total} · keep ${st.kept || 0} · reject ${st.rejected || 0}` +
+                (runningAll ? 'Classifying all creators ' : 'Classifying ') +
+                `${st.completed}/${st.total} · keep ${st.kept || 0} · reject ${st.rejected || 0}` +
                 (st.failed ? ` · err ${st.failed}` : '');
         } else if (runningElsewhere) {
             elements.verdictMeterLegend.textContent = `Job running on @${st.creator}…`;
@@ -5241,6 +5496,34 @@ function updateClassifyPanelUi() {
         elements.cancelClassifyBtn.style.display = runningHere ? '' : 'none';
         elements.cancelClassifyBtn.disabled = Boolean(st && st.cancel_requested);
     }
+    updateClassifyAllButton();
+}
+
+/**
+ * The navbar archive-wide action. Lives outside the creator panel, so its
+ * state depends on the whole archive rather than the selection.
+ */
+function updateClassifyAllButton() {
+    const btn = elements.classifyAllBtn;
+    if (!btn) return;
+    const st = state.classifyStatus;
+    const running = !!(st && st.running);
+    const todo = scopedArchiveTodo();
+
+    let why = '';
+    if (running) {
+        why = st.creator ? `Classify is running on @${st.creator}` : 'Already classifying';
+    } else if (state.ollamaOnline === false) {
+        why = 'Ollama is offline';
+    } else if (!todo) {
+        why = 'Every creator is already classified';
+    }
+
+    btn.disabled = Boolean(why);
+    btn.title = why || `Classify ${todo} unclassified item(s) across all creators`;
+    btn.innerHTML = running && !st.creator
+        ? `<i class="fa-solid fa-spinner fa-spin"></i> Classifying ${st.completed}/${st.total}`
+        : `<i class="fa-solid fa-wand-sparkles"></i> Classify All${todo ? ` (${todo})` : ''}`;
 }
 
 /**
@@ -5277,14 +5560,20 @@ async function pollClassifyStatus() {
         updateClassifyPanelUi();
 
         if (data.running) {
+            // creator === "" is archive-wide; "@" with nothing after it read as
+            // a bug. Show which creator it is on instead.
+            const scopeLabel = data.creator ? `@${data.creator}` : 'all creators';
+            const at = !data.creator && data.current_creator
+                ? ` · @${data.current_creator}`
+                : '';
             renderJobChip('classify', {
                 active: true,
                 title: data.cancel_requested
-                    ? `Classifying @${data.creator} — stopping`
-                    : `Classifying @${data.creator}`,
+                    ? `Classifying ${scopeLabel} — stopping`
+                    : `Classifying ${scopeLabel}`,
                 sub: `${data.completed}/${data.total} (${jobPct(data.completed, data.total)}%)` +
                     ` · keep ${data.kept || 0} · reject ${data.rejected || 0}` +
-                    (data.failed ? ` · err ${data.failed}` : ''),
+                    (data.failed ? ` · err ${data.failed}` : '') + at,
                 completed: data.completed,
                 total: data.total,
                 cancellable: true,
@@ -5331,18 +5620,24 @@ async function pollClassifyStatus() {
     }
 }
 
-async function startCreatorClassify({ rescoreStale = false, force = false } = {}) {
-    if (!state.selectedCreator) {
+async function startCreatorClassify({
+    rescoreStale = false,
+    force = false,
+    allCreators = false,
+} = {}) {
+    if (!allCreators && !state.selectedCreator) {
         showToast('Select a creator first');
         return;
     }
     if (!requireOllama()) return;
+    // "" is the archive-wide scope the API understands; it is not "unset".
+    const scope = allCreators ? '' : state.selectedCreator;
     try {
         const res = await fetch('/api/classify/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                creator: state.selectedCreator,
+                creator: scope,
                 only_unclassified: !force,
                 force,
                 include_videos: true,
@@ -5352,12 +5647,12 @@ async function startCreatorClassify({ rescoreStale = false, force = false } = {}
         const data = await res.json();
         if (res.ok && data.status === 'started') {
             showToast({
-                title: `Classifying @${data.creator}`,
+                title: allCreators ? 'Classifying all creators' : `Classifying @${data.creator}`,
                 body: `${data.pending} item(s) queued — progress in the corner chip`
             });
             state.classifyStatus = {
                 running: true,
-                creator: data.creator,
+                creator: allCreators ? '' : data.creator,
                 total: data.pending,
                 completed: 0,
                 kept: 0,
@@ -5369,7 +5664,9 @@ async function startCreatorClassify({ rescoreStale = false, force = false } = {}
         } else if (data.status === 'nothing_to_do') {
             showToast(rescoreStale
                 ? 'Everything already judged by the current prompt'
-                : 'Everything for this creator is already classified');
+                : (allCreators
+                    ? 'Every creator is already classified'
+                    : 'Everything for this creator is already classified'));
         } else if (data.status === 'ollama_down') {
             showToast(data.message || 'Ollama offline');
         } else {
@@ -5440,19 +5737,21 @@ function updateReviewBar() {
     document.body.classList.toggle('review-mode', on);
     if (!on) return;
 
-    const meta = selectedCreatorMeta();
     if (elements.reviewBarTitle) {
         elements.reviewBarTitle.textContent = state.selectedCreator
             ? `Reviewing @${state.selectedCreator}`
             : 'Reviewing all creators';
     }
 
+    // Archive-wide review used to show zeroes on every chip, because the counts
+    // came from the selected creator and there wasn't one.
+    const scoped = scopedVerdictCounts();
     const counts = {
-        reject: meta ? Number(meta.reject_count) || 0 : 0,
-        unusable: meta ? Number(meta.unusable_count) || 0 : 0,
-        modest: meta ? Number(meta.modest_count) || 0 : 0,
-        keep: meta ? Number(meta.keep_count) || 0 : 0,
-        unclassified: meta ? Number(meta.unclassified_count) || 0 : 0
+        reject: scoped.reject_count,
+        unusable: scoped.unusable_count,
+        modest: scoped.modest_count,
+        keep: scoped.keep_count,
+        unclassified: scoped.unclassified_count
     };
     if (elements.reviewBarFilters) {
         elements.reviewBarFilters.querySelectorAll('.review-chip').forEach((chip) => {
@@ -5652,6 +5951,23 @@ function handleTriageKey(e) {
 }
 
 function setupClassifyListeners() {
+    if (elements.classifyAllBtn) {
+        elements.classifyAllBtn.addEventListener('click', () => {
+            const todo = scopedArchiveTodo();
+            if (todo === 0) {
+                showToast('Every creator is already classified');
+                return;
+            }
+            // Archive-wide is long and holds the vision model the whole time,
+            // which blocks batch analyze. Worth one confirm.
+            if (!window.confirm(
+                `Classify ${todo} unclassified item(s) across all creators?\n\n`
+                + 'This holds the vision model until it finishes — batch analyze '
+                + 'cannot run alongside it. You can cancel from the chip.'
+            )) return;
+            startCreatorClassify({ allCreators: true });
+        });
+    }
     if (elements.classifyCreatorBtn) {
         elements.classifyCreatorBtn.addEventListener('click', () => {
             const meta = selectedCreatorMeta();

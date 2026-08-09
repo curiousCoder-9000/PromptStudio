@@ -313,6 +313,38 @@ virtualization) is tracked in [backlog_features.md](backlog_features.md) and
 
 ---
 
+## Phase 12e — UI hardening (Stage 2) ✅
+
+**Goal:** surface work that was already built but unreachable, and pay down the
+one render cost that scales with archive size.
+Source: [review_ui_product.md](review_ui_product.md) §6.
+
+| Deliverable | ID | Status |
+|-------------|----|--------|
+| `scripts/benchmark_queries.py` — times the gallery hot paths on a synthetic archive, same methodology as S5 | E5b | Done |
+| **Captions searchable** — `caption_search` column, populated with no extra file reads, backfilled for existing archives | F1 | Done |
+| **Tier + verdict as browse axes** — `sort=tier` in the dropdown, verdict filter outside review mode, persisted as a view pref | F5/U4 | Done |
+| **Archive-wide classify** — `creator=""` everywhere, navbar `Classify All (N)`, review mode over all creators | F2/U5 | Done |
+| **Gallery render cost** — `content-visibility` + `IntersectionObserver` paging | U2 | Done |
+| `tests/test_caption_search.py` (17) · `tests/test_classify_all_creators.py` (12) · `tests/ui/test_browse_and_paging.js` (17) | — | Done |
+
+**Measured, per rule 13.** `content-visibility` at 780 cards: full re-render
+69.2 ms → **27.2 ms**, grid-size relayout 18.5 ms → **2.7 ms**, and
+`scrollHeight` unchanged at 93,091 px — the last number is the one that mattered,
+because `contain-intrinsic-size` getting it wrong would move the scrollbar.
+Captions cost **+1.1 ms** on worst-case search at 4,400 rows.
+
+**Not done:** true windowing. The DOM-node count is unchanged; this buys layout
+and paint, not memory. Windowing would break selection, keyboard nav and Ctrl-F,
+so it waits for a measurement saying the node count itself is the problem.
+
+**F1 diverged from its own proposal** and the doc was corrected rather than the
+code bent to match: captions went into a separate `caption_search` column, not
+into `prompt_search`, because the caption is fixed for the life of the file while
+the prompt blob is rewritten on every regenerate.
+
+---
+
 ## Phase 13 — Instrument, then close the loop 🔜
 
 **Goal:** measure whether the pipeline works, stop losing what it produces, and

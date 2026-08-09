@@ -8,7 +8,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from promptstudio.config import MODEL_NAME
+from promptstudio.config import EXCLUDED_FOLDERS, MODEL_NAME
 from promptstudio.jobs import LEASES, OLLAMA
 from promptstudio.logging_setup import get_logger
 from promptstudio.scraping.media_classifier import (
@@ -48,6 +48,8 @@ class ClassifyJobManager:
     def _idle_status() -> Dict[str, Any]:
         return {
             "running": False,
+            # None = idle. "" = an archive-wide run (every creator), which is
+            # a different thing from "no job", so the UI must not conflate them.
             "creator": None,
             "total": 0,
             "completed": 0,
@@ -55,6 +57,7 @@ class ClassifyJobManager:
             "kept": 0,
             "rejected": 0,
             "current": "",
+            "current_creator": "",
             "started_at": None,
             "finished_at": None,
             "error": None,
@@ -129,15 +132,13 @@ class ClassifyJobManager:
         limit: Optional[int] = None,
         rescore_stale: bool = False,
     ) -> List[Dict[str, Any]]:
-        """Media for `creator` that still needs classifying.
+        """Media that still needs classifying. Empty `creator` = whole archive.
 
         `rescore_stale` also picks up files judged by a prompt version that is no
         longer current. Without it, improving a prompt never re-runs anything and
         the only way to adopt it is --force over the whole archive.
         """
         creator = (creator or "").strip().lstrip("@")
-        if not creator:
-            return []
         return ArchiveIndex.get().list_unclassified(
             creator,
             include_videos=include_videos,
@@ -148,7 +149,7 @@ class ClassifyJobManager:
 
     def start(
         self,
-        creator: str,
+        creator: str = "",
         *,
         force: bool = False,
         include_videos: bool = True,
@@ -156,14 +157,19 @@ class ClassifyJobManager:
         only_unclassified: bool = True,
         rescore_stale: bool = False,
     ) -> Dict[str, Any]:
-        """Start a classify job.
+        """Start a classify job. Empty `creator` classifies the whole archive.
+
+        Archive-wide is the run you actually leave going overnight, and it was
+        unreachable: the sidebar panel only exists once a creator is selected,
+        so coverage was capped at whatever you remembered to run one folder at
+        a time. Batch analyze has always been archive-wide; this matches it.
 
         Returns a result dict:
           status: started | nothing_to_do | busy | ollama_down | bad_creator
         """
         creator = (creator or "").strip().lstrip("@")
-        if not creator:
-            return {"status": "bad_creator", "message": "creator required"}
+        if creator in EXCLUDED_FOLDERS or creator.startswith((".", "_")):
+            return {"status": "bad_creator", "message": f"not a creator: {creator}"}
 
         if not ollama_reachable():
             return {
@@ -237,6 +243,9 @@ class ClassifyJobManager:
                         full = item["full_path"]
                         with self._job_lock:
                             self._status["current"] = rel
+                            # Archive-wide runs span creators; "412/3100" alone
+                            # says nothing about where it has got to.
+                            self._status["current_creator"] = item.get("creator", "")
                         if not os.path.isfile(full):
                             with self._job_lock:
                                 self._status["failed"] += 1
