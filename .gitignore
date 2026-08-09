@@ -4,6 +4,8 @@
 .env.*.local
 !.env.example
 
+*.log
+
 # ── Sessions & cookies (never commit — these are credentials) ────
 **/session-*
 *.session
