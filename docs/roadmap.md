@@ -256,7 +256,7 @@ Theme A items are specified in
 
 | Deliverable | ID | Status |
 |-------------|----|--------|
-| Quality dashboard — prompt edit rate, regenerate rate, score distribution per `prompt_version` (`GET /api/insights`) | B1 | Todo |
+| Quality dashboard — prompt edit rate, regenerate rate, score distribution per `prompt_version` (`GET /api/insights`) | B1 | **Done** |
 | **Provenance** — record the seed actually used (`resolve_seed`, required builder arg, returned by the API, echoed in the UI) | A0 | **Done** |
 | **Storage** — `generations` table in `archive.db`, full prompts, drop the 20-per-source cap, retire `resolve_archive_file` | A0 | Todo |
 | **Atomic JSON writes everywhere** — `storage/atomic.py`, applied to all ten writers | S1 | **Done** |

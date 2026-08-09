@@ -10,6 +10,7 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/stats` | Photos, creators, `prompts_ready` |
+| `GET` | `/api/insights` | Quality dashboard — prompt edit/regenerate rates, glam distribution, generation counts |
 | `GET` | `/api/health` | Ollama + Comfy reachability + models + job leases |
 | `GET` | `/api/journal` | Run history for a background job kind |
 | `GET` | `/api/creators` | Creator folders with counts + cover + sync meta |
@@ -67,6 +68,46 @@ All three counters are single indexed SQL aggregates. `prompts_ready` reads the
 `has_prompt` column (maintained write-through by `PromptCache`) rather than
 walking the archive and loading the prompt cache, which is what it used to do on
 every call — and `/api/stats` runs on every app init.
+
+### `GET /api/insights`
+
+Phase 13 B1 quality dashboard. Read-only aggregates over data already on disk
+(prompt `manual_edit` / `history`, `photos.glam_score`, `generations_index.json`).
+No new scoring jobs.
+
+```json
+{
+  "prompts": {
+    "total": 420,
+    "manual_edits": 38,
+    "edit_rate": 0.0905,
+    "with_history": 51,
+    "regenerate_rate": 0.1214,
+    "avg_history_depth": 0.18,
+    "by_pipeline_version": { "v2-structured": 420 }
+  },
+  "glam": {
+    "scored": 900,
+    "unscored": 200,
+    "distribution": { "-1": 200, "0": 40, "1": 80, "2": 300, "3": 480 },
+    "by_prompt_version": { "v4-reel-sheet": { "2": 200, "3": 400 } },
+    "filter_pass_rates": {
+      "sexy_ge_2": { "pass": 780, "of": 900, "rate": 0.8667 },
+      "glam_eq_3": { "pass": 480, "of": 900, "rate": 0.5333 }
+    }
+  },
+  "generations": {
+    "sources_with_gens": 12,
+    "total_outputs": 28,
+    "avg_per_source": 2.333,
+    "sources_with_multiple": 5,
+    "rated": 0,
+    "keep_rate": null
+  }
+}
+```
+
+`keep_rate` stays null until A3 (rate outputs) lands.
 
 ### `GET /api/prompt/batch/status`
 

@@ -44,6 +44,9 @@
                 <button id="trashBtn" class="btn btn-secondary" title="Restore or permanently remove deleted media" style="display:none;">
                     <i class="fa-solid fa-trash-can"></i> Trash <span class="nav-count-badge" id="trashCountBadge">0</span>
                 </button>
+                <button id="insightsBtn" class="btn btn-secondary" title="Prompt edit rate, glam distribution, generation counts">
+                    <i class="fa-solid fa-chart-line"></i> Insights
+                </button>
                 <button id="refreshBtn" class="btn btn-primary">
                     <i class="fa-solid fa-arrows-rotate"></i> Refresh
                 </button>
@@ -446,6 +449,32 @@
                         </div>
                     </div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Quality Insights Modal (Phase 13 B1) -->
+    <div class="modal-dialog-container" id="insightsModal" style="display:none;">
+        <div class="modal-overlay" id="insightsModalOverlay"></div>
+        <div class="modal-card insights-modal-card">
+            <div class="sync-modal-header">
+                <div class="modal-icon purple"><i class="fa-solid fa-chart-line"></i></div>
+                <div class="sync-modal-titles">
+                    <h3>Quality Insights</h3>
+                    <p class="sync-modal-sub">Signals already on disk — no new scoring. Edit rate and filter pass rates would have caught a saturated Sexy filter early.</p>
+                </div>
+                <button type="button" class="icon-btn" id="closeInsightsBtn" title="Close" aria-label="Close insights">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+            <div id="insightsBody" class="insights-body" aria-live="polite">
+                <div class="insights-loading">Loading…</div>
+            </div>
+            <div class="modal-actions insights-modal-actions">
+                <button type="button" class="btn btn-secondary" id="refreshInsightsBtn">
+                    <i class="fa-solid fa-arrows-rotate"></i> Refresh
+                </button>
+                <button type="button" class="btn btn-primary" id="doneInsightsBtn">Done</button>
             </div>
         </div>
     </div>

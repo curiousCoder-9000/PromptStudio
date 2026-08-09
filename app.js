@@ -98,6 +98,14 @@ const elements = {
     trashEmptyBtn: document.getElementById('trashEmptyBtn'),
     trashPurgeExpiredBtn: document.getElementById('trashPurgeExpiredBtn'),
     closeTrashModalBtn: document.getElementById('closeTrashModalBtn'),
+    // Quality insights (Phase 13 B1)
+    insightsBtn: document.getElementById('insightsBtn'),
+    insightsModal: document.getElementById('insightsModal'),
+    insightsModalOverlay: document.getElementById('insightsModalOverlay'),
+    insightsBody: document.getElementById('insightsBody'),
+    closeInsightsBtn: document.getElementById('closeInsightsBtn'),
+    refreshInsightsBtn: document.getElementById('refreshInsightsBtn'),
+    doneInsightsBtn: document.getElementById('doneInsightsBtn'),
     // Lightbox Modal
     lightboxModal: document.getElementById('lightboxModal'),
     lightboxOverlay: document.getElementById('lightboxOverlay'),
@@ -589,6 +597,138 @@ async function fetchStats() {
     } catch (err) {
         console.error('Error fetching stats:', err);
     }
+}
+
+function _fmtRate(rate) {
+    if (rate == null || Number.isNaN(rate)) return '—';
+    return `${(rate * 100).toFixed(1)}%`;
+}
+
+function _fmtDist(dist) {
+    if (!dist || typeof dist !== 'object') return '—';
+    return Object.keys(dist)
+        .sort((a, b) => Number(a) - Number(b))
+        .map((k) => `<span class="insights-chip"><b>${escapeHtml(k)}</b> ${Number(dist[k]).toLocaleString()}</span>`)
+        .join(' ');
+}
+
+function renderInsights(data) {
+    if (!elements.insightsBody) return;
+    const p = data.prompts || {};
+    const g = data.glam || {};
+    const gen = data.generations || {};
+    const pass = g.filter_pass_rates || {};
+
+    const passRows = Object.entries(pass).map(([name, row]) => {
+        const rate = row?.rate;
+        const warn = rate != null && rate > 0.6;
+        return `<div class="insights-pass-row ${warn ? 'is-warn' : ''}">
+            <span class="insights-pass-name">${escapeHtml(name)}</span>
+            <span class="insights-pass-rate">${_fmtRate(rate)}</span>
+            <span class="insights-pass-detail">${(row?.pass ?? 0).toLocaleString()} / ${(row?.of ?? 0).toLocaleString()}</span>
+        </div>`;
+    }).join('') || '<div class="insights-muted">No scored media yet</div>';
+
+    const byVer = g.by_prompt_version || {};
+    const verBlocks = Object.keys(byVer).length
+        ? Object.entries(byVer).map(([ver, dist]) =>
+            `<div class="insights-ver-block">
+                <div class="insights-ver-name">${escapeHtml(ver)}</div>
+                <div class="insights-dist">${_fmtDist(dist)}</div>
+            </div>`).join('')
+        : '<div class="insights-muted">No versioned glam scores yet</div>';
+
+    const pipeBlocks = Object.keys(p.by_pipeline_version || {}).length
+        ? Object.entries(p.by_pipeline_version).map(([ver, n]) =>
+            `<span class="insights-chip"><b>${escapeHtml(ver)}</b> ${Number(n).toLocaleString()}</span>`).join(' ')
+        : '<span class="insights-muted">—</span>';
+
+    elements.insightsBody.innerHTML = `
+        <div class="insights-grid">
+            <section class="insights-section">
+                <h4><i class="fa-solid fa-wand-magic-sparkles"></i> Prompts</h4>
+                <div class="insights-metrics">
+                    <div class="insights-metric">
+                        <span class="insights-metric-value">${(p.total ?? 0).toLocaleString()}</span>
+                        <span class="insights-metric-label">Prompt bundles</span>
+                    </div>
+                    <div class="insights-metric" title="Share of prompts the user edited by hand (manual_edit)">
+                        <span class="insights-metric-value">${_fmtRate(p.edit_rate)}</span>
+                        <span class="insights-metric-label">Edit rate</span>
+                        <span class="insights-metric-sub">${(p.manual_edits ?? 0).toLocaleString()} edited</span>
+                    </div>
+                    <div class="insights-metric" title="Share of prompts with at least one history snapshot (regenerated or re-saved)">
+                        <span class="insights-metric-value">${_fmtRate(p.regenerate_rate)}</span>
+                        <span class="insights-metric-label">Regenerate rate</span>
+                        <span class="insights-metric-sub">avg history ${p.avg_history_depth ?? 0}</span>
+                    </div>
+                </div>
+                <div class="insights-sublabel">By pipeline version</div>
+                <div class="insights-dist">${pipeBlocks}</div>
+            </section>
+
+            <section class="insights-section">
+                <h4><i class="fa-solid fa-fire"></i> Glam scores</h4>
+                <div class="insights-metrics">
+                    <div class="insights-metric">
+                        <span class="insights-metric-value">${(g.scored ?? 0).toLocaleString()}</span>
+                        <span class="insights-metric-label">Scored</span>
+                        <span class="insights-metric-sub">${(g.unscored ?? 0).toLocaleString()} unscored</span>
+                    </div>
+                </div>
+                <div class="insights-sublabel">Distribution (0–3; −1 unscored)</div>
+                <div class="insights-dist">${_fmtDist(g.distribution)}</div>
+                <div class="insights-sublabel">Filter pass rates <span class="insights-hint">(warn if &gt; 60%)</span></div>
+                <div class="insights-pass-list">${passRows}</div>
+                <div class="insights-sublabel">By classifier prompt version</div>
+                ${verBlocks}
+            </section>
+
+            <section class="insights-section">
+                <h4><i class="fa-solid fa-image"></i> Generations</h4>
+                <div class="insights-metrics">
+                    <div class="insights-metric">
+                        <span class="insights-metric-value">${(gen.total_outputs ?? 0).toLocaleString()}</span>
+                        <span class="insights-metric-label">Outputs</span>
+                    </div>
+                    <div class="insights-metric">
+                        <span class="insights-metric-value">${(gen.sources_with_gens ?? 0).toLocaleString()}</span>
+                        <span class="insights-metric-label">Source photos</span>
+                        <span class="insights-metric-sub">avg ${gen.avg_per_source ?? 0} each</span>
+                    </div>
+                    <div class="insights-metric">
+                        <span class="insights-metric-value">${(gen.sources_with_multiple ?? 0).toLocaleString()}</span>
+                        <span class="insights-metric-label">Retried sources</span>
+                        <span class="insights-metric-sub">keep rate: ${_fmtRate(gen.keep_rate)} (needs rating)</span>
+                    </div>
+                </div>
+            </section>
+        </div>
+    `;
+}
+
+async function loadInsights() {
+    if (!elements.insightsBody) return;
+    elements.insightsBody.innerHTML = '<div class="insights-loading">Loading…</div>';
+    try {
+        const res = await fetch('/api/insights');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderInsights(data);
+    } catch (err) {
+        console.error('insights failed', err);
+        elements.insightsBody.innerHTML = `<div class="insights-error">Could not load insights: ${escapeHtml(err.message || String(err))}</div>`;
+    }
+}
+
+function openInsightsModal() {
+    if (!elements.insightsModal) return;
+    elements.insightsModal.style.display = 'flex';
+    loadInsights();
+}
+
+function closeInsightsModal() {
+    if (elements.insightsModal) elements.insightsModal.style.display = 'none';
 }
 
 async function fetchCreators() {
@@ -3432,6 +3572,20 @@ function setupEventListeners() {
         elements.closeTrashModalBtn.addEventListener('click', closeTrashModal);
     }
     bindModalOverlayDismiss(elements.trashModal, closeTrashModal);
+
+    if (elements.insightsBtn) {
+        elements.insightsBtn.addEventListener('click', openInsightsModal);
+    }
+    if (elements.closeInsightsBtn) {
+        elements.closeInsightsBtn.addEventListener('click', closeInsightsModal);
+    }
+    if (elements.doneInsightsBtn) {
+        elements.doneInsightsBtn.addEventListener('click', closeInsightsModal);
+    }
+    if (elements.refreshInsightsBtn) {
+        elements.refreshInsightsBtn.addEventListener('click', loadInsights);
+    }
+    bindModalOverlayDismiss(elements.insightsModal, closeInsightsModal);
     if (elements.trashEmptyBtn) {
         elements.trashEmptyBtn.addEventListener('click', async () => {
             if (!state.trashCount) {

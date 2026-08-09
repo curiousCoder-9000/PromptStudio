@@ -1603,6 +1603,14 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json(stats)
             return
 
+        if path == "/api/insights":
+            # B1 quality dashboard — edit rate, glam distribution, gen counts.
+            # Read-only aggregates over data already on disk; no new writes.
+            from promptstudio.insights import compute_insights
+
+            self._send_json(compute_insights())
+            return
+
         if path == "/api/journal":
             # Run history for background jobs. Without ?kind, lists what exists.
             kind = (query.get("kind", [""])[0] or "").strip()
