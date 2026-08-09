@@ -35,7 +35,15 @@ These are the single source of truth — other docs point here rather than resta
     time. Storing the collapsed answer is what made the previous classifier cost a
     full-archive rescore per change of mind. Never add a `verdict` column.
 13. **Measure before optimising, and report the number.** Two "obvious" wins in this codebase turned out to be losses under measurement (FTS5 search, incremental rebuild) — both recorded in [docs/review_backend_architecture.md](docs/review_backend_architecture.md).
-13. **IG sync:** multi-day pacing; stop on abort; never password-login every run.
+14. **Loopback only, and blank means loopback.** There is no auth and CORS is `*`, so any
+    non-loopback bind hands the archive and `DELETE /api/photo` to the whole network. Use
+    `config.resolve_host()`; never `os.environ.get("PROMPTSTUDIO_HOST", "…")` directly — a
+    set-but-empty var returns `""`, not the default, and `""` binds every interface. Same
+    trap for any future host/port/origin knob.
+15. **The UI must work offline.** Fonts and icons are vendored in `assets/`
+    (`scripts/vendor_web_assets.py`). No CDN `<link>`, `<script src>` or `@import` in
+    `index.html` — this is a local-first app and most of its buttons are icon-only.
+16. **IG sync:** multi-day pacing; stop on abort; never password-login every run.
 
 ## Where to look
 
@@ -78,6 +86,8 @@ Load only what the task needs.
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Ollama, ports, cache wipe, known bugs |
 | [docs/review_backend_architecture.md](docs/review_backend_architecture.md) | Backend decisions + measurements |
 | [docs/product_review.md](docs/product_review.md) | Product themes, accepted backlog |
+| [docs/review_ui_product.md](docs/review_ui_product.md) | UI/UX gaps U1–U11 + Stage-1 fix log |
+| [docs/backlog_features.md](docs/backlog_features.md) · [docs/backlog_engineering.md](docs/backlog_engineering.md) | F1–F8 · E1–E5, picked up directly |
 | [docs/roadmap.md](docs/roadmap.md) | Phase history; 13–15 planned |
 | [docs/design_generation_loop.md](docs/design_generation_loop.md) | Active spec for Phases 13–14 |
 | [scripts/README.md](scripts/README.md) · [tests/ui/README.md](tests/ui/README.md) | CLI examples · browser suites |

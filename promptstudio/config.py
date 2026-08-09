@@ -50,7 +50,24 @@ def _env_csv(name: str, default: str) -> list[str]:
 
 # Server
 PORT = int(os.environ.get("PROMPTSTUDIO_PORT", "5000"))
-HOST = os.environ.get("PROMPTSTUDIO_HOST", "")
+
+LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+def resolve_host(raw: str | None) -> str:
+    """Bind address, defaulting to loopback — including when the value is blank.
+
+    There is no auth and CORS is "*", so a non-loopback bind hands the whole
+    archive, and `DELETE /api/photo`, to every host that can reach the port.
+    The empty case matters: `.env.example` shipped `PROMPTSTUDIO_HOST=`, and
+    `os.environ.get(name, "127.0.0.1")` returns `""` for a set-but-empty var
+    rather than the default — and `""` binds INADDR_ANY. Set the var explicitly
+    to expose the server on purpose.
+    """
+    return (raw or "").strip() or "127.0.0.1"
+
+
+HOST = resolve_host(os.environ.get("PROMPTSTUDIO_HOST"))
 
 # Local image archive (never store personal media inside the git repo)
 SAVED_DIR = os.path.expanduser(

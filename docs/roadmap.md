@@ -280,6 +280,39 @@ routes are touched rather than as a big-bang restructure.
 
 ---
 
+## Phase 12d — UI hardening (Stage 1) ✅
+
+**Goal:** fix what a UI review found that neither earlier review covered — starting with
+one finding that invalidates a documented assumption.
+Source: [review_ui_product.md](review_ui_product.md).
+
+| Deliverable | ID | Status |
+|-------------|----|--------|
+| **Bind to loopback**, including when `PROMPTSTUDIO_HOST` is set-but-empty; log the address actually bound and warn on exposure | §0 | Done |
+| Fonts + Font Awesome vendored into `assets/`; both CDN links dropped; `scripts/vendor_web_assets.py` regenerates and `--check`s them | U1 | Done |
+| Classify tier distribution rendered in the Insights modal — reject rate, `top_tier_share` with a saturation warning, per-tier bars, separate failure row | U3 | Done |
+| Six pollers pause on a hidden tab and resume with an immediate refresh | E1 | Done |
+| `tests/test_bind_host.py` (8) · `tests/test_offline_assets.py` (5) · `tests/ui/test_insights_and_pollers.js` (27) | — | Done |
+
+**§0 is the one that mattered.** `product_review.md` §3 accepted "no auth, CORS `*`" as
+correct *for localhost-only*. `HOST` defaulted to `""`, which binds every interface, and the
+startup log printed "localhost" regardless. The empty case is the whole bug — `.env.example`
+shipped `PROMPTSTUDIO_HOST=`, and `os.environ.get(name, default)` returns `""` for a
+set-but-empty variable, so changing the default alone would have fixed nothing for anyone
+who copied the template. Now AGENTS.md rule 14.
+
+**U3 is the one that stung.** `top_tier_share` — the metric
+[design_media_classifier.md](design_media_classifier.md) §5 calls "the one number to check
+after the first real run" — was computed, journalled and served over HTTP while
+`renderInsights` read only `data.prompts` and `data.generations`. Exactly the blind spot
+Phase 12c existed to close.
+
+Stage 2 (captions searchable, tier as a browse axis, archive-wide classify, gallery
+virtualization) is tracked in [backlog_features.md](backlog_features.md) and
+[backlog_engineering.md](backlog_engineering.md).
+
+---
+
 ## Phase 13 — Instrument, then close the loop 🔜
 
 **Goal:** measure whether the pipeline works, stop losing what it produces, and

@@ -3623,6 +3623,143 @@ button.tag-pill.tag-clickable:hover {
     font-weight: 500;
 }
 
+/* ── Classify tier distribution ────────────────────────────────────
+   The saturation guard, made legible. A stack of proportional bars
+   answers "is this filter discriminating?" at a glance; the same
+   numbers as a list of chips did not. Tier colours match .tier-chip
+   in the triage panel so the two surfaces agree. */
+.insights-tiers {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.insights-tier-row {
+    display: grid;
+    /* Labels truncate rather than wrap: a two-line "Revealing daywear" made
+       every row a different height and the bars stopped reading as a column. */
+    grid-template-columns: 36px minmax(0, 1.7fr) minmax(52px, 1fr) auto;
+    align-items: center;
+    gap: 9px;
+    min-height: 26px;
+}
+
+.insights-tier-row .tier-chip {
+    text-align: center;
+    padding: 3px 0;
+    font-size: 0.72rem;
+}
+
+.insights-tier-name {
+    font-size: 0.8rem;
+    color: var(--text-secondary, #cbd5e1);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.insights-tier-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.insights-tier-tag {
+    font-size: 0.62rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(244, 63, 94, 0.16);
+    color: #fda4af;
+    flex: none;
+}
+
+.insights-tier-bar {
+    height: 8px;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.12);
+    overflow: hidden;
+    display: block;
+}
+
+.insights-tier-fill {
+    display: block;
+    height: 100%;
+    border-radius: 999px;
+    background: rgba(148, 163, 184, 0.5);
+    transition: width 0.3s ease;
+}
+
+.insights-tier-fill.t0 { background: #64748b; }
+.insights-tier-fill.t1 { background: #38bdf8; }
+.insights-tier-fill.t2 { background: #10b981; }
+.insights-tier-fill.t3 { background: #ec4899; }
+.insights-tier-fill.t4 { background: #f97316; }
+
+.insights-tier-n {
+    font-family: "Fira Code", ui-monospace, monospace;
+    font-size: 0.78rem;
+    color: #e2e8f0;
+    white-space: nowrap;
+    text-align: right;
+}
+
+.insights-tier-n em {
+    font-style: normal;
+    color: #64748b;
+    margin-left: 6px;
+}
+
+.insights-tier-row.is-error .insights-tier-name {
+    color: #fdba74;
+}
+
+/* No track on the failure row. An empty bar reads as "0%", and tier -1 is not
+   a measurement at all — it is the vision call having failed. */
+.insights-tier-row.is-error .insights-tier-bar {
+    background: transparent;
+}
+
+.insights-metric.is-warn {
+    background: rgba(249, 115, 22, 0.1);
+    border-color: rgba(249, 115, 22, 0.3);
+}
+
+.insights-metric.is-warn .insights-metric-sub {
+    color: #fdba74;
+}
+
+.insights-warn {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: 10px 0 4px;
+    padding: 9px 12px;
+    border-radius: 10px;
+    background: rgba(249, 115, 22, 0.1);
+    border: 1px solid rgba(249, 115, 22, 0.28);
+    font-size: 0.8rem;
+    line-height: 1.45;
+    color: #fed7aa;
+}
+
+.insights-warn i {
+    color: #fb923c;
+    margin-top: 2px;
+    flex: none;
+}
+
+@media (max-width: 640px) {
+    .insights-tier-row {
+        grid-template-columns: 34px 1fr auto;
+    }
+    .insights-tier-bar {
+        grid-column: 1 / -1;
+    }
+}
+
 .insights-pass-list {
     display: flex;
     flex-direction: column;

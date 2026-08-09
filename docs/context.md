@@ -158,6 +158,7 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
 | Env | Default | Meaning |
 |-----|---------|---------|
 | `PROMPTSTUDIO_PORT` | `5000` | HTTP port |
+| `PROMPTSTUDIO_HOST` | `127.0.0.1` | Bind address. **Blank also means loopback.** No auth + CORS `*`, so any other value exposes the archive and `DELETE /api/photo` to the network |
 | `PROMPTSTUDIO_ARCHIVE` | `~/Pictures/InstagramSaved` | Archive root |
 | `PROMPTSTUDIO_REBUILD_INDEX` | off | Force SQLite reindex on start |
 | `OLLAMA_VISION_MODEL` | `qwen2.5vl:7b` | Vision model (**not** moondream) |
@@ -292,6 +293,9 @@ section drifted four rules behind.
 | [review_backend_architecture.md](review_backend_architecture.md) | Backend decisions + measurements |
 | [roadmap.md](roadmap.md) | Phase history / future |
 | [product_review.md](product_review.md) | Product themes A/B/C/E, accepted backlog + sequence |
+| [review_ui_product.md](review_ui_product.md) | UI/UX gaps (U1–U11), the loopback-bind correction, Stage-1 fix log |
+| [backlog_features.md](backlog_features.md) | F1–F8 in detail — captions, archive-wide classify, duplicates UI, activity view |
+| [backlog_engineering.md](backlog_engineering.md) | E1–E5 — pollers, `app.js` ownership, runtime reject-cut, verification gaps |
 | [design_generation_loop.md](design_generation_loop.md) | Theme A spec — generations table, rating, outputs gallery, batch, workflow registry |
 | [scripts/README.md](../scripts/README.md) · [tests/ui/README.md](../tests/ui/README.md) | CLI examples · browser suites |
 | `archive/` | **Do not load.** Shipped/superseded designs, kept for history |

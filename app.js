@@ -43,6 +43,10 @@ const state = {
     verdictFilter: 'reject',
     tierLabels: null,
     healthPollTimer: null,
+    // Poller keys stopped because the tab went to the background, so only
+    // those get restarted — resuming a poller that had already finished
+    // would revive a chip for a job that is long done.
+    pausedPollers: [],
     photoOffset: 0,
     photoLimit: 60,
     photoTotal: 0,
@@ -420,6 +424,68 @@ document.addEventListener('DOMContentLoaded', () => {
     wireLightboxVideoEvents();
 });
 
+function ensureHealthPolling() {
+    if (state.healthPollTimer) return;
+    state.healthPollTimer = setInterval(fetchHealth, 30000);
+}
+
+/* ── Poller visibility ─────────────────────────────────────────────
+   Six independent intervals (health 30s, comfy 2.5s, scrape 2.5s,
+   sync 2.5s, batch 4s, classify 3s) used to run forever in a
+   backgrounded tab. Nothing they watch can change in a way the user
+   sees while the tab is hidden, and the jobs live server-side, so
+   the state is still correct on return.
+
+   Every poller is self-arming: the polled function re-creates its own
+   interval while there is work to watch and clears it when there is
+   not. So pausing only has to *stop* them, and resuming is one
+   immediate call each — the poller decides for itself whether to keep
+   going. That also means resume doubles as a refresh, which is what
+   you want the instant a tab comes back. */
+const PAUSABLE_POLLERS = [
+    // Health is the one poller whose "ensure" does not itself hit the network,
+    // so resume fetches explicitly. Coming back to a 30s-stale Ollama badge
+    // would defeat the point of resuming at all.
+    { key: 'healthPollTimer', resume: () => { fetchHealth(); ensureHealthPolling(); } },
+    { key: 'comfyPollTimer', resume: () => pollComfyStatus() },
+    { key: 'scrapePollTimer', resume: () => ensureScrapePolling() },
+    { key: 'syncPollTimer', resume: () => pollSyncStatus() },
+    { key: 'batchPollTimer', resume: () => pollBatchStatus() },
+    { key: 'classifyPollTimer', resume: () => pollClassifyStatus() },
+];
+
+function pausePollers() {
+    state.pausedPollers = [];
+    PAUSABLE_POLLERS.forEach(({ key }) => {
+        if (!state[key]) return;
+        clearInterval(state[key]);
+        state[key] = null;
+        state.pausedPollers.push(key);
+    });
+}
+
+function resumePollers() {
+    const paused = state.pausedPollers || [];
+    state.pausedPollers = [];
+    PAUSABLE_POLLERS
+        .filter(({ key }) => paused.includes(key))
+        .forEach(({ resume }) => {
+            try {
+                resume();
+            } catch (err) {
+                console.error('poller resume failed', err);
+            }
+        });
+}
+
+function handleVisibilityChange() {
+    if (document.hidden) {
+        pausePollers();
+    } else {
+        resumePollers();
+    }
+}
+
 async function initApp() {
     await fetchHealth();
     await fetchStats();
@@ -431,9 +497,7 @@ async function initApp() {
     pollClassifyStatus();
     // Restore scrape/sync chip after refresh (queue lives on the server)
     await hydrateScrapeUiFromServer();
-    if (!state.healthPollTimer) {
-        state.healthPollTimer = setInterval(fetchHealth, 30000);
-    }
+    ensureHealthPolling();
 }
 
 async function fetchHealth() {
@@ -626,6 +690,126 @@ function _fmtDist(dist) {
         .join(' ');
 }
 
+// Above this share of classified media on one tier, the classifier is barely
+// discriminating whatever the prompt claims. The previous one shipped at 0.85
+// and nothing was reading the distribution — see docs/design_media_classifier.md
+// §5. Matches the B4 platform rule in docs/product_review.md.
+const TOP_TIER_SHARE_WARN = 0.6;
+
+/** Reject threshold, defaulting to the server's own default if absent. */
+function classifyRejectCut(c) {
+    const cut = Number(c.reject_max_tier);
+    return Number.isFinite(cut) ? cut : 1;
+}
+
+/** One tier: chip, label, proportional bar, count and share. */
+function classifyTierRow({ tier, count, total, label, isReject }) {
+    const pct = total > 0 ? (count / total) * 100 : 0;
+    const tag = isReject ? '<span class="insights-tier-tag">reject</span>' : '';
+    return `
+        <div class="insights-tier-row">
+            <span class="tier-chip t${tier}">T${tier}</span>
+            <span class="insights-tier-name">
+                <span class="insights-tier-text" title="${escapeHtml(label)}">${escapeHtml(label)}</span>${tag}
+            </span>
+            <span class="insights-tier-bar">
+                <span class="insights-tier-fill t${tier}" style="width:${pct.toFixed(1)}%;"></span>
+            </span>
+            <span class="insights-tier-n">${count.toLocaleString()}<em>${pct.toFixed(0)}%</em></span>
+        </div>`;
+}
+
+/** Tier -1 is "the vision call failed", not a measurement — never a bar. */
+function classifyErrorRow(errors, errorRate) {
+    if (!errors) return '';
+    return `
+        <div class="insights-tier-row is-error">
+            <span class="tier-chip terr">!</span>
+            <span class="insights-tier-name">
+                <span class="insights-tier-text">Failed to classify</span>
+            </span>
+            <span class="insights-tier-bar"></span>
+            <span class="insights-tier-n">${errors.toLocaleString()}<em>${_fmtRate(errorRate)}</em></span>
+        </div>`;
+}
+
+function classifyTierRows(c, classified) {
+    const dist = c.distribution || {};
+    const labels = c.labels || {};
+    const cut = classifyRejectCut(c);
+    return Object.keys(dist)
+        .map(Number)
+        .filter(tier => Number.isFinite(tier) && tier >= 0)
+        .sort((a, b) => a - b)
+        .map(tier => classifyTierRow({
+            tier,
+            count: Number(dist[String(tier)] || 0),
+            total: classified,
+            label: String(labels[String(tier)] || `Tier ${tier}`),
+            isReject: tier <= cut,
+        }))
+        .join('');
+}
+
+function classifyMetrics(c, { classified, errors, cut, saturated }) {
+    const rejectHelp = 'Share judged reject at the current cut. Only the tier is '
+        + 'stored, so changing CLASSIFY_REJECT_MAX_TIER re-thresholds instantly.';
+    const shareHelp = 'Share of classified media on the single most common tier. '
+        + `Above ${TOP_TIER_SHARE_WARN} the filter is barely discriminating.`;
+    return `
+        <div class="insights-metrics">
+            <div class="insights-metric">
+                <span class="insights-metric-value">${classified.toLocaleString()}</span>
+                <span class="insights-metric-label">Classified</span>
+                <span class="insights-metric-sub">${errors.toLocaleString()} failed</span>
+            </div>
+            <div class="insights-metric" title="${rejectHelp}">
+                <span class="insights-metric-value">${_fmtRate(c.reject_rate)}</span>
+                <span class="insights-metric-label">Reject rate</span>
+                <span class="insights-metric-sub">cut: tier ≤ ${cut}</span>
+            </div>
+            <div class="insights-metric${saturated ? ' is-warn' : ''}" title="${shareHelp}">
+                <span class="insights-metric-value">${_fmtRate(c.top_tier_share)}</span>
+                <span class="insights-metric-label">Top tier share</span>
+                <span class="insights-metric-sub">${saturated ? 'saturated' : `under ${TOP_TIER_SHARE_WARN}`}</span>
+            </div>
+        </div>`;
+}
+
+function classifySaturationWarning(topShare) {
+    return `
+        <div class="insights-warn" role="status">
+            <i class="fa-solid fa-triangle-exclamation"></i>
+            ${_fmtRate(topShare)} of classified media is on one tier. A filter this flat
+            is close to a no-op — treat the verdicts as unreliable until the
+            distribution spreads.
+        </div>`;
+}
+
+/** Tier distribution as labelled bars — the guard metric, made legible. */
+function renderClassifyInsights(c) {
+    const data = c || {};
+    if (data.error) {
+        return `<span class="insights-muted">Unavailable: ${escapeHtml(String(data.error))}</span>`;
+    }
+    const classified = Number(data.classified || 0);
+    if (!classified) {
+        return '<span class="insights-muted">Nothing classified yet — '
+            + 'pick a creator and run <b>Classify</b>.</span>';
+    }
+    const errors = Number(data.errors || 0);
+    const cut = classifyRejectCut(data);
+    const topShare = Number(data.top_tier_share || 0);
+    const saturated = topShare > TOP_TIER_SHARE_WARN;
+
+    return classifyMetrics(data, { classified, errors, cut, saturated })
+        + (saturated ? classifySaturationWarning(topShare) : '')
+        + '<div class="insights-sublabel">Tier distribution'
+        + ` <span class="insights-hint">— reject cut at tier ≤ ${cut}</span></div>`
+        + `<div class="insights-tiers">${classifyTierRows(data, classified)}`
+        + `${classifyErrorRow(errors, data.error_rate)}</div>`;
+}
+
 function renderInsights(data) {
     if (!elements.insightsBody) return;
     const p = data.prompts || {};
@@ -678,6 +862,11 @@ function renderInsights(data) {
                         <span class="insights-metric-sub">keep rate: ${_fmtRate(gen.keep_rate)} (needs rating)</span>
                     </div>
                 </div>
+            </section>
+
+            <section class="insights-section">
+                <h4><i class="fa-solid fa-wand-sparkles"></i> Keep / reject classifier</h4>
+                ${renderClassifyInsights(data.classify)}
             </section>
         </div>
     `;
@@ -3167,6 +3356,9 @@ function copyToClipboard(text, message) {
 
 // Event Listeners
 function setupEventListeners() {
+    // Stop polling a tab nobody is looking at; refresh the moment it returns.
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
     // Search hits the DB across prompt text — one request per keystroke was
     // both wasteful and racy. Debounce, then let AbortController settle order.
     const runSearch = debounce(() => fetchPhotos(), SEARCH_DEBOUNCE_MS);

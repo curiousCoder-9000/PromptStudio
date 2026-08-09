@@ -1746,6 +1746,16 @@ def run_server(port: int = PORT, host: str = HOST):
     os.chdir(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     _archive.ensure_ready()
     with ThreadingHTTPServer((host, port), GalleryRequestHandler) as httpd:
-        log.info("PromptStudio running at http://localhost:%s (threaded)", port)
+        # Log the address actually bound, not a hardcoded "localhost" — the old
+        # line said localhost while binding every interface, which hid the
+        # exposure rather than reporting it.
+        shown = "localhost" if host in ("127.0.0.1", "::1") else host
+        log.info("PromptStudio running at http://%s:%s (threaded)", shown, port)
+        if host not in ("127.0.0.1", "::1"):
+            log.warning(
+                "Bound to %s — no auth and CORS is '*', so every host that can "
+                "reach this port can read and delete the archive.",
+                host,
+            )
         log.info("Archive: %s", SAVED_DIR)
         httpd.serve_forever()
