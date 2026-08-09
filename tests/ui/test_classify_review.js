@@ -230,6 +230,75 @@ const { Session, Report, sleep } = require('./cdp');
   r.check('badges stay in the normal gallery but go quiet',
     quietPills.n > 0 && quietPills.quiet === quietPills.n, JSON.stringify(quietPills));
 
+  // ── an archive-wide run finishing ──────────────────────────────────
+  //
+  // creator === "" is a scope, not an absent value. The completion path used to
+  // fall back to the literal string 'creator', so an overnight Classify All
+  // ended on "Classify done @creator" and its Review button navigated to a
+  // folder of that name: always empty, and it threw away the real selection.
+  // Only reachable through the poller, so it has to be driven from a browser.
+  r.section('archive-wide classify finishing');
+
+  await s.eval(`
+    ${JSON.stringify(creator)} && (state.selectedCreator = ${JSON.stringify(creator)});
+    state.classifyStatus = { running: true, creator: '', completed: 4, total: 4 };
+    window.__realFetch = window.fetch;
+    window.fetch = (url, opts) => {
+      if (String(url).includes('/api/classify/status')) {
+        return Promise.resolve(new Response(JSON.stringify({
+          running: false, creator: '', current_creator: '',
+          completed: 4, total: 4, kept: 1, rejected: 3, failed: 0,
+          cancelled: false, cancel_requested: false
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+      }
+      return window.__realFetch(url, opts);
+    };
+    return true;
+  `);
+  await s.eval(`pollClassifyStatus(); return true;`);
+  await sleep(1200);
+
+  const doneToast = await s.eval(`
+    const t = document.querySelector('.toast');
+    return {
+      title: t ? (t.querySelector('.toast-title') || t).textContent.trim() : '(none)',
+      action: t && t.querySelector('.toast-action-btn')
+        ? t.querySelector('.toast-action-btn').textContent.trim() : '(none)'
+    };
+  `);
+  r.check('toast names the scope, not a placeholder creator',
+    doneToast.title.includes('all creators') && !doneToast.title.includes('@creator'),
+    doneToast.title);
+  r.check('review is offered for the whole pile', doneToast.action === 'Review 3 rejects',
+    doneToast.action);
+
+  await s.eval(`document.querySelector('.toast-action-btn').click(); return true;`);
+  await sleep(1000);
+
+  const landed = await s.eval(`
+    const urls = window.__calls || [];
+    return {
+      reviewMode: state.reviewMode,
+      selectedCreator: state.selectedCreator,
+      title: document.getElementById('reviewBarTitle').textContent.trim(),
+      lastPhotos: urls.filter((u) => u.includes('/api/photos')).pop() || ''
+    };
+  `);
+  r.check('review opens archive-wide', landed.reviewMode === true
+    && !landed.selectedCreator, JSON.stringify(landed));
+  r.check('and says so', landed.title === 'Reviewing all creators', landed.title);
+
+  const scoped = await s.eval(`
+    const u = performance.getEntriesByType('resource').map((e) => e.name)
+      .filter((n) => n.includes('/api/photos')).pop() || '';
+    return u.split('?')[1] || '';
+  `);
+  r.check('and never invents a creator=creator filter',
+    !scoped.includes('creator=creator'), scoped);
+
+  await s.eval(`window.fetch = window.__realFetch; exitReviewMode(); return true;`);
+  await sleep(500);
+
   // Review mode must never survive a reload — landing in a delete-oriented
   // mode from a refresh is the hostility docs/context.md calls out.
   await s.load();

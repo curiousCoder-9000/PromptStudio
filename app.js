@@ -53,6 +53,9 @@ const state = {
     sourceFilter: '',
     // [{name, label}] from /api/sources; null until the first fetch lands.
     knownSources: null,
+    // Archive-wide unclassified count from /api/stats. Deliberately separate
+    // from the sidebar's per-creator counters, which the source filter narrows.
+    archiveUnclassified: 0,
     tierLabels: null,
     healthPollTimer: null,
     // Poller keys stopped because the tab went to the background, so only
@@ -694,7 +697,11 @@ async function fetchStats() {
             state.trashEnabled = data.trash_enabled;
         }
         state.trashCount = data.trash_count ?? 0;
+        // Archive-wide, never narrowed by the source filter — the navbar
+        // Classify All button needs the number its job actually covers.
+        state.archiveUnclassified = Number(data.unclassified_total) || 0;
         updateTrashButtonUi();
+        updateClassifyAllButton();
     } catch (err) {
         console.error('Error fetching stats:', err);
     }
@@ -1459,7 +1466,7 @@ function renderSourcePills() {
     const row = elements.sourcePillRow;
     if (!row) return;
     const registry = state.knownSources || [];
-    if (!registry.length) {
+    if (!registry.length && !state.sourceFilter) {
         row.innerHTML = '';
         return;
     }
@@ -1484,6 +1491,17 @@ function renderSourcePills() {
             pills.push({ name: s.name, label: s.label || s.name, count });
         }
     });
+    // A filter with no matching pill would be inescapable: an active filter, an
+    // empty sidebar, and no control to clear it. Reachable whenever the
+    // registry is unavailable (/api/sources failed) while a filter is
+    // persisted in localStorage from a previous session.
+    if (state.sourceFilter && !pills.some((p) => p.name === state.sourceFilter)) {
+        pills.push({
+            name: state.sourceFilter,
+            label: laneLabel(state.sourceFilter),
+            count: totals.get(state.sourceFilter) || 0,
+        });
+    }
 
     // A single source is not a choice — don't spend sidebar height on it.
     if (pills.length <= 2 && !state.sourceFilter) {
@@ -1720,7 +1738,17 @@ const VERDICT_COUNT_FIELDS = [
  * source of truth for the same numbers.
  */
 /** Unclassified items across every creator — drives the navbar action. */
-function scopedArchiveTodo() {
+/**
+ * Unclassified media across the whole archive.
+ *
+ * From /api/stats, not from state.creators: /api/creators is narrowed by the
+ * active source filter, and Classify All is not. Summing the sidebar made the
+ * button report a platform's backlog as the archive's, and disable itself
+ * saying "every creator is already classified" while another platform's was
+ * still pending. Falls back to the sidebar sum only before stats land.
+ */
+function archiveUnclassifiedTotal() {
+    if (state.archiveUnclassified) return state.archiveUnclassified;
     return state.creators.reduce(
         (sum, c) => sum + (Number(c.unclassified_count) || 0), 0
     );
@@ -5682,7 +5710,7 @@ function updateClassifyAllButton() {
     if (!btn) return;
     const st = state.classifyStatus;
     const running = !!(st && st.running);
-    const todo = scopedArchiveTodo();
+    const todo = archiveUnclassifiedTotal();
 
     let why = '';
     if (running) {
@@ -5767,31 +5795,65 @@ async function pollClassifyStatus() {
         renderJobChip('classify', { active: false });
         // Only announce on an observed running -> stopped transition.
         if (!wasRunning) return;
-
-        const who = data.creator || 'creator';
-        const rejected = Number(data.rejected) || 0;
-        // Refresh counters first so the toast action opens a truthful pile.
-        await fetchCreators();
-        updateClassifyPanelUi();
-
-        if (data.cancelled) {
-            showToast(`Classify cancelled @${who} — ${data.completed}/${data.total} done · keep ${data.kept || 0} · reject ${rejected}`);
-        } else if (rejected > 0) {
-            // Deliberately does NOT auto-enter review: dropping the user into a
-            // delete-oriented mode unasked is hostile. Offer it instead.
-            showToast({
-                title: `Classify done @${who}`,
-                body: `keep ${data.kept || 0} · reject ${rejected}` + (data.failed ? ` · err ${data.failed}` : ''),
-                actionLabel: `Review ${rejected} reject${rejected === 1 ? '' : 's'}`,
-                onAction: () => enterReviewMode(who)
-            }, 9000);
-        } else {
-            showToast(`Classify done @${who} — keep ${data.kept || 0}, nothing to clean up`);
-        }
-        if (state.selectedCreator === who) await fetchPhotos();
+        await announceClassifyFinished(data);
     } catch (err) {
         console.error('Classify status error:', err);
     }
+}
+
+/**
+ * Toast + refresh after an observed running -> stopped transition.
+ *
+ * creator === "" is an archive-wide run, exactly as it is on the running path.
+ * This used to fall back to the literal string 'creator', so an overnight
+ * Classify All ended on "Classify done @creator" whose Review button navigated
+ * to a folder of that name — always empty, and it discarded the real selection.
+ */
+async function announceClassifyFinished(data) {
+    const archiveWide = !data.creator;
+    const scope = archiveWide ? 'all creators' : `@${data.creator}`;
+    const rejected = Number(data.rejected) || 0;
+    // Counters first, so the toast action opens a truthful pile.
+    await fetchCreators();
+    await fetchStats();
+    updateClassifyPanelUi();
+
+    if (data.cancelled) {
+        showToast(`Classify cancelled — ${scope} — ${data.completed}/${data.total} done · keep ${data.kept || 0} · reject ${rejected}`);
+    } else if (rejected > 0) {
+        // Deliberately does NOT auto-enter review: dropping the user into a
+        // delete-oriented mode unasked is hostile. Offer it instead.
+        showToast({
+            title: `Classify done — ${scope}`,
+            body: `keep ${data.kept || 0} · reject ${rejected}` + (data.failed ? ` · err ${data.failed}` : ''),
+            actionLabel: `Review ${rejected} reject${rejected === 1 ? '' : 's'}`,
+            onAction: () => reviewAfterClassify(archiveWide ? '' : data.creator)
+        }, 9000);
+    } else {
+        showToast(`Classify done — ${scope} — keep ${data.kept || 0}, nothing to clean up`);
+    }
+    // An archive-wide run can have re-scored anything on screen; a per-creator
+    // run matters when that creator is showing, or when nothing is filtered.
+    if (archiveWide || !state.selectedCreator || state.selectedCreator === data.creator) {
+        await fetchPhotos();
+    }
+}
+
+/**
+ * Open the reject pile at the scope the run actually covered.
+ *
+ * An archive-wide run has to drop the creator selection first: the count on the
+ * toast is archive-wide, so entering review with a creator still selected would
+ * silently show a subset of the number the user just clicked.
+ */
+function reviewAfterClassify(creator) {
+    if (!creator && state.selectedCreator) {
+        state.selectedCreator = null;
+        hideCreatorStylePanel();
+        if (elements.galleryTitle) elements.galleryTitle.textContent = 'All Photos';
+        renderCreatorList();
+    }
+    enterReviewMode(creator);
 }
 
 async function startCreatorClassify({
@@ -6127,7 +6189,7 @@ function handleTriageKey(e) {
 function setupClassifyListeners() {
     if (elements.classifyAllBtn) {
         elements.classifyAllBtn.addEventListener('click', () => {
-            const todo = scopedArchiveTodo();
+            const todo = archiveUnclassifiedTotal();
             if (todo === 0) {
                 showToast('Every creator is already classified');
                 return;

@@ -1731,7 +1731,28 @@ class ArchiveIndex:
             "total_videos": videos,
             "total_creators": int(row["creators"] or 0),
             "prompts_ready": int(row["prompts_ready"] or 0),
+            "unclassified_total": self.unclassified_total(),
         }
+
+    def unclassified_total(self) -> int:
+        """Archive-wide count of media with no verdict row.
+
+        The sidebar's per-creator `unclassified_count` is scoped to the active
+        source filter, which is right for the sidebar and wrong for the navbar
+        Classify All button: that job is archive-wide whatever is filtered, and
+        reading the filtered sum made it claim "every creator is already
+        classified" while another platform's backlog sat untouched.
+
+        Anti-join on media_verdicts' primary key, so it is index probes rather
+        than a second scan.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM photos p "
+                "LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path "
+                "WHERE v.rel_path IS NULL"
+            ).fetchone()
+        return int(row["n"] or 0)
 
     def query_photos(
         self,

@@ -96,3 +96,54 @@ def test_survives_a_full_reindex(store, make_photo):
 
     ArchiveIndex.get().rebuild()
     assert store.stats()["prompts_ready"] == 1, "rebuild must re-derive has_prompt"
+
+
+# ── archive-wide unclassified count ──────────────────────────────────
+#
+# The navbar "Classify All" button reads this. It used to sum the sidebar's
+# per-creator counters instead, which /api/creators narrows to the active
+# source filter — so with a source picked the button reported that platform's
+# backlog as the archive's and disabled itself saying everything was already
+# classified. This number must never be scoped to anything.
+
+
+def test_unclassified_total_counts_media_with_no_verdict(store, make_photo):
+    index = ArchiveIndex.get()
+    rel_a, _ = make_photo(creator="alice", name="a1.jpg")
+    make_photo(creator="alice", name="a2.jpg")
+    make_photo(creator="bob", name="b1.jpg")
+
+    assert store.stats()["unclassified_total"] == 3
+    index.set_verdict(rel_a, creator="alice", tier=3)
+    assert store.stats()["unclassified_total"] == 2
+
+
+def test_unclassified_total_ignores_the_source_filter(store, make_photo):
+    """The one property the sidebar counters cannot provide."""
+    index = ArchiveIndex.get()
+    rel_ig, _ = make_photo(creator="mixed", name="ig.jpg")
+    rel_x, _ = make_photo(creator="mixed", name="x.jpg")
+    index.upsert_photo(rel_ig, source="instagram")
+    index.upsert_photo(rel_x, source="x")
+    index.set_verdict(rel_x, creator="mixed", tier=3)
+
+    # Filtered to X the sidebar sees nothing left to do; the archive disagrees.
+    scoped = index.creator_verdict_counts(source="x")["mixed"]
+    assert scoped["unclassified_count"] == 0
+    assert store.stats()["unclassified_total"] == 1
+
+
+def test_unclassified_total_is_zero_on_an_empty_archive(store):
+    assert store.stats()["unclassified_total"] == 0
+
+
+def test_an_errored_verdict_still_counts_as_classified(store, make_photo):
+    """`unclassified` means "no row", matching the sidebar's own definition.
+
+    A failed attempt leaves tier -1, which the review UI surfaces separately as
+    an error. Counting it here would make the button offer work that the job's
+    default (retry_errors) already picks up under a different name.
+    """
+    rel, _ = make_photo(name="boom.jpg")
+    ArchiveIndex.get().set_verdict(rel, creator="test_creator", tier=-1, error="timeout")
+    assert store.stats()["unclassified_total"] == 0

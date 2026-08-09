@@ -141,6 +141,29 @@ Stage 2+.
 | **F2 / U5** archive-wide classify | ✅ | `creator=""` means the whole archive in `list_unclassified`, `list_pending`, `start()` and `POST /api/classify/start`. New navbar **Classify All (N)** beside Batch Analyze, with a confirm (it holds the vision model) and a live count. The chip reports `all creators · @current`. 12 new tests plus one existing test updated — `""` used to be `bad_creator`. |
 | **U2** gallery render cost | ✅ | `content-visibility: auto` + `contain-intrinsic-size` on `.photo-card`, and the infinite-scroll probe replaced with an `IntersectionObserver` on the existing sentinel (the old handler read `document.body.offsetHeight` every animation frame of every scroll). |
 
+## 7. Fix log — bugs found reviewing Stage 2
+
+Found by driving the UI in a browser rather than reading it. Both shipped in
+`2697495`, where the archive-wide classify and the source filter landed in the same
+commit from two sessions and neither was reconciled against the other.
+
+| Bug | Status | What changed |
+|-----|--------|--------------|
+| Archive-wide classify finished at `@creator` | ✅ | `pollClassifyStatus` fell back to the literal string `'creator'` when `data.creator` was `""` — the archive-wide scope the *running* path already handles. So an overnight Classify All ended on a toast reading **"Classify done @creator"** whose Review button navigated to a folder of that name: `?creator=creator&verdict=reject`, always empty, and it discarded the real selection on the way. Completion split into `announceClassifyFinished()` + `reviewAfterClassify()`, which drops the creator selection so review covers the scope the toast counted. Also refetches the gallery after an archive-wide run — verdict badges on screen were left stale. |
+| **Classify All** lied under a source filter | ✅ | The count came from `state.creators`, which `/api/creators?source=` narrows; the job it starts is archive-wide regardless. Filter to a platform whose backlog happens to be clear and the button **disabled itself** saying "every creator is already classified" while another platform's sat untouched. New `ArchiveIndex.unclassified_total()` on `/api/stats` — never scoped to anything — replaces the sidebar sum. |
+
+Regression tests: 4 checks in `tests/ui/test_classify_review.js`, 3 in
+`tests/ui/test_source_filter.js`, 4 in `tests/test_stats.py`. All seven browser checks were
+confirmed to fail against pre-fix `HEAD` in a throwaway worktree before being kept.
+
+**Harness bug found the same way** — `tests/ui/run.sh` hardcoded ports 5099/9222 and its
+readiness probe only asked "is anything answering?". With a leftover run or a second agent
+holding those ports (routine in this repo), our server and Chrome failed to bind and every
+suite silently drove *the stranger's* browser against *the stranger's* archive: 20 bogus
+failures across 4 suites, and it can produce a false pass just as easily. Ports are now
+auto-picked from what is free, an explicitly pinned port that is taken is a hard error, and
+`wait_for` takes the child PID so a dead server fails fast instead of adopting a squatter.
+
 ### U2 measurement
 
 Required by AGENTS.md rule 13. A/B'd in one browser session at **780 cards** by

@@ -62,11 +62,18 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 ### `GET /api/stats`
 
 ```json
-{ "total_photos": 1134, "total_creators": 147, "prompts_ready": 420,
+{ "total_photos": 1134, "total_videos": 82, "total_creators": 147,
+  "prompts_ready": 420, "unclassified_total": 311,
   "trash_enabled": true, "trash_count": 3 }
 ```
 
-All three counters are single indexed SQL aggregates. `prompts_ready` reads the
+`unclassified_total` is media with no `media_verdicts` row, **archive-wide and never
+scoped** — it is what the navbar Classify All button counts, and that job ignores the
+source filter. Reading the sidebar's per-creator `unclassified_count` instead (which
+`/api/creators?source=` does narrow) made the button disable itself claiming everything
+was classified while another platform's backlog was untouched.
+
+All the counters are single indexed SQL aggregates. `prompts_ready` reads the
 `has_prompt` column (maintained write-through by `PromptCache`) rather than
 walking the archive and loading the prompt cache, which is what it used to do on
 every call — and `/api/stats` runs on every app init.

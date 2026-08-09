@@ -193,6 +193,36 @@ const clickPill = (source) => `
   );
 
   // ── error handling ─────────────────────────────────────────────────
+  r.section('an active filter is always escapable, even with no registry');
+  const stranded = await s.eval(`
+    // What a failed /api/sources leaves behind, with a filter restored from a
+    // previous session: without a fallback pill the user has an active filter,
+    // an empty sidebar, and no control to clear it.
+    state.sourceFilter = 'x'; saveViewPrefs();
+    state.knownSources = [];
+    await fetchCreators();
+    await new Promise(r => setTimeout(r, 400));
+    const pills = [...document.querySelectorAll('.source-pill')];
+    return { filter: state.sourceFilter, sources: pills.map(p => p.dataset.source) };
+  `);
+  console.log('   ', JSON.stringify(stranded));
+  r.check('an "All" pill is still offered', stranded.sources.includes(''),
+    stranded.sources.join(','));
+  r.check('the active filter still has a pill', stranded.sources.includes('x'),
+    stranded.sources.join(','));
+
+  const escaped = await s.eval(`
+    document.querySelector('.source-pill[data-source=""]').click();
+    await new Promise(r => setTimeout(r, 700));
+    return { filter: state.sourceFilter, creators: state.creators.length };
+  `);
+  r.check('clicking All clears the stranded filter', escaped.filter === '',
+    escaped.filter);
+  r.check('and the sidebar comes back', escaped.creators === 3,
+    String(escaped.creators));
+
+  await s.eval('return fetchKnownSources();');
+
   r.section('a stale pref naming an unregistered source self-heals');
   const healed = await s.eval(`
     state.sourceFilter = 'myspace';
@@ -206,8 +236,46 @@ const clickPill = (source) => `
     healed.filter === '', healed.filter);
   r.check('creators reloaded', healed.creators === 3, String(healed.creators));
 
+  // ── cross-effect on an archive-wide action ─────────────────────────
+  //
+  // "Classify All" starts an archive-wide job whatever is filtered, but it used
+  // to count from state.creators, which /api/creators has already narrowed. Pick
+  // a platform whose backlog happens to be clear and the button disabled itself
+  // saying "every creator is already classified" while another platform's was
+  // untouched — a false statement blocking a valid action. The count has to come
+  // from /api/stats, which is never scoped.
+  r.section('Classify All stays archive-wide under a source filter');
+
+  const unfiltered = await s.eval(`
+    state.sourceFilter = '';
+    state.ollamaOnline = true;
+    state.classifyStatus = { running: false };
+    await fetchStats();
+    await fetchCreators();
+    const b = document.getElementById('classifyAllBtn');
+    return { total: state.archiveUnclassified, label: b.textContent.trim(), disabled: b.disabled };
+  `);
+  r.check('button counts the whole archive', unfiltered.total > 0
+    && unfiltered.label.includes(String(unfiltered.total)), JSON.stringify(unfiltered));
+
+  const filtered = await s.eval(`
+    setSourceFilter('x');
+    await new Promise(r => setTimeout(r, 600));
+    const sidebarSum = state.creators.reduce(
+      (n, c) => n + (Number(c.unclassified_count) || 0), 0);
+    const b = document.getElementById('classifyAllBtn');
+    return { sidebarSum, total: state.archiveUnclassified,
+             label: b.textContent.trim(), disabled: b.disabled, title: b.title };
+  `);
+  r.check('the sidebar sum really is narrower (else this proves nothing)',
+    filtered.sidebarSum < unfiltered.total, JSON.stringify(filtered));
+  r.check('but the button still reports the archive total',
+    filtered.total === unfiltered.total && filtered.label.includes(String(unfiltered.total)),
+    JSON.stringify(filtered));
+  r.check('and stays enabled', filtered.disabled === false, filtered.title);
+
   // Reset so the next suite starts unfiltered.
-  await s.eval(`state.sourceFilter = ''; saveViewPrefs(); return true;`);
+  await s.eval(`setSourceFilter(''); state.sourceFilter = ''; saveViewPrefs(); return true;`);
 
   r.finish(s) || process.exit(1);
   process.exit(0);

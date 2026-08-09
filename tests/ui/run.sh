@@ -1,21 +1,72 @@
 #!/usr/bin/env bash
 # Run the browser UI suites against a throwaway archive.
 #
-# Boots a PromptStudio server on TEST_PORT, launches headless Chrome with a CDP
-# endpoint, runs each suite, then tears everything down. Requires Node 22+
-# (built-in WebSocket) and a Chrome/Chromium binary. No npm install needed.
+# Boots a PromptStudio server, launches headless Chrome with a CDP endpoint,
+# runs each suite, then tears everything down. Requires Node 22+ (built-in
+# WebSocket) and a Chrome/Chromium binary. No npm install needed.
 #
-#   tests/ui/run.sh                  # both suites
+# Ports are auto-picked from what is free, so two runs can go at once.
+#
+#   tests/ui/run.sh                  # every suite
 #   tests/ui/run.sh test_escaping.js # one suite
+#   TEST_PORT=5099 tests/ui/run.sh   # pin a port (fails if it is taken)
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TEST_PORT="${TEST_PORT:-5099}"
-CDP_PORT="${CDP_PORT:-9222}"
 PHOTO_COUNT="${PHOTO_COUNT:-12}"
 
 PYTHON="${PYTHON:-$REPO_ROOT/.venv/bin/python}"
 [ -x "$PYTHON" ] || PYTHON="$(command -v python3)"
+
+# Ports must be OURS, not just answering.
+#
+# These used to be hardcoded to 5099/9222. When anything already held them --
+# a leftover from a killed run, or a second agent running this same script,
+# which happens routinely in this repo -- our server and Chrome failed to bind,
+# wait_for's curl was satisfied by the *stranger's* processes, and every suite
+# then drove someone else's browser against someone else's archive. That
+# reported 20 failures across 4 suites that had nothing wrong with them, and it
+# can just as easily report a false pass.
+#
+# So: an unset port is auto-picked from what is actually free, and an explicitly
+# requested one that is taken is a hard error rather than a silent adoption.
+free_port() {
+  "$PYTHON" - "$1" <<'PY'
+import socket, sys
+start = int(sys.argv[1])
+for port in range(start, start + 400):
+    with socket.socket() as sock:
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            continue
+        print(port)
+        break
+else:
+    sys.exit(f"no free port in {start}..{start + 400}")
+PY
+}
+
+require_free_port() {
+  "$PYTHON" - "$1" "$2" <<'PY'
+import socket, sys
+port, name = int(sys.argv[1]), sys.argv[2]
+with socket.socket() as sock:
+    try:
+        sock.bind(("127.0.0.1", port))
+    except OSError:
+        sys.exit(
+            f"FATAL: {name}={port} is already in use.\n"
+            "  Something else is listening there -- probably a leftover run or a\n"
+            "  concurrent session. Free it, or unset the variable to auto-pick."
+        )
+PY
+}
+
+if [ -n "${TEST_PORT:-}" ]; then require_free_port "$TEST_PORT" TEST_PORT || exit 1
+else TEST_PORT="$(free_port 5099)" || exit 1; fi
+if [ -n "${CDP_PORT:-}" ]; then require_free_port "$CDP_PORT" CDP_PORT || exit 1
+else CDP_PORT="$(free_port 9222)" || exit 1; fi
 
 find_chrome() {
   if [ -n "${CHROME_BIN:-}" ]; then echo "$CHROME_BIN"; return; fi
@@ -73,17 +124,27 @@ echo "starting headless Chrome (CDP :$CDP_PORT)"
   --disable-gpu --no-sandbox about:blank > "$WORKDIR/chrome.log" 2>&1 &
 CHROME_PID=$!
 
+# Takes the PID so a dead child fails fast and loudly. The port pre-check above
+# cannot close the gap between releasing the probe socket and the real bind, so
+# if something wins that race our process exits on EADDRINUSE -- and a curl that
+# only asks "is anything answering?" would happily adopt the squatter.
 wait_for() {
-  local url="$1" name="$2"
+  local url="$1" name="$2" pid="$3"
   for _ in $(seq 1 80); do
     curl -sf "$url" > /dev/null 2>&1 && return 0
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "FATAL: $name exited before it was ready (port taken?)" >&2
+      return 1
+    fi
     sleep 0.25
   done
   echo "FATAL: $name never became ready" >&2
   return 1
 }
-wait_for "http://localhost:$TEST_PORT/api/stats" "server" || { tail -20 "$WORKDIR/server.log" >&2; exit 1; }
-wait_for "http://127.0.0.1:$CDP_PORT/json/version" "chrome" || { tail -20 "$WORKDIR/chrome.log" >&2; exit 1; }
+wait_for "http://localhost:$TEST_PORT/api/stats" "server" "$SERVER_PID" \
+  || { tail -20 "$WORKDIR/server.log" >&2; exit 1; }
+wait_for "http://127.0.0.1:$CDP_PORT/json/version" "chrome" "$CHROME_PID" \
+  || { tail -20 "$WORKDIR/chrome.log" >&2; exit 1; }
 
 SUITES=("$@")
 if [ ${#SUITES[@]} -eq 0 ]; then
