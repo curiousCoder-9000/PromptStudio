@@ -73,8 +73,9 @@ CLASSIFY_REEL_PROMPT_VERSION = "v3-reel-frames"
 # v4: any man present → tier 0 (discard couples/groups with men, not only men-only).
 # v5: unusable quality (blur / heavy distortion / pixelation) → tier 0.
 # v6: poster-like / flyer / graphic promo layouts → tier 0.
-# v7a: undo v3's downward tiebreak at the 2/3 boundary. v3 added "this is the
-#   DEFAULT" and "if unsure between 2 and 3, choose 2" to fix a *round-1*
+# v7a: undo v3's downward tiebreak at the 2/3 boundary, and nothing else — a
+#   clean ablation, so whatever moves is attributable to the flip. v3 added "this
+#   is the DEFAULT" and "if unsure between 2 and 3, choose 2" to fix a *round-1*
 #   top_score_share problem; on the round-2 holdout they cost 27 of 43 true
 #   tier-3s, which is 27 photos the Sexy filter never shows. The filter's whole
 #   error budget was recall (precision 1.000, recall 0.576), so the tiebreak now
@@ -191,9 +192,16 @@ CLASSIFY_REEL_PROMPT = (
 #   on a second sample (6/43) — v7a points that tiebreak back up.
 # Decision order is deliberate — check 4 before 3. The 2↔3 cut leans UP: the
 # product surface is a `glam >= 2` filter, so a missed 3 is an invisible photo
-# while a spurious 3 is only a slightly noisier feed. The one explicit exception
-# is a sports bra with full-length leggings, which the labels call 2 and which
-# is the single largest thing an upward lean can break (41/41 correct at v6).
+# while a spurious 3 is only a slightly noisier feed.
+#
+# v7a carries NO carve-outs on purpose. Leaning up should cost something on the
+# 41 true-tier-2s that v6 got 41/41, most likely gym sets where a sports bra
+# reads as a bare midriff — but nobody has measured whether that actually
+# happens with this model. Adding a guard in the same change as the flip would
+# make the flip's own effect unattributable, and a guard for a regression that
+# does not occur is permanent prompt weight bought for nothing. Measure first;
+# `docs/plan_photo_ordinal_holdout_v7.md` §3.0 holds the exact v7b line to add
+# if true-tier-2 recall drops.
 CLASSIFY_FRAME_V4_PROMPT = (
     "Rate the outfit in this still image for a personal fashion KEEP filter. "
     "Return ONLY valid JSON.\n"
@@ -240,7 +248,7 @@ CLASSIFY_FRAME_V4_PROMPT = (
     "  - Crop top that clearly shows the stomach = 3. A short top that still covers "
     "the waistband = 2.\n"
     "  - Short shorts / hot pants / tight shortalls showing upper thigh = 3, even with "
-    "an ordinary top. A sports bra with FULL-LENGTH leggings and no other reveal = 2.\n"
+    "an ordinary top.\n"
     "  - Do NOT skip tier 4. The scale has five steps; using only 0–3 is wrong.\n"
     '  "figure_visible": boolean — bust or body shape is clearly discernible\n'
     '  "confidence": number 0.0-1.0 — lower when cropped, dark, or garment class is unclear\n'

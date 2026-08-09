@@ -65,9 +65,14 @@ Prompt-only. Undoes v3's downward 2/3 tiebreak, which was tuned for a *round-1*
 2. "if unsure between 2 and 3, choose **2**" → "choose **3**"; "only escalate
    when" → "escalate whenever"
 3. short shorts / hot pants / tight shortalls added to the step-(3) reveal list
-4. **new guard:** "sports bra with FULL-LENGTH leggings and no other reveal = 2",
-   protecting the 41/41 true-T2s that step 2 puts at risk
-5. `_TIER_ANCHORS` untouched, so the reel contact-sheet vocabulary is unchanged
+4. `_TIER_ANCHORS` untouched, so the reel contact-sheet vocabulary is unchanged
+
+**Pure ablation — no carve-outs.** A gym guard ("sports bra + full-length leggings
+= 2") was added during implementation and then removed on the user's instruction
+before any run. Correct call: bundling the mitigation with the flip would make the
+flip's own effect unattributable, and the regression it guards against is so far
+only predicted, not observed. The exact v7b line is parked in plan §3.0 and gets
+added **only if** true-tier-2 recall actually drops.
 
 **Blast radius:** `CLASSIFY_FRAME_V4_PROMPT` also serves the reel confirm cascade
 and sheet-fallback frame, so reels shift slightly on those two paths. Accepted;
@@ -86,7 +91,9 @@ reels need their own run before any reel claim.
   4. `run --kind photo --name v7a-dev --ordinal --split dev` (~60 calls)
   5. `report --kind photo --name v7a-dev --against holdout-ordinal --split dev`
   6. Append the result here. **Watch true-tier-2 recall** — it is the cost side of
-     the same knob and the most likely way v7a loses more than it gains.
+     the same knob, the most likely way v7a loses more than it gains, and now the
+     single number that decides whether v7b (the gym guard) gets built at all.
+     v6 baseline is T2 recall 1.000 (41/41) at precision 0.519.
 
 ### Artifacts
 

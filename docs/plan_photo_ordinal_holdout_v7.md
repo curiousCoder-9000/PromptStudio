@@ -210,17 +210,30 @@ downward.
    T3→4 confusion is free.
 3. ✅ Added short shorts / hot pants / tight ass-hugging shortalls to the step-(3)
    reveal list (present in gold T3, absent from the v6 list).
-4. ✅ **Added beyond the original Stage A scope:** an explicit carve-out —
-   *"A sports bra with FULL-LENGTH leggings and no other reveal = 2."*
-   Not in the rev-2 draft, added during implementation because the §3.2 ⚠ row and
-   the §5 risk table both name this as the top regression risk: `midriff_bare`
-   fires on a sports bra, the 41 true-T2s are currently 41/41, and step 3 above
-   removes the guard that was holding them. Your own §1 note ("*Pink sports bra +
-   full leggings (midriff OK)*") is the label authority for it. Covered by
-   `test_the_gym_carve_out_survives_the_upward_lean`.
-5. ✅ Everything else byte-identical. **`_TIER_ANCHORS` deliberately untouched** —
+4. ✅ Everything else byte-identical. **`_TIER_ANCHORS` deliberately untouched** —
    it is shared with the reel contact-sheet prompt, and reels are a §6 non-goal
    with their own eval. Pinned by `test_the_reel_sheet_vocabulary_is_untouched`.
+
+**No carve-outs — this is a clean ablation.** A gym guard was briefly added and
+then removed on your call, which is the right call twice over: shipped inside the
+same change it would make the flip's own effect unattributable, and it may be
+mitigating a regression that does not occur. Pinned by
+`test_the_ablation_carries_no_carve_outs` so it cannot creep back in silently.
+
+**v7b, if and only if true-tier-2 recall drops below ~0.85.** The one line to add,
+verbatim, to the hard-rules block after the "Short shorts / hot pants" rule:
+
+```
+"  - A sports bra or crop top with FULL-LENGTH leggings and no other reveal = 2.\n"
+```
+
+Then bump the version to `v4-ordinal-frame-v7b`, invert
+`test_the_ablation_carries_no_carve_outs`, and re-run **dev only**. Expect it to
+trade a little T3 recall back for T2 precision; the §4.1 gate decides.
+
+**If T2 holds, do not add it.** A guard for a regression that never happened is
+permanent prompt weight, and prompt weight is what caused this whole problem in
+v3.
 
 **Known blast radius:** `CLASSIFY_FRAME_V4_PROMPT` is also read by
 `_classify_frame_ordinal`, which serves the reel *confirm* cascade and the

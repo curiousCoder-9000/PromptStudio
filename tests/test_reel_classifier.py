@@ -702,11 +702,18 @@ def test_short_shorts_are_a_named_reveal():
     assert "shortalls" in prompt
 
 
-def test_the_gym_carve_out_survives_the_upward_lean():
-    """41/41 true tier-2s were correct at v6; leaning up endangers exactly these."""
+def test_the_ablation_carries_no_carve_outs():
+    """v7a flips one thing so that one thing is what the numbers measure.
+
+    A gym carve-out ("sports bra + full-length leggings = 2") is the obvious
+    mitigation for the 41 true-tier-2s this flip endangers, and it is
+    deliberately absent: shipped in the same change, it would make the flip's own
+    effect unattributable, and it may turn out to be unnecessary. It becomes v7b
+    only if true-tier-2 recall actually drops.
+    """
     prompt = oc.CLASSIFY_FRAME_V4_PROMPT
-    assert "FULL-LENGTH leggings" in prompt
-    assert "no other reveal = 2" in prompt
+    assert "FULL-LENGTH leggings" not in prompt
+    assert "sports bra" not in prompt.lower()
 
 
 def test_the_version_records_the_ablation():
