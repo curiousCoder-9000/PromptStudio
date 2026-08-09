@@ -224,7 +224,7 @@ scores still look wrong after tuning.
 
 ## 4. Phased plan
 
-### P0 — Eval set and harness ⚙️ *harness built, labelling outstanding*
+### P0 — Eval sets and harness ⚙️ *harness built (reels + photos), labelling outstanding*
 
 Nothing below is verifiable without this, and V1 shipped without it. The
 **tooling is done and tested**; what remains is the ~2 h of human judgement,
@@ -232,18 +232,38 @@ which has to happen on the machine that holds the real archive.
 
 ```powershell
 # 1. stratified sample + one contact sheet per reel   (no Ollama needed)
-py scripts/eval_reel_classifier.py sample --count 120
+py scripts/eval_reel_classifier.py sample --kind reel --count 120
 
 # 2. open the printed file:// page, label with 0-4 and `r`, hit Export
-py scripts/eval_reel_classifier.py label --import <downloaded labels.jsonl>
+py scripts/eval_reel_classifier.py label --kind reel --import <downloaded labels.jsonl>
 
 # 3. record the current pipeline as the baseline        (needs Ollama)
-py scripts/eval_reel_classifier.py run --name baseline
+py scripts/eval_reel_classifier.py run --kind reel --name baseline
 
 # 4. after any change: re-run and diff
-py scripts/eval_reel_classifier.py run --name v4-sheet
-py scripts/eval_reel_classifier.py report --name v4-sheet --against baseline
+py scripts/eval_reel_classifier.py run --kind reel --name v4-sheet
+py scripts/eval_reel_classifier.py report --kind reel --name v4-sheet --against baseline
 ```
+
+**Photos use the same harness** (`--kind photo`), with a downscaled copy of the
+image instead of a contact sheet and no `reveal_at_end` question. That set
+exists to answer one open decision: §6 ships `CLASSIFY_PHOTO_ORDINAL=0`, so
+photos still run the generous three-boolean prompt with the same collapse
+problem §2.3 describes, and there is currently no evidence either way.
+
+```powershell
+py scripts/eval_reel_classifier.py sample --kind photo --count 120
+py scripts/eval_reel_classifier.py run    --kind photo --name legacy
+$env:CLASSIFY_PHOTO_ORDINAL=1
+py scripts/eval_reel_classifier.py run    --kind photo --name ordinal
+py scripts/eval_reel_classifier.py report --kind photo --name ordinal --against legacy
+```
+
+Compare on **`glam_accuracy`**. The legacy prompt produces no `exposure_tier`,
+so tier accuracy is undefined for it and the report says so rather than printing
+a misleading `0.0`; the 0–3 glam score is the one axis both vocabularies share,
+and `true_glam()` projects the label onto it. Flip the flag only if ordinal wins
+there *and* `top_score_share` drops.
 
 Everything lands in `<archive>/_eval/` — gitignored and excluded from the
 gallery index, because the labels encode personal taste over personal media.

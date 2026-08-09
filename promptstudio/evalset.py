@@ -1,16 +1,26 @@
-"""Labelled evaluation set for the reel classifier.
+"""Labelled evaluation sets for the glam classifier — reels and photos.
 
-Every quality claim about the classifier is currently unverifiable: there is no
+Every quality claim about the classifier is otherwise unverifiable: there is no
 ground truth, so "did that prompt change help" is an opinion. This is the
-missing half — sample reels, label them once by hand, then score any pipeline
-version against the same frozen set and compare numbers.
+missing half — sample, label once by hand, then score any pipeline version
+against the same frozen set and compare numbers.
 
-Four stages, each resumable:
+Four stages, each resumable, each per media kind:
 
-    sample   pick a stratified set, render one contact sheet per reel
+    sample   stratified pick; contact sheet per reel, downscaled copy per photo
     label    static HTML page, keyboard-driven, exports JSONL
     run      score the labelled set with the live pipeline
     report   metrics vs labels, diffed against a saved baseline
+
+Reels and photos are separate sets with separate labels. They run through
+different pipelines, `reveal_at_end` only applies to video, and one blended
+accuracy number would hide which half regressed.
+
+**Two vocabularies, one axis.** The photo path still defaults to the legacy
+three-boolean prompt (`CLASSIFY_PHOTO_ORDINAL=0`), which produces no
+`exposure_tier` at all — so tier accuracy is undefined for it. Both vocabularies
+produce a 0-3 `glam_score`, and `true_glam()` projects the label onto it, which
+is what makes legacy-vs-ordinal an A/B rather than two unrelated numbers.
 
 The labels are the durable asset. Sheets and results are regenerable; the
 labels represent hours of human judgement and are the one thing worth backing
@@ -35,9 +45,24 @@ from promptstudio.storage.atomic import atomic_write_json, atomic_write_text
 log = get_logger(__name__)
 
 EVAL_DIR = os.path.join(SAVED_DIR, "_eval")
-LABELS_FILE = os.path.join(EVAL_DIR, "labels.jsonl")
 SHEETS_DIR = os.path.join(EVAL_DIR, "sheets")
 RESULTS_DIR = os.path.join(EVAL_DIR, "results")
+
+# Reels and photos are separate sets: they run through different pipelines, one
+# of the labels only applies to video, and mixing them would make a single
+# accuracy number that hides which half regressed.
+KINDS = ("reel", "photo")
+
+
+def labels_file(kind: str = "reel") -> str:
+    return os.path.join(EVAL_DIR, f"labels-{kind}.jsonl")
+
+
+def results_file(name: str, kind: str = "reel") -> str:
+    return os.path.join(RESULTS_DIR, f"{kind}-{name}.json")
+
+
+LABELS_FILE = labels_file("reel")
 
 # What the labeller is asked for, mirroring the classifier's own vocabulary so
 # predictions and truth are directly comparable.
@@ -52,9 +77,10 @@ TIER_ANCHORS = {
 
 @dataclass
 class EvalItem:
-    """One reel: what it is, what a human said, what the pipeline said."""
+    """One media file: what it is, what a human said, what the pipeline said."""
 
     rel_path: str
+    kind: str = "reel"  # reel | photo
     sheet: str = ""
     # Stratum it was sampled from — recorded so a skewed sample is visible.
     stratum: str = ""
@@ -69,6 +95,19 @@ class EvalItem:
 
     def is_labelled(self) -> bool:
         return self.true_exposure is not None
+
+    def true_glam(self) -> int:
+        """The label on the product-visible 0-3 axis.
+
+        Lets a legacy-boolean run and an ordinal run be compared at all: the
+        legacy prompt never produces a tier, so tier accuracy is undefined for
+        it, but both produce a glam score.
+        """
+        from promptstudio.scraping.outfit_classifier import TIER_TO_GLAM
+
+        if self.true_exposure is None:
+            return -1
+        return TIER_TO_GLAM.get(int(self.true_exposure), 0)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -230,11 +269,17 @@ class EvalResult:
 class Metrics:
     labelled: int = 0
     scored: int = 0
+    # How many scored items produced a tier at all. The legacy boolean prompt
+    # produces none, so tier metrics are undefined for it and glam is the only
+    # axis on which the two vocabularies can be compared.
+    tier_scored: int = 0
+    glam_accuracy: float = 0.0
     exact_accuracy: float = 0.0
     within_one: float = 0.0
     reveal_recall: float = 0.0
     reveal_n: int = 0
     top_score_share: float = 0.0
+    confusion_axis: str = "glam"
     score_hist: Dict[str, int] = field(default_factory=dict)
     unscored_rate: float = 0.0
     median_vision_calls: float = 0.0
@@ -284,16 +329,28 @@ def compute_metrics(
     m.unscored_rate = round(1 - len(ok_pairs) / len(pairs), 4)
 
     if ok_pairs:
-        exact = sum(1 for i, r in ok_pairs if r.predicted_tier == i.true_exposure)
-        near = sum(1 for i, r in ok_pairs if abs(r.predicted_tier - i.true_exposure) <= 1)
-        m.exact_accuracy = round(exact / len(ok_pairs), 4)
-        m.within_one = round(near / len(ok_pairs), 4)
-        m.mean_signed_error = round(
-            sum(r.predicted_tier - i.true_exposure for i, r in ok_pairs) / len(ok_pairs), 3
-        )
+        # Glam is the common axis: every vocabulary produces one, so this is
+        # what makes legacy-vs-ordinal an A/B rather than two unrelated numbers.
+        glam_hit = sum(1 for i, r in ok_pairs if r.glam_score == i.true_glam())
+        m.glam_accuracy = round(glam_hit / len(ok_pairs), 4)
 
-        # The headline: reels whose real outfit only appears at the end.
-        reveals = [(i, r) for i, r in ok_pairs if i.reveal_at_end]
+        tier_pairs = [(i, r) for i, r in ok_pairs if r.predicted_tier >= 0]
+        m.tier_scored = len(tier_pairs)
+        if tier_pairs:
+            exact = sum(1 for i, r in tier_pairs if r.predicted_tier == i.true_exposure)
+            near = sum(
+                1 for i, r in tier_pairs if abs(r.predicted_tier - i.true_exposure) <= 1
+            )
+            m.exact_accuracy = round(exact / len(tier_pairs), 4)
+            m.within_one = round(near / len(tier_pairs), 4)
+            m.mean_signed_error = round(
+                sum(r.predicted_tier - i.true_exposure for i, r in tier_pairs)
+                / len(tier_pairs),
+                3,
+            )
+
+        # The headline for reels: the real outfit only appears at the end.
+        reveals = [(i, r) for i, r in ok_pairs if i.reveal_at_end and r.predicted_tier >= 0]
         m.reveal_n = len(reveals)
         if reveals:
             hit = sum(1 for i, r in reveals if r.predicted_tier >= i.true_exposure)
@@ -305,11 +362,18 @@ def compute_metrics(
         m.score_hist = dict(sorted(hist.items()))
         m.top_score_share = round(max(hist.values()) / len(ok_pairs), 4)
 
+        # Tier when the run produced one — 0-4 is finer grained and directly
+        # actionable for prompt tuning. Glam otherwise, so a legacy run still
+        # gets a matrix instead of nothing.
         confusion: Dict[str, int] = {}
-        for i, r in ok_pairs:
-            confusion[f"{i.true_exposure}->{r.predicted_tier}"] = (
-                confusion.get(f"{i.true_exposure}->{r.predicted_tier}", 0) + 1
-            )
+        if tier_pairs:
+            m.confusion_axis = "tier"
+            source = [(i.true_exposure, r.predicted_tier) for i, r in tier_pairs]
+        else:
+            m.confusion_axis = "glam"
+            source = [(i.true_glam(), r.glam_score) for i, r in ok_pairs]
+        for truth, pred in source:
+            confusion[f"{truth}->{pred}"] = confusion.get(f"{truth}->{pred}", 0) + 1
         m.confusion = dict(sorted(confusion.items()))
 
     m.median_vision_calls = round(statistics.median([r.vision_calls for _, r in pairs]), 2)
@@ -320,9 +384,18 @@ def compute_metrics(
 # ── running the pipeline ─────────────────────────────────────────────
 
 
-def score_item(rel_path: str, base_dir: str = SAVED_DIR) -> EvalResult:
-    """Score one reel with the *current* pipeline. Requires Ollama."""
-    from promptstudio.scraping.outfit_classifier import classify_video
+def score_item(
+    rel_path: str,
+    kind: str = "reel",
+    base_dir: str = SAVED_DIR,
+) -> EvalResult:
+    """Score one item with the *current* pipeline. Requires Ollama.
+
+    Photos go through `classify_image`, which honours CLASSIFY_PHOTO_ORDINAL —
+    so flipping that env var and re-running is exactly the A/B the flag needs
+    before it can be turned on for the real archive.
+    """
+    from promptstudio.scraping.outfit_classifier import classify_image, classify_video
 
     full = os.path.join(base_dir, *rel_path.split("/"))
     result = EvalResult(rel_path=rel_path)
@@ -332,7 +405,7 @@ def score_item(rel_path: str, base_dir: str = SAVED_DIR) -> EvalResult:
 
     started = time.monotonic()
     try:
-        verdict = classify_video(full)
+        verdict = classify_video(full) if kind == "reel" else classify_image(full)
     except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"[:200]
         result.ms = int((time.monotonic() - started) * 1000)
@@ -342,7 +415,8 @@ def score_item(rel_path: str, base_dir: str = SAVED_DIR) -> EvalResult:
     result.ok = verdict.ok
     result.predicted_tier = verdict.exposure_tier
     result.glam_score = verdict.glam_score
-    result.vision_calls = int(evidence.get("frames_sent_to_vision") or 0)
+    # The photo path makes exactly one call and records no counter for it.
+    result.vision_calls = int(evidence.get("frames_sent_to_vision") or 0) or 1
     result.peak_time_sec = evidence.get("peak_time_sec")
     result.error = verdict.error
     result.prompt_version = verdict.prompt_version
@@ -350,17 +424,22 @@ def score_item(rel_path: str, base_dir: str = SAVED_DIR) -> EvalResult:
     return result
 
 
-def save_results(name: str, results: Sequence[EvalResult], meta: Dict[str, Any]) -> str:
+def save_results(
+    name: str,
+    results: Sequence[EvalResult],
+    meta: Dict[str, Any],
+    kind: str = "reel",
+) -> str:
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    path = os.path.join(RESULTS_DIR, f"{name}.json")
+    path = results_file(name, kind)
     atomic_write_json(
         path, {"meta": meta, "results": [r.to_dict() for r in results]}
     )
     return path
 
 
-def load_results(name: str) -> tuple:
-    path = os.path.join(RESULTS_DIR, f"{name}.json")
+def load_results(name: str, kind: str = "reel") -> tuple:
+    path = results_file(name, kind)
     if not os.path.isfile(path):
         return [], {}
     with open(path, "r", encoding="utf-8") as f:
@@ -369,20 +448,44 @@ def load_results(name: str) -> tuple:
     return results, payload.get("meta", {})
 
 
-def list_results() -> List[str]:
+def list_results(kind: str = "reel") -> List[str]:
+    prefix = f"{kind}-"
     try:
         return sorted(
-            n[: -len(".json")] for n in os.listdir(RESULTS_DIR) if n.endswith(".json")
+            n[len(prefix) : -len(".json")]
+            for n in os.listdir(RESULTS_DIR)
+            if n.startswith(prefix) and n.endswith(".json")
         )
     except OSError:
         return []
+
+
+def render_photo_preview(full_path: str, out_path: str, max_edge: int = 900) -> bool:
+    """Downscaled copy of a photo for the labelling page.
+
+    A copy rather than a link to the original: paging through 120 full-size
+    photos over file:// is slow, and the eval directory stays self-contained
+    and disposable.
+    """
+    try:
+        from PIL import Image
+
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        with Image.open(full_path) as img:
+            img = img.convert("RGB")
+            img.thumbnail((max_edge, max_edge))
+            img.save(out_path, "JPEG", quality=85, optimize=True)
+        return os.path.isfile(out_path)
+    except Exception as e:
+        log.debug("preview failed for %s: %s", full_path, e)
+        return False
 
 
 # ── labelling page ───────────────────────────────────────────────────
 
 _LABEL_HTML = """<!doctype html>
 <meta charset="utf-8">
-<title>Reel eval labelling</title>
+<title>Eval labelling</title>
 <style>
  :root{color-scheme:dark}
  body{margin:0;font:14px/1.5 system-ui,sans-serif;background:#14141a;color:#e6e6ee;
@@ -415,7 +518,7 @@ _LABEL_HTML = """<!doctype html>
 </style>
 <div id="stage"><img id="sheet" alt="contact sheet"></div>
 <aside>
-  <h1>Reel eval <span id="count"></span></h1>
+  <h1><span id="kindlabel"></span> eval <span id="count"></span></h1>
   <div class="bar"><i id="prog"></i></div>
   <div class="path" id="path"></div>
   <div id="tiers"></div>
@@ -435,13 +538,18 @@ _LABEL_HTML = """<!doctype html>
 <script>
 const ITEMS = __ITEMS__;
 const ANCHORS = __ANCHORS__;
-const KEY = "reel-eval-labels";
+const KIND = __KIND__;
+// "reveal at the end" is a property of video. Asking it of a photo would be
+// noise, and a field nobody can answer gets answered at random.
+if (KIND !== "reel") document.getElementById("reveal").style.display = "none";
+const KEY = "eval-labels-" + __KIND__;
 const saved = JSON.parse(localStorage.getItem(KEY) || "{}");
 ITEMS.forEach(it => Object.assign(it, saved[it.rel_path] || {}));
 let idx = Math.max(0, ITEMS.findIndex(i => i.true_exposure === null));
 if (idx === -1) idx = 0;
 
 const el = id => document.getElementById(id);
+el("kindlabel").textContent = KIND;
 el("tiers").innerHTML = Object.entries(ANCHORS).map(([t, d]) =>
   `<div class="tier" data-t="${t}"><b>${t}</b><span>${d}</span></div>`).join("");
 
@@ -496,7 +604,7 @@ el("export").onclick = () => {
 addEventListener("keydown", e => {
   if (e.target.tagName === "TEXTAREA") return;
   if (e.key >= "0" && e.key <= "4") setTier(Number(e.key));
-  else if (e.key === "r") el("reveal").click();
+  else if (e.key === "r" && KIND === "reel") el("reveal").click();
   else if (e.key === "j" || e.key === "ArrowLeft") el("prev").click();
   else if (e.key === "k" || e.key === "ArrowRight") el("next").click();
   else if (e.key === "e") el("export").click();
@@ -506,7 +614,11 @@ render();
 """
 
 
-def render_label_page(items: Sequence[EvalItem], out_path: str) -> str:
+def render_label_page(
+    items: Sequence[EvalItem],
+    out_path: str,
+    kind: str = "reel",
+) -> str:
     """
     Write a self-contained labelling page next to the sheets.
 
@@ -520,6 +632,7 @@ def render_label_page(items: Sequence[EvalItem], out_path: str) -> str:
     payload = [
         {
             "rel_path": i.rel_path,
+            "kind": i.kind,
             "sheet": os.path.basename(i.sheet) if i.sheet else "",
             "stratum": i.stratum,
             "prior_glam": i.prior_glam,
@@ -532,7 +645,8 @@ def render_label_page(items: Sequence[EvalItem], out_path: str) -> str:
     html = (
         _LABEL_HTML.replace("__ITEMS__", json.dumps(payload))
         .replace("__ANCHORS__", json.dumps({str(k): v for k, v in TIER_ANCHORS.items()}))
-        .replace("__LABELS__", LABELS_FILE)
+        .replace("__KIND__", json.dumps(kind))
+        .replace("__LABELS__", labels_file(kind))
     )
     atomic_write_text(out_path, html)
     return out_path

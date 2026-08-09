@@ -44,16 +44,23 @@ py scripts/preview_reel_sheet.py ~/Pictures/InstagramSaved/someone --limit 5
 
 Queue + daily budget live in `~/Pictures/InstagramSaved/following_queue.json`. On abort (rate-limit streak / abuse signal) the CLI exits with code `2`.
 
-### Reel classifier evaluation
+### Glam classifier evaluation (reels + photos)
 
-Makes "did that change help" answerable. Sheets and metrics need no Ollama;
-only `run` does. Output lives in `<archive>/_eval/` (gitignored).
+Makes "did that change help" answerable. Sampling, labelling and metrics need no
+Ollama; only `run` does. Output lives in `<archive>/_eval/` (gitignored).
+`--kind reel` (default) or `--kind photo` — separate sets, separate labels.
 
 ```powershell
-py scripts/eval_reel_classifier.py sample --count 120   # + renders contact sheets
-py scripts/eval_reel_classifier.py label --import ~/Downloads/labels.jsonl
-py scripts/eval_reel_classifier.py run --name baseline
-py scripts/eval_reel_classifier.py report --name v4-sheet --against baseline
+py scripts/eval_reel_classifier.py sample --kind reel --count 120
+py scripts/eval_reel_classifier.py label  --kind reel --import ~/Downloads/labels.jsonl
+py scripts/eval_reel_classifier.py run    --kind reel --name baseline
+py scripts/eval_reel_classifier.py report --kind reel --name v4-sheet --against baseline
+
+# Decide CLASSIFY_PHOTO_ORDINAL with evidence: same labels, both vocabularies,
+# compared on glam_accuracy (the axis they share).
+py scripts/eval_reel_classifier.py run    --kind photo --name legacy
+CLASSIFY_PHOTO_ORDINAL=1 py scripts/eval_reel_classifier.py run --kind photo --name ordinal
+py scripts/eval_reel_classifier.py report --kind photo --name ordinal --against legacy
 ```
 
 Design + metric targets: [docs/design_reel_classifier_v2.md](../docs/design_reel_classifier_v2.md) §P0, §5.

@@ -278,6 +278,7 @@ def test_empty_inputs_do_not_divide_by_zero():
 
 def test_confusion_matrix_shows_where_it_goes_wrong():
     m = _metrics(_pair("a", 4, 1), _pair("b", 4, 1), _pair("c", 1, 1))
+    assert m.confusion_axis == "tier"
     assert m.confusion["4->1"] == 2
     assert m.confusion["1->1"] == 1
 
@@ -344,3 +345,113 @@ def test_label_page_survives_a_quote_in_a_path(tmp_path):
     render_label_page([EvalItem(rel_path='c/we"ird.mp4', sheet="s.jpg")], out)
     html = open(out, encoding="utf-8").read()
     assert '\\"' in html or "we\\u0022ird" in html
+
+
+# ── photos ───────────────────────────────────────────────────────────
+
+
+def test_kind_defaults_to_reel_and_round_trips(tmp_path):
+    path = str(tmp_path / "labels-photo.jsonl")
+    save_labels([EvalItem(rel_path="c/a.jpg", kind="photo", true_exposure=2)], path)
+    back = load_labels(path)
+    assert back[0].kind == "photo"
+    assert EvalItem(rel_path="x").kind == "reel"
+
+
+def test_labels_and_results_are_separate_per_kind():
+    from promptstudio.evalset import labels_file, results_file
+
+    assert labels_file("reel") != labels_file("photo")
+    assert results_file("baseline", "reel") != results_file("baseline", "photo")
+
+
+def test_true_glam_maps_the_label_onto_the_product_axis():
+    from promptstudio.scraping.outfit_classifier import TIER_TO_GLAM
+
+    for tier, glam in TIER_TO_GLAM.items():
+        assert EvalItem(rel_path="x", true_exposure=tier).true_glam() == glam
+
+
+def test_true_glam_is_undefined_without_a_label():
+    assert EvalItem(rel_path="x").true_glam() == -1
+
+
+def _legacy(path, true_tier, glam):
+    """A legacy-boolean result: a glam score but no tier."""
+    return (
+        EvalItem(rel_path=path, true_exposure=true_tier),
+        EvalResult(rel_path=path, ok=True, predicted_tier=-1, glam_score=glam, vision_calls=1),
+    )
+
+
+def test_glam_accuracy_works_without_any_tier():
+    """The whole point of the glam axis: legacy runs can still be scored."""
+    m = _metrics(_legacy("a", 4, 3), _legacy("b", 1, 0), _legacy("c", 2, 3))
+    assert m.tier_scored == 0
+    assert m.glam_accuracy == pytest.approx(2 / 3, abs=1e-3)
+
+
+def test_tier_metrics_are_zero_when_no_run_produced_a_tier():
+    """Zero here means 'undefined', which is why the report must not diff it."""
+    m = _metrics(_legacy("a", 4, 3))
+    assert m.tier_scored == 0
+    assert m.exact_accuracy == 0.0
+
+
+def test_tier_metrics_ignore_the_tierless_rows_in_a_mixed_run():
+    m = _metrics(_pair("a", 4, 4), _legacy("b", 1, 0))
+    assert m.tier_scored == 1
+    assert m.exact_accuracy == 1.0, "the tierless row must not count as wrong"
+    assert m.scored == 2
+
+
+def test_glam_accuracy_catches_the_collapsed_legacy_prompt():
+    """Generous booleans score everything glam 3; only the true-3s are right."""
+    pairs = [_legacy(f"p{i}", t, 3) for i, t in enumerate([0, 1, 2, 3, 4, 4])]
+    m = _metrics(*pairs)
+    assert m.top_score_share == 1.0
+    # true_glam: tier 0->0, 1->0, 2->1, 3->2, 4->3. Only the two tier-4s match.
+    assert m.glam_accuracy == pytest.approx(2 / 6, abs=1e-3)
+    assert m.confusion_axis == "glam", "a legacy run still gets a matrix"
+
+
+def test_reveal_recall_stays_absent_for_a_photo_set():
+    """No photo can 'reveal at the end'; the report must not show a 0.0 FAIL."""
+    m = _metrics(_pair("a", 4, 4), _pair("b", 1, 1))
+    assert m.reveal_n == 0
+
+
+def test_photo_preview_downscales(tmp_path):
+    import numpy as np
+    from PIL import Image
+
+    from promptstudio.evalset import render_photo_preview
+
+    src = tmp_path / "big.jpg"
+    Image.fromarray(np.full((2000, 1500, 3), 120, np.uint8)).save(src)
+    out = str(tmp_path / "out.jpg")
+    assert render_photo_preview(str(src), out, max_edge=400)
+    with Image.open(out) as img:
+        assert max(img.size) <= 400
+
+
+def test_photo_preview_on_a_broken_file(tmp_path):
+    from promptstudio.evalset import render_photo_preview
+
+    bad = tmp_path / "bad.jpg"
+    bad.write_bytes(b"not an image")
+    assert render_photo_preview(str(bad), str(tmp_path / "o.jpg")) is False
+
+
+def test_label_page_hides_reveal_for_photos(tmp_path):
+    out = str(tmp_path / "p.html")
+    render_label_page([EvalItem(rel_path="c/a.jpg", kind="photo", sheet="s.jpg")], out, kind="photo")
+    html = open(out, encoding="utf-8").read()
+    assert '"photo"' in html
+    assert 'KIND !== "reel"' in html, "reveal toggle must be hidden for photos"
+
+
+def test_label_page_keeps_reveal_for_reels(tmp_path):
+    out = str(tmp_path / "r.html")
+    render_label_page([EvalItem(rel_path="c/a.mp4", sheet="s.jpg")], out, kind="reel")
+    assert '"reel"' in open(out, encoding="utf-8").read()
