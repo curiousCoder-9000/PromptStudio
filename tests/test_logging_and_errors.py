@@ -129,7 +129,9 @@ def test_no_second_response_once_headers_are_out():
     assert h.close_connection is True
 
 
-@pytest.mark.parametrize("exc", [BrokenPipeError, ConnectionResetError])
+@pytest.mark.parametrize(
+    "exc", [BrokenPipeError, ConnectionResetError, ConnectionAbortedError]
+)
 def test_client_disconnect_is_not_reported_as_a_server_error(exc):
     """Normal when a user seeks or closes a video mid-stream."""
 
@@ -161,3 +163,29 @@ def test_response_flag_resets_between_keepalive_requests():
     """Handler instances are reused; a stale flag would suppress a later 500."""
     assert "handle_one_request" in vars(GalleryRequestHandler)
     assert "send_response" in vars(GalleryRequestHandler)
+
+
+def test_log_message_survives_broken_stderr(monkeypatch):
+    """Broken console stderr must not abort send_response / JSON status polls."""
+
+    class _Boom:
+        def write(self, *_a, **_k):
+            raise OSError(22, "Invalid argument")
+
+        def flush(self):
+            return None
+
+    monkeypatch.setattr("sys.stderr", _Boom())
+
+    class _Probe(GalleryRequestHandler):
+        def __init__(self):
+            # Skip BaseHTTPRequestHandler.__init__ (needs a real request socket).
+            pass
+
+        def address_string(self):
+            return "127.0.0.1"
+
+        def log_date_time_string(self):
+            return "01/Jan/2026 00:00:00"
+
+    _Probe().log_message('"%s" %s %s', "GET /api/classify/status HTTP/1.1", "200", "-")

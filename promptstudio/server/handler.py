@@ -171,9 +171,10 @@ def _error_boundary(fn):
     def wrapper(self, *args, **kwargs):
         try:
             return fn(self, *args, **kwargs)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             # Normal when a user seeks or closes a video mid-stream. Nothing to
-            # send, and it is not worth a traceback.
+            # send, and it is not worth a traceback. ConnectionAbortedError is
+            # the Windows cousin (WinError 10053).
             log.debug("client disconnected during %s %s", self.command, self.path)
             self.close_connection = True
             return None
@@ -195,6 +196,24 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
     def send_response(self, code, message=None):
         self._response_started = True
         return super().send_response(code, message)
+
+    def log_message(self, fmt, *args):
+        """Access log that must never break the response.
+
+        BaseHTTPRequestHandler writes to ``sys.stderr``. On Windows a detached
+        or invalidated console makes that raise ``OSError: [Errno 22] Invalid
+        argument`` — and because ``log_request`` runs inside ``send_response``,
+        the exception aborts the whole JSON body. That is exactly how a running
+        classify job stopped updating the corner chip: status polls failed while
+        the background thread kept scoring.
+        """
+        try:
+            super().log_message(fmt, *args)
+        except OSError:
+            try:
+                log.debug("http %s - %s", self.address_string(), fmt % args)
+            except Exception:
+                pass
 
     def _send_json_500(self) -> None:
         """Best-effort 500. Silent if headers already went out."""

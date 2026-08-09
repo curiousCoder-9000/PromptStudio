@@ -1162,9 +1162,9 @@ class ArchiveIndex:
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
         sort = (sort or "name").lower()
         if sort == "newest":
-            order = "ORDER BY taken_at DESC, filename DESC"
+            order = "ORDER BY mtime DESC, filename ASC"
         elif sort == "oldest":
-            order = "ORDER BY taken_at ASC, filename ASC"
+            order = "ORDER BY mtime ASC, filename ASC"
         else:
             order = "ORDER BY creator ASC, filename ASC"
 

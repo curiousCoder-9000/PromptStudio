@@ -215,6 +215,7 @@ const elements = {
     scrapeJobChipIcon: document.getElementById('scrapeJobChipIcon'),
     scrapeJobChipTitle: document.getElementById('scrapeJobChipTitle'),
     scrapeJobChipSub: document.getElementById('scrapeJobChipSub'),
+    scrapeJobChipResume: document.getElementById('scrapeJobChipResume'),
     scrapeJobChipCancel: document.getElementById('scrapeJobChipCancel'),
     scrapeJobChipDismiss: document.getElementById('scrapeJobChipDismiss'),
     // Batch job chip (same shape as the scrape chip)
@@ -3103,6 +3104,9 @@ function setupEventListeners() {
     if (elements.syncLatestCreatorBtn) {
         elements.syncLatestCreatorBtn.addEventListener('click', syncLatestSelectedCreator);
     }
+    if (elements.scrapeJobChipResume) {
+        elements.scrapeJobChipResume.addEventListener('click', resumeScrapeQueue);
+    }
     if (elements.scrapeJobChipCancel) {
         elements.scrapeJobChipCancel.addEventListener('click', cancelRunningSyncJob);
     }
@@ -3837,17 +3841,35 @@ function updateScrapeJobChip(data) {
         if (pending.length) sub += ` · +${pending.length} queued`;
     } else if (paused) {
         sub = pending.length
-            ? `${pending.length} waiting — resume from IG Sync when ready`
-            : 'Resume from IG Sync when ready';
+            ? `${pending.length} waiting — press Resume to continue`
+            : 'Press Resume to continue';
     } else if (pending.length) {
         sub = `position 1 · ${pending.length} in queue`;
     }
 
     if (elements.scrapeJobChipTitle) elements.scrapeJobChipTitle.textContent = title;
     if (elements.scrapeJobChipSub) elements.scrapeJobChipSub.textContent = sub;
+    // Resume only when the queue is paused (rate-limit hard abort or user pause).
+    // Cancel only while a job is actively running.
+    if (elements.scrapeJobChipResume) {
+        elements.scrapeJobChipResume.style.display = paused ? '' : 'none';
+    }
     if (elements.scrapeJobChipCancel) {
         elements.scrapeJobChipCancel.style.display =
             running || (sync.running && sync.job_type === 'creator_queue') ? '' : 'none';
+    }
+    // Keep modal Pause/Resume buttons in sync with queue state.
+    if (elements.scrapePauseBtn) {
+        elements.scrapePauseBtn.disabled = paused || (!running && !pending.length && !sync.running);
+        elements.scrapePauseBtn.title = paused
+            ? 'Queue is already paused'
+            : 'Pause after current job';
+    }
+    if (elements.scrapeResumeBtn) {
+        elements.scrapeResumeBtn.disabled = !paused;
+        elements.scrapeResumeBtn.title = paused
+            ? 'Resume scrape queue and start next job'
+            : 'Queue is not paused';
     }
 }
 

@@ -95,6 +95,86 @@ const { Session, Report, sleep } = require('./cdp');
   r.check('exactly one completion toast', finished.toasts === 1, `${finished.toasts}`);
   r.check('cancelled wording used', /cancelled/i.test(finished.text), finished.text);
 
+  r.section('scrape chip shows Resume when queue is paused');
+  const scrapePaused = await s.eval(`
+    const real = window.__originalFetch || window.fetch;
+    window.fetch = async (u, o) => {
+      const url = u.toString();
+      if (url.includes('/api/scrape/status')) {
+        return new Response(JSON.stringify({
+          paused: true,
+          pause_reason: 'Rate-limit streak reached 3 (threshold 3)',
+          pending: [{ username: 'model_sera', mode: 'full' }],
+          history: [],
+          running_job: null,
+          sync: { running: false },
+          stats: { completed_today: 1, downloaded_today: 10 },
+        }), { headers: { 'Content-Type': 'application/json' } });
+      }
+      return real(u, o);
+    };
+    state.scrapeChipDismissed = false;
+    await pollScrapeStatus();
+    await new Promise(r => setTimeout(r, 200));
+    const chip = document.getElementById('scrapeJobChip');
+    const resume = document.getElementById('scrapeJobChipResume');
+    const cancel = document.getElementById('scrapeJobChipCancel');
+    return {
+      visible: getComputedStyle(chip).display !== 'none',
+      pausedClass: chip.classList.contains('paused'),
+      title: document.getElementById('scrapeJobChipTitle').textContent,
+      sub: document.getElementById('scrapeJobChipSub').textContent,
+      resumeVisible: resume && getComputedStyle(resume).display !== 'none',
+      cancelVisible: cancel && getComputedStyle(cancel).display !== 'none',
+      modalResumeDisabled: document.getElementById('scrapeResumeBtn').disabled,
+      modalPauseDisabled: document.getElementById('scrapePauseBtn').disabled,
+    };
+  `);
+  console.log('   ', JSON.stringify(scrapePaused));
+  r.check('scrape chip visible while paused', scrapePaused.visible === true);
+  r.check('paused styling applied', scrapePaused.pausedClass === true);
+  r.check('title names pause reason', /Rate-limit streak/.test(scrapePaused.title), scrapePaused.title);
+  r.check('sub points at Resume button', /press Resume/i.test(scrapePaused.sub), scrapePaused.sub);
+  r.check('Resume button visible on chip', scrapePaused.resumeVisible === true);
+  r.check('Cancel hidden when nothing is running', scrapePaused.cancelVisible === false);
+  r.check('modal Resume enabled while paused', scrapePaused.modalResumeDisabled === false);
+  r.check('modal Pause disabled while paused', scrapePaused.modalPauseDisabled === true);
+
+  r.section('scrape chip Resume hidden while actively running');
+  const scrapeRunning = await s.eval(`
+    const real = window.__originalFetch || window.fetch;
+    window.fetch = async (u, o) => {
+      const url = u.toString();
+      if (url.includes('/api/scrape/status')) {
+        return new Response(JSON.stringify({
+          paused: false,
+          pause_reason: '',
+          pending: [{ username: 'next_creator', mode: 'full' }],
+          history: [],
+          running_job: { username: 'model_sera', mode: 'full', deep: true },
+          sync: { running: true, job_type: 'creator_queue', progress: 'Downloading…' },
+          stats: {},
+        }), { headers: { 'Content-Type': 'application/json' } });
+      }
+      return real(u, o);
+    };
+    await pollScrapeStatus();
+    await new Promise(r => setTimeout(r, 200));
+    const resume = document.getElementById('scrapeJobChipResume');
+    const cancel = document.getElementById('scrapeJobChipCancel');
+    return {
+      title: document.getElementById('scrapeJobChipTitle').textContent,
+      resumeVisible: resume && getComputedStyle(resume).display !== 'none',
+      cancelVisible: cancel && getComputedStyle(cancel).display !== 'none',
+      modalResumeDisabled: document.getElementById('scrapeResumeBtn').disabled,
+    };
+  `);
+  console.log('   ', JSON.stringify(scrapeRunning));
+  r.check('title shows running creator', /@model_sera/.test(scrapeRunning.title), scrapeRunning.title);
+  r.check('Resume hidden while running', scrapeRunning.resumeVisible === false);
+  r.check('Cancel shown while running', scrapeRunning.cancelVisible === true);
+  r.check('modal Resume disabled while not paused', scrapeRunning.modalResumeDisabled === true);
+
   r.section('chips stack rather than overlap');
   const stack = await s.eval(`
     const stack = document.getElementById('jobChipStack');
