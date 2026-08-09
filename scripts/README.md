@@ -44,6 +44,20 @@ py scripts/preview_reel_sheet.py ~/Pictures/InstagramSaved/someone --limit 5
 
 Queue + daily budget live in `~/Pictures/InstagramSaved/following_queue.json`. On abort (rate-limit streak / abuse signal) the CLI exits with code `2`.
 
+### Reel classifier evaluation
+
+Makes "did that change help" answerable. Sheets and metrics need no Ollama;
+only `run` does. Output lives in `<archive>/_eval/` (gitignored).
+
+```powershell
+py scripts/eval_reel_classifier.py sample --count 120   # + renders contact sheets
+py scripts/eval_reel_classifier.py label --import ~/Downloads/labels.jsonl
+py scripts/eval_reel_classifier.py run --name baseline
+py scripts/eval_reel_classifier.py report --name v4-sheet --against baseline
+```
+
+Design + metric targets: [docs/design_reel_classifier_v2.md](../docs/design_reel_classifier_v2.md) §P0, §5.
+
 Classifier report (resumable): `following_classify_report.json` + `docs/following_classify_report.md`.
 
 ## Archive maintenance

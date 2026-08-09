@@ -224,17 +224,49 @@ scores still look wrong after tuning.
 
 ## 4. Phased plan
 
-### P0 — Eval set and harness *(blocking; no model changes)*
+### P0 — Eval set and harness ⚙️ *harness built, labelling outstanding*
 
-Nothing below is verifiable without this, and V1 shipped without it.
+Nothing below is verifiable without this, and V1 shipped without it. The
+**tooling is done and tested**; what remains is the ~2 h of human judgement,
+which has to happen on the machine that holds the real archive.
 
-- Script: dump each reel's contact sheet + current score to a static HTML page; label into `eval/reels.jsonl`.
-- **120 reels, stratified**: 40 transition/reveal, 40 stable-glam, 40 modest/no-person/text-card.
-- Human label per reel: `true_exposure` (0–4), `reveal_at_end` (bool), `peak_time_sec`.
-- `scripts/eval_reel_classifier.py` reports: exact accuracy, ±1 ordinal accuracy, **reveal recall** (transition reels whose score matches the peak outfit), score-distribution entropy, median vision calls, median wall-clock, unscored rate.
-- Record the V1 baseline on this set before touching anything.
+```powershell
+# 1. stratified sample + one contact sheet per reel   (no Ollama needed)
+py scripts/eval_reel_classifier.py sample --count 120
 
-**Cost: ~2 h labeling. Everything after this becomes an A/B instead of a guess.**
+# 2. open the printed file:// page, label with 0-4 and `r`, hit Export
+py scripts/eval_reel_classifier.py label --import <downloaded labels.jsonl>
+
+# 3. record the current pipeline as the baseline        (needs Ollama)
+py scripts/eval_reel_classifier.py run --name baseline
+
+# 4. after any change: re-run and diff
+py scripts/eval_reel_classifier.py run --name v4-sheet
+py scripts/eval_reel_classifier.py report --name v4-sheet --against baseline
+```
+
+Everything lands in `<archive>/_eval/` — gitignored and excluded from the
+gallery index, because the labels encode personal taste over personal media.
+They are also the one artefact worth backing up: sheets and results regenerate,
+hours of judgement do not.
+
+**Stratification is by *current* glam score** (unscored / 0–1 / 2 / 3), not by
+reveal-vs-stable. The true strata are what the labelling is meant to discover,
+so they cannot be used to select — current score is the available proxy and
+guarantees the set spans the pipeline's whole output range instead of only the
+cases it already handles. `--seed` makes the sample reproducible.
+
+**Two fields, not three.** `true_exposure` (0–4, same anchors the model is
+given) and `reveal_at_end`. `peak_time_sec` is in the schema but not asked for:
+no metric in §5 uses it, and every extra field slows 120 judgements down.
+
+`report` prints each §5 target with PASS/FAIL, a `mean_signed_error` (positive =
+over-scoring), and a true→predicted confusion matrix so a systematic failure is
+visible rather than averaged away. With `--against` it shows the delta per
+metric.
+
+**Do step 3 before changing anything else** — a baseline recorded after a change
+is not a baseline.
 
 ### P1 — Reliability ✅ *(smallest diff, likely largest immediate win)*
 

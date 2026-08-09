@@ -201,6 +201,22 @@ def test_stale_rows_are_picked_up_for_rescore(index, make_photo):
     assert [p["rel_path"] for p in stale] == [rel]
 
 
+def test_creator_list_reports_stale_count(index, make_photo):
+    """The "Re-score outdated (N)" button reads this; /api/classify/status's
+    `stale` is scoped to the running job's creator and cannot drive it."""
+    old, _ = make_photo("alice", "old.jpg")
+    cur, _ = make_photo("alice", "cur.jpg")
+    make_photo("alice", "never.jpg")  # unscored — not stale
+    make_photo("bob", "b.jpg")
+    index.set_glam_score(old, 2, prompt_version="v1-ancient")
+    index.set_glam_score(cur, 2, prompt_version=oc.current_prompt_version("cur.jpg"))
+
+    by_name = {c["name"]: c for c in index.list_creators()}
+
+    assert by_name["alice"]["stale_count"] == 1
+    assert by_name["bob"]["stale_count"] == 0
+
+
 def test_start_forwards_rescore_stale(monkeypatch, index, make_photo):
     """The API passes this straight through; start() must not drop it."""
     from promptstudio.scraping import classify_job as cj

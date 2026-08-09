@@ -38,6 +38,9 @@ _thumbs/
 _generations/
 _no_person_detected/
 _classify/
+# Eval labels: personal taste over personal media. Back these up
+# outside git — they are hours of human judgement.
+_eval/
 # scripts/preview_reel_sheet.py output
 _reel_sheets/
 

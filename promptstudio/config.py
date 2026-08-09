@@ -218,6 +218,7 @@ EXCLUDED_FOLDERS = {
     "_classify",
     "_trash",
     "_journal",
+    "_eval",
 }
 METADATA_SUFFIX = ".meta.json"
 
