@@ -34,6 +34,7 @@ from promptstudio.config import (
 from promptstudio.logging_setup import get_logger
 from promptstudio.storage.atomic import atomic_write_json
 from promptstudio.storage.db import DEFAULT_SOURCE
+from promptstudio.storage.paths import safe_join
 
 log = get_logger(__name__)
 
@@ -235,8 +236,11 @@ class TrashStore:
         if not media:
             return {"status": "error", "id": entry_id, "message": "media file missing from trash"}
 
-        target = os.path.normpath(os.path.join(self.base_dir, rel_path))
-        if not target.startswith(os.path.normpath(self.base_dir)):
+        # Containment matters here even though the manifest is ours: restore is
+        # a `shutil.move` *into* the computed target, so a bad rel_path writes
+        # outside the archive rather than merely reading outside it.
+        target = safe_join(self.base_dir, rel_path)
+        if target is None:
             return {"status": "error", "id": entry_id, "message": "unsafe target path"}
         if os.path.exists(target):
             return {"status": "conflict", "id": entry_id, "rel_path": rel_path}

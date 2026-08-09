@@ -247,19 +247,6 @@ class PromptCache:
             return False
         return entry.get("parameters", {}).get("vision_engine") == self._engine_id()
 
-    def is_stale(self, rel_path: str, filename: str, cache: Optional[dict] = None) -> bool:
-        entry = (
-            self._lookup(cache, rel_path, filename)
-            if cache is not None
-            else self.get(rel_path, filename)
-        )
-        if not entry:
-            return False
-        params = entry.get("parameters") or {}
-        engine_ok = params.get("vision_engine") == self._engine_id()
-        pipeline_ok = params.get("pipeline_version") == PROMPT_PIPELINE_VERSION
-        return not engine_ok or not pipeline_ok
-
     def annotate_photos(self, photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         # Most callers arrive with has_prompt/prompt_stale already set from the
         # photos table; only pay for the cache when something is missing.
@@ -285,51 +272,6 @@ class PromptCache:
             photo["has_prompt"] = bool(engine_ok)
             photo["prompt_stale"] = not engine_ok or not pipeline_ok
         return photos
-
-    def filter_unanalyzed(self, photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        cache = self.load()
-        engine_id = self._engine_id()
-        pending = []
-        for photo in photos:
-            if "has_prompt" in photo:
-                if not photo["has_prompt"]:
-                    pending.append(photo)
-                continue
-            rel = photo.get("rel_path", "")
-            filename = photo.get("filename", "")
-            entry = self._lookup(cache, rel, filename)
-            if not entry or entry.get("parameters", {}).get("vision_engine") != engine_id:
-                pending.append(photo)
-        return pending
-
-    def search_photos(self, photos: list, query: str) -> list:
-        if not query:
-            return photos
-        cache = self.load()
-        q = query.lower()
-        matched = []
-        for photo in photos:
-            rel = photo.get("rel_path", "")
-            filename = photo.get("filename", "")
-            entry = cache.get(rel) or cache.get(filename)
-            if q in photo.get("creator", "").lower():
-                matched.append(photo)
-                continue
-            if q in filename.lower():
-                matched.append(photo)
-                continue
-            if entry:
-                blob = " ".join(
-                    [
-                        entry.get("positive_prompt", ""),
-                        entry.get("negative_prompt", ""),
-                        entry.get("raw_vision_description", "") or "",
-                        " ".join(entry.get("visual_tags", [])),
-                    ]
-                ).lower()
-                if q in blob:
-                    matched.append(photo)
-        return matched
 
 
 _default = PromptCache()

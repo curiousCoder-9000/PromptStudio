@@ -221,28 +221,25 @@ class CreatorScrapeQueue:
           {status: started|queued|already_pending|already_running, job, position, queue_depth}
         Or raises ValueError for cap / invalid.
 
-        Safety: mode=latest without catch_up_only is upgraded to full+deep
-        (walk entire feed for all missing posts). Old latest+max_posts=50 left
-        partial glam archives incomplete (Mikayla / roxeuoon ceiling bug).
-        Pass catch_up_only=True to keep true catch-up + optional max_posts ceiling.
+        Option semantics (including the latest → full+deep upgrade) live in
+        `ScrapeOptions.normalize`; this stores the result so the drain does not
+        have to re-derive it.
         """
+        from promptstudio.scraping.sources.base import ScrapeOptions
+
         key = normalize_username(username)
         if not key:
             raise ValueError("username required")
         src = normalize_source(source)
         ident = (src, key)
-        mode = (mode or "full").strip().lower()
-        if mode not in ("full", "bounded", "latest"):
-            raise ValueError("mode must be full, bounded, or latest")
-
-        requested_mode = mode
-        upgraded_from_latest = False
-        # Default product path: never stop after 50 newest missing only
-        if mode == "latest" and not bool(catch_up_only):
-            mode = "full"
-            deep = True
-            max_posts = None
-            upgraded_from_latest = True
+        opts = ScrapeOptions.normalize(
+            mode,
+            deep=deep,
+            max_posts=max_posts,
+            include_videos=include_videos,
+            catch_up_only=catch_up_only,
+            strict=True,
+        )
 
         with self._lock:
             existing = None
@@ -268,29 +265,14 @@ class CreatorScrapeQueue:
                     f"Queue full (max {CREATOR_SCRAPE_MAX_PENDING} pending)"
                 )
 
-            if mode == "latest":
-                # Explicit catch_up_only path
-                job_deep = False
-                if max_posts is None:
-                    from promptstudio.config import DEFAULT_MAX_POSTS_PER_CREATOR
-
-                    max_posts = DEFAULT_MAX_POSTS_PER_CREATOR
-            elif mode == "full":
-                job_deep = bool(deep)
-                # full+deep: no low ceiling unless caller set one
-                if job_deep and (max_posts is not None and int(max_posts) <= 0):
-                    max_posts = None
-            else:
-                job_deep = False
-
             job = {
                 "id": _new_job_id(),
                 "username": key,
                 "source": src,
-                "mode": mode,
-                "deep": job_deep,
-                "max_posts": max_posts,
-                "include_videos": bool(include_videos),
+                "mode": opts.mode,
+                "deep": opts.deep,
+                "max_posts": opts.max_posts,
+                "include_videos": opts.include_videos,
                 "priority": int(priority or 0),
                 "status": "pending",
                 "created_at": _utc_now(),
@@ -302,9 +284,9 @@ class CreatorScrapeQueue:
                 "result": None,
                 "stop_reason": None,
                 "cancel_requested": False,
-                "requested_mode": requested_mode,
-                "upgraded_from_latest": upgraded_from_latest,
-                "catch_up_only": bool(catch_up_only) and requested_mode == "latest",
+                "requested_mode": opts.requested_mode,
+                "upgraded_from_latest": opts.upgraded_from_latest,
+                "catch_up_only": opts.catch_up_only,
             }
             jobs: List[Any] = self._data.setdefault("jobs", [])
             jobs.append(job)
@@ -314,7 +296,7 @@ class CreatorScrapeQueue:
                 "job": copy.deepcopy(job),
                 "position": self._position_unlocked(job["id"]),
                 "queue_depth": self._pending_count_unlocked(),
-                "upgraded_from_latest": upgraded_from_latest,
+                "upgraded_from_latest": opts.upgraded_from_latest,
             }
 
     def _pending_count_unlocked(self) -> int:

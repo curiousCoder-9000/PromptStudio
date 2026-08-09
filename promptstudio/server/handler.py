@@ -13,7 +13,6 @@ from promptstudio.config import (
     CREATOR_SCRAPE_QUEUE_ENABLED,
     DEFAULT_MAX_POSTS_PER_CREATOR,
     FOLLOWING_LIST_FILE,
-    FULL_SCRAPE_MAX_POSTS,
     GLAM_SEXY_MIN,
     HOST,
     INCLUDE_VIDEOS_DEFAULT,
@@ -33,6 +32,7 @@ from promptstudio.prompts.styles import CreatorStyleStore
 from promptstudio.scraping.classify_job import ClassifyJobManager
 from promptstudio.scraping.creator_queue import CreatorScrapeQueue
 from promptstudio.scraping.downloader import InstagramDownloader
+from promptstudio.scraping.sources.base import VALID_MODES, ScrapeOptions
 from promptstudio.scraping.sync_manager import SyncManager
 from promptstudio.server.multipart import parse_multipart_data
 from promptstudio.storage.archive import ArchiveStore, ensure_creator_folder
@@ -58,9 +58,30 @@ OLLAMA_TAGS_URL = os.environ.get("OLLAMA_TAGS_URL", "http://localhost:11434/api/
 
 _following_cache: Dict[str, Any] = {"mtime": None, "accounts": []}
 
+_TRUTHY = ("1", "true", "yes")
+
+
+def _as_bool(value: Any, *, default: bool = False) -> bool:
+    """Coerce a JSON/query value to bool, accepting "1"/"true"/"yes" strings.
+
+    Clients send booleans as JSON bools from `app.js` and as strings from query
+    params and older callers, so every flag has to accept both.
+    """
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in _TRUTHY
+    return bool(value)
+
 
 def _creator_queue_blocks_oneshot() -> Optional[Dict[str, Any]]:
-    """If scrape queue has pending jobs and is not paused, block one-shot sync."""
+    """If scrape queue has pending jobs and is not paused, block one-shot sync.
+
+    Policy, not mutual exclusion — the Instagram lease in `SyncManager.start_job`
+    is what prevents two syncs from actually overlapping. This exists so a
+    one-shot request does not jump the queue's pacing, and being advisory is
+    fine: the worst case is a job that the lease then refuses anyway.
+    """
     if not CREATOR_SCRAPE_QUEUE_ENABLED:
         return None
     try:
@@ -76,7 +97,9 @@ def _creator_queue_blocks_oneshot() -> Optional[Dict[str, Any]]:
                 "creator_queue_depth": n,
             }
     except Exception:
-        pass
+        # Never block a sync because the queue file could not be read, but do
+        # not hide it either — this used to be a bare `pass`.
+        log.warning("creator queue check failed; allowing one-shot", exc_info=True)
     return None
 
 
@@ -578,41 +601,20 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 # Defaults to instagram so existing clients are unaffected.
                 source_name = (data.get("source") or "instagram").strip().lower()
                 mode = (data.get("mode") or "full").strip().lower()
-                if mode not in ("full", "bounded", "latest"):
+                if mode not in VALID_MODES:
                     self.send_error(400, "mode must be full, bounded, or latest")
                     return
-                deep = data.get("deep", True)
-                if isinstance(deep, str):
-                    deep = deep.lower() in ("1", "true", "yes")
-                # catch_up_only: keep true latest (streak stop + low ceiling).
-                # Default latest is upgraded to full+deep inside CreatorScrapeQueue.
-                catch_up_only = data.get("catch_up_only", False)
-                if isinstance(catch_up_only, str):
-                    catch_up_only = catch_up_only.lower() in ("1", "true", "yes")
-                catch_up_only = bool(catch_up_only)
-                if mode == "latest" and catch_up_only:
-                    deep = False
-                elif mode == "full":
-                    deep = bool(deep)
-                elif mode == "latest":
-                    deep = True  # will be coerced to full+deep in queue
-                else:
-                    deep = False
+                # Raw request values only — CreatorScrapeQueue.enqueue resolves
+                # them through ScrapeOptions.normalize. Deriving `deep` and
+                # `max_posts` here as well just produced an answer the queue
+                # overwrote, so the two could drift without anything failing.
                 max_posts = data.get("max_posts")
-                if max_posts is not None and max_posts != "":
-                    max_posts = int(max_posts)
-                else:
-                    # full / upgraded-latest: no low ceiling; bounded needs default
-                    if mode == "bounded":
-                        max_posts = DEFAULT_MAX_POSTS_PER_CREATOR
-                    elif mode == "latest" and catch_up_only:
-                        max_posts = DEFAULT_MAX_POSTS_PER_CREATOR
-                    else:
-                        max_posts = None
-                if "include_videos" in data:
-                    include_videos = bool(data.get("include_videos"))
-                else:
-                    include_videos = INCLUDE_VIDEOS_DEFAULT
+                max_posts = int(max_posts) if max_posts not in (None, "") else None
+                include_videos = (
+                    bool(data.get("include_videos"))
+                    if "include_videos" in data
+                    else INCLUDE_VIDEOS_DEFAULT
+                )
                 priority = int(data.get("priority") or 0)
                 # Resolving the target here (rather than in the queue) validates
                 # the handle for its platform and yields the real archive folder,
@@ -625,13 +627,15 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 out = q.enqueue(
                     username,
                     mode=mode,
-                    deep=deep,
+                    deep=_as_bool(data.get("deep", True), default=True),
                     max_posts=max_posts,
                     include_videos=include_videos,
                     priority=priority,
                     folder_name=folder["name"],
                     folder_created=folder["created"],
-                    catch_up_only=catch_up_only,
+                    # catch_up_only keeps a true "latest" (streak stop + low
+                    # ceiling); without it, latest is upgraded to full+deep.
+                    catch_up_only=_as_bool(data.get("catch_up_only", False)),
                     source=target.source,
                 )
                 started = False
@@ -727,10 +731,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             if blocked:
                 self._send_json(blocked, 409)
                 return
-            if _sync.is_running():
-                self._send_json({"status": "busy", "message": "Sync already running"}, 409)
-                return
-
             def job(log, on_rate_limit=None):
                 dl = InstagramDownloader(
                     log=log,
@@ -739,10 +739,13 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 )
                 return dl.sync_saved_posts()
 
+            # No is_running() pre-check: start_job takes the Instagram lease and
+            # flips status under one lock, so it is the only answer that cannot
+            # be stale by the time the job starts.
             if _sync.start_job("saved", job):
                 self._send_json({"status": "started", "job_type": "saved"})
             else:
-                self._send_json({"status": "busy"}, 409)
+                self._send_json({"status": "busy", "message": _sync.last_refusal}, 409)
             return
 
         if path == "/api/sync/creator":
@@ -794,34 +797,25 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     )
                     return
 
-                max_posts = int(data.get("max_posts", DEFAULT_MAX_POSTS_PER_CREATOR))
-                mode = (data.get("mode") or "full").strip().lower()
-                if mode not in ("bounded", "full", "latest"):
-                    mode = "full"
-                deep = data.get("deep", True)
-                if isinstance(deep, str):
-                    deep = deep.lower() in ("1", "true", "yes")
-                if mode == "latest":
-                    # Avoid partial archives: oneshot latest still walks deep full stream
-                    mode = "full"
-                    deep = True
-                    max_posts = FULL_SCRAPE_MAX_POSTS
-                elif mode == "full":
-                    deep = bool(deep)
-                    if deep and max_posts <= 0:
-                        max_posts = FULL_SCRAPE_MAX_POSTS
-                else:
-                    deep = False
-                if "include_videos" in data:
-                    include_videos = bool(data.get("include_videos"))
-                else:
-                    include_videos = INCLUDE_VIDEOS_DEFAULT
+                # Same resolution the queue path uses — a one-shot "latest" is
+                # upgraded to a deep full walk rather than stopping at 50.
+                opts = ScrapeOptions.normalize(
+                    data.get("mode"),
+                    deep=_as_bool(data.get("deep", True), default=True),
+                    max_posts=int(data.get("max_posts", DEFAULT_MAX_POSTS_PER_CREATOR)),
+                    include_videos=(
+                        bool(data.get("include_videos"))
+                        if "include_videos" in data
+                        else INCLUDE_VIDEOS_DEFAULT
+                    ),
+                )
+                mode = opts.mode
+                deep = opts.deep
+                include_videos = opts.include_videos
+                max_posts = opts.resolved_max_posts()
                 blocked = _creator_queue_blocks_oneshot()
                 if blocked:
                     self._send_json(blocked, 409)
-                    return
-                if _sync.is_running():
-                    self._send_json({"status": "busy"}, 409)
                     return
 
                 def job(log, on_rate_limit=None):
@@ -830,12 +824,9 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                         on_rate_limit=on_rate_limit,
                         should_cancel=_sync.is_cancel_requested,
                     )
-                    mp = max_posts
-                    if mode == "full" and (mp is None or mp <= 0):
-                        mp = FULL_SCRAPE_MAX_POSTS
                     return dl.sync_creator_feed(
                         username,
-                        max_posts=mp,
+                        max_posts=max_posts,
                         include_videos=include_videos,
                         mode=mode,
                         deep=deep,
@@ -854,7 +845,9 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                         }
                     )
                 else:
-                    self._send_json({"status": "busy"}, 409)
+                    self._send_json(
+                        {"status": "busy", "message": _sync.last_refusal}, 409
+                    )
             except (ValueError, json.JSONDecodeError):
                 self.send_error(400, "Invalid JSON body")
             return
@@ -884,9 +877,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 if blocked:
                     self._send_json(blocked, 409)
                     return
-                if _sync.is_running():
-                    self._send_json({"status": "busy"}, 409)
-                    return
 
                 def job(log, on_rate_limit=None):
                     dl = InstagramDownloader(
@@ -914,7 +904,9 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                         }
                     )
                 else:
-                    self._send_json({"status": "busy"}, 409)
+                    self._send_json(
+                        {"status": "busy", "message": _sync.last_refusal}, 409
+                    )
             except (ValueError, json.JSONDecodeError):
                 self.send_error(400, "Invalid JSON body")
             return
@@ -932,18 +924,8 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     paths = [str(p).strip() for p in paths_raw if str(p).strip()]
                     if not paths:
                         paths = None
-                if _batch.is_running():
-                    self._send_json({"status": "busy", "message": "Batch already running"}, 409)
-                    return
-                if _classify.is_running():
-                    self._send_json(
-                        {
-                            "status": "busy",
-                            "message": "Classify job is using the vision model — wait or cancel it first",
-                        },
-                        409,
-                    )
-                    return
+                # No is_running() pre-checks against _batch/_classify: both take
+                # the same Ollama lease, and start_batch decides under it.
                 pending = _batch.list_uncached(creator=creator, force=force, paths=paths)
                 if limit:
                     pending = pending[:limit]
@@ -962,8 +944,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                         }
                     )
                 else:
-                    # The checks above are advisory; the lease inside
-                    # start_batch is what actually decides, so report its reason.
                     self._send_json(
                         {
                             "status": "busy",
@@ -998,10 +978,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 if isinstance(include_videos, str):
                     include_videos = include_videos.lower() in ("1", "true", "yes")
                 include_videos = bool(include_videos)
-                rescore_stale = data.get("rescore_stale", False)
-                if isinstance(rescore_stale, str):
-                    rescore_stale = rescore_stale.lower() in ("1", "true", "yes")
-                rescore_stale = bool(rescore_stale)
+                rescore_stale = _as_bool(data.get("rescore_stale"))
                 limit = data.get("limit")
                 limit = int(limit) if limit is not None else None
                 result = _classify.start(
@@ -1167,9 +1144,9 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                         503,
                     )
                     return
-                if _comfy.is_running():
-                    self._send_json({"status": "busy"}, 409)
-                    return
+                # No is_running() pre-check: _comfy.start() takes the ComfyUI
+                # lease and flips status under one lock. Building the prompt
+                # below is cheap, so there is nothing to short-circuit for.
 
                 filename = os.path.basename(rel_path)
                 cached = _prompt_cache.get(rel_path, filename) or {}
@@ -1306,7 +1283,9 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                         payload["mode_e"] = mode_meta
                     self._send_json(payload)
                 else:
-                    self._send_json({"status": "busy"}, 409)
+                    self._send_json(
+                        {"status": "busy", "message": _comfy.last_refusal}, 409
+                    )
             except (ValueError, json.JSONDecodeError):
                 self.send_error(400, "Invalid JSON body")
             return

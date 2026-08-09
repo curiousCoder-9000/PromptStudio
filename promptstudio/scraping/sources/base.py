@@ -23,8 +23,10 @@ from datetime import datetime
 from typing import Any, Callable, Dict, Optional, Protocol
 
 from promptstudio.config import (
+    DEFAULT_MAX_POSTS_PER_CREATOR,
     FOLDER_SUFFIX_NON_DEFAULT,
     FOLDER_SUFFIX_SEP,
+    FULL_SCRAPE_MAX_POSTS,
     INCLUDE_VIDEOS_DEFAULT,
 )
 from promptstudio.storage.db import DEFAULT_SOURCE
@@ -97,14 +99,104 @@ class SourceTarget:
             self.label = self.raw
 
 
+VALID_MODES = ("full", "bounded", "latest")
+
+
 @dataclass
 class ScrapeOptions:
-    """Per-job knobs, mapped onto whatever each source supports."""
+    """Per-job knobs, mapped onto whatever each source supports.
+
+    Build these with `normalize()` rather than the constructor. The rules for
+    turning a requested (mode, deep, max_posts) into a runnable one used to be
+    re-derived in four places — the enqueue route, the one-shot sync route,
+    `CreatorScrapeQueue.enqueue`, and `SyncManager.try_drain_creator_queue` —
+    each with slightly different code. Three of the four then had their answer
+    thrown away and recomputed by the next layer down, which made it impossible
+    to tell by reading any single site what a given request would actually do.
+    """
 
     mode: str = "full"  # full | bounded | latest
     deep: bool = True  # full+deep disables catch-up (true archive)
-    max_posts: Optional[int] = None  # download ceiling; None/0 = unlimited
+    max_posts: Optional[int] = None  # stored ceiling; None = "no explicit limit"
     include_videos: bool = INCLUDE_VIDEOS_DEFAULT
+    catch_up_only: bool = False  # only meaningful when the request said "latest"
+    requested_mode: str = ""  # what the caller asked for, before normalization
+    upgraded_from_latest: bool = False  # latest → full+deep was applied
+
+    @staticmethod
+    def parse_mode(mode: Optional[str], *, strict: bool = False) -> str:
+        """Clean a mode string. Coerces to "full" unless `strict`, which raises."""
+        value = (mode or "full").strip().lower()
+        if value not in VALID_MODES:
+            if strict:
+                raise ValueError("mode must be full, bounded, or latest")
+            return "full"
+        return value
+
+    @classmethod
+    def normalize(
+        cls,
+        mode: Optional[str] = "full",
+        *,
+        deep: bool = True,
+        max_posts: Optional[int] = None,
+        include_videos: bool = INCLUDE_VIDEOS_DEFAULT,
+        catch_up_only: bool = False,
+        strict: bool = False,
+    ) -> "ScrapeOptions":
+        """Resolve a scrape request into the options a source will actually run.
+
+        `latest` without `catch_up_only` is upgraded to full+deep — walk the
+        whole feed for every missing post. The old behaviour (stop after ~50
+        newest) left partial archives behind, which is the Mikayla / roxeuoon
+        ceiling bug. Pass `catch_up_only=True` for a true catch-up stream.
+
+        **Idempotent**: normalizing an already-normalized job is a no-op, which
+        is what lets the queue store the result and the drain re-derive from it
+        without the two disagreeing.
+        """
+        requested = cls.parse_mode(mode, strict=strict)
+        catch_up = bool(catch_up_only) and requested == "latest"
+        upgraded = False
+
+        if requested == "latest" and not catch_up:
+            mode_out, deep_out, max_posts = "full", True, None
+            upgraded = True
+        elif requested == "latest":
+            mode_out, deep_out = "latest", False
+            if max_posts is None:
+                max_posts = DEFAULT_MAX_POSTS_PER_CREATOR
+        elif requested == "full":
+            mode_out, deep_out = "full", bool(deep)
+            # A deep full scrape has no low ceiling unless the caller set one;
+            # <=0 means "unlimited", which is stored as None.
+            if deep_out and max_posts is not None and int(max_posts) <= 0:
+                max_posts = None
+        else:
+            mode_out, deep_out = "bounded", False
+
+        return cls(
+            mode=mode_out,
+            deep=deep_out,
+            max_posts=max_posts,
+            include_videos=bool(include_videos),
+            catch_up_only=catch_up,
+            requested_mode=requested,
+            upgraded_from_latest=upgraded,
+        )
+
+    def resolved_max_posts(self) -> int:
+        """The download ceiling to actually run with.
+
+        `max_posts` records intent ("no explicit limit"); this turns it into the
+        number a source needs. Full scrapes fall back to the archive ceiling,
+        everything else to the per-creator default.
+        """
+        if self.max_posts is not None and int(self.max_posts) > 0:
+            return int(self.max_posts)
+        if self.mode == "full":
+            return int(FULL_SCRAPE_MAX_POSTS)
+        return int(DEFAULT_MAX_POSTS_PER_CREATOR)
 
 
 @dataclass

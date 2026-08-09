@@ -1171,15 +1171,6 @@ class ArchiveIndex:
                 self.delete_photo(rel)
         return out
 
-    def has_instagram_post(
-        self,
-        *,
-        shortcode: Optional[str] = None,
-        post_id: Optional[str] = None,
-    ) -> bool:
-        """True if at least one image for this Instagram identity exists on disk."""
-        return bool(self.carousel_paths(shortcode=shortcode, post_id=post_id))
-
     def backfill_creator_identity(self, creator: str) -> int:
         """Scan creator folder meta.json into post_id/shortcode columns. Returns rows updated."""
         creator = creator.lstrip("@").strip()

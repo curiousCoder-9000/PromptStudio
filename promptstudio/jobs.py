@@ -91,9 +91,6 @@ class LeaseRegistry:
         with self._lock:
             return self._held.get(resource)
 
-    def is_free(self, resource: str) -> bool:
-        return self.holder(resource) is None
-
     def snapshot(self) -> Dict[str, Optional[str]]:
         """Current holders, for /api/health and debugging."""
         with self._lock:

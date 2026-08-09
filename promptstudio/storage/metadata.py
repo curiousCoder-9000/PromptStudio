@@ -89,14 +89,6 @@ def delete_metadata_for_image(image_path: str) -> None:
             pass
 
 
-def rel_path_from_full(full_path: str) -> str:
-    base = os.path.normpath(SAVED_DIR)
-    full = os.path.normpath(full_path)
-    if full.startswith(base):
-        return os.path.relpath(full, base).replace("\\", "/")
-    return full.replace("\\", "/")
-
-
 def group_by_post_id(creator: str, base_dir: str = SAVED_DIR) -> Dict[str, list]:
     """Group media paths under a creator by Instagram post_id from sidecars."""
     from promptstudio.config import MEDIA_EXTENSIONS

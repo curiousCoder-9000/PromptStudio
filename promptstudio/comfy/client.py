@@ -27,10 +27,14 @@ from promptstudio.config import (
     GENERATIONS_INDEX_FILE,
     SAVED_DIR,
 )
+from promptstudio.jobs import COMFY, LEASES
 from promptstudio.logging_setup import get_logger
 from promptstudio.storage.atomic import atomic_write_json
+from promptstudio.storage.paths import safe_join
 
 log = get_logger(__name__)
+
+LEASE_OWNER = "comfy"
 
 # Node ids in modelToimage_pro.api.json (Export API)
 PRO_NODE_LOAD_IMAGE = "4"
@@ -269,9 +273,10 @@ def build_pro_workflow(
 
 
 def resolve_archive_file(source_rel: str) -> str:
+    """Archive-relative path → absolute file. Raises if it escapes or is missing."""
     rel = source_rel.replace("\\", "/").lstrip("/")
-    full = os.path.normpath(os.path.join(SAVED_DIR, rel))
-    if not full.startswith(os.path.normpath(SAVED_DIR)):
+    full = safe_join(SAVED_DIR, rel)
+    if full is None:
         raise ValueError("Invalid path")
     if not os.path.isfile(full):
         raise FileNotFoundError(full)
@@ -318,6 +323,8 @@ class ComfyJobManager:
 
     def __init__(self) -> None:
         self._job_lock = threading.Lock()
+        # Why the last start() returned False, for the API's 409 message.
+        self.last_refusal = ""
         self._status: Dict[str, Any] = {
             "running": False,
             "prompt_id": None,
@@ -365,9 +372,20 @@ class ComfyJobManager:
         # Resolve before the thread starts so the caller can report the seed in
         # the HTTP response — the runner is async and would be too late.
         resolved_seed = resolve_seed(seed)
+        # One ComfyUI, one job. Taken before the status flip so two requests
+        # arriving together cannot both observe running=False and proceed.
+        blocker = LEASES.acquire([COMFY], LEASE_OWNER)
+        if blocker:
+            self.last_refusal = (
+                f"{LEASES.holder(blocker) or 'another job'} is using ComfyUI"
+            )
+            return False
         with self._job_lock:
             if self._status.get("running"):
+                LEASES.release(LEASE_OWNER)
+                self.last_refusal = "A generation is already running"
                 return False
+            self.last_refusal = ""
             self._status = {
                 "running": True,
                 "prompt_id": None,
@@ -411,6 +429,9 @@ class ComfyJobManager:
                     self._status["error"] = str(exc)
                     self._status["progress"] = "Failed"
             finally:
+                # Release before the status flip so a client that sees
+                # running=False can immediately start the next generation.
+                LEASES.release(LEASE_OWNER)
                 with self._job_lock:
                     self._status["running"] = False
                     self._status["finished_at"] = datetime.now(timezone.utc).isoformat()

@@ -125,7 +125,3 @@ class FavoritesStore:
             rel = self.cache_key(photo.get("rel_path", ""))
             photo["favorite"] = rel in favs
         return photos
-
-    def filter_favorites(self, photos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        favs = self.load()
-        return [p for p in photos if self.cache_key(p.get("rel_path", "")) in favs]

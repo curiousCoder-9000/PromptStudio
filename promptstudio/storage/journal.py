@@ -270,11 +270,6 @@ def read_runs(kind: str, limit: int = 20) -> List[Dict[str, Any]]:
     return RunJournal.for_kind(kind).read_runs(limit=limit)
 
 
-def _reset_registry_for_tests() -> None:
-    with _registry_lock:
-        _registry.clear()
-
-
 def journal_for(kind: str) -> RunJournal:
     return RunJournal.for_kind(kind)
 

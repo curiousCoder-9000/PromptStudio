@@ -10,8 +10,8 @@ from promptstudio.storage.db import (
     DEFAULT_SOURCE,
     ArchiveIndex,
     normalize_rel_path,
-    taken_at_for_image,
 )
+from promptstudio.storage.paths import safe_join
 
 log = get_logger(__name__)
 
@@ -35,27 +35,6 @@ def ensure_creator_folder(name: str, base_dir: str = SAVED_DIR) -> Dict[str, Any
     return {"name": clean, "created": not existed, "path": path}
 
 
-def photo_sort_key(photo: Dict[str, Any]) -> Tuple[str, str]:
-    """Return (iso_timestamp, filename) for date sorting."""
-    filename = photo.get("filename") or ""
-    if photo.get("taken_at"):
-        return (str(photo["taken_at"]), filename)
-    full = photo.get("full_path") or ""
-    return (taken_at_for_image(full, filename), filename)
-
-
-def sort_photos(photos: List[Dict[str, Any]], sort: str = "name") -> List[Dict[str, Any]]:
-    sort = (sort or "name").lower()
-    if sort == "newest":
-        return sorted(photos, key=photo_sort_key, reverse=True)
-    if sort == "oldest":
-        return sorted(photos, key=photo_sort_key, reverse=False)
-    return sorted(
-        photos,
-        key=lambda p: (p.get("creator") or "", p.get("filename") or ""),
-    )
-
-
 class ArchiveStore:
     """Read/write helpers for ~/Pictures/InstagramSaved."""
 
@@ -66,19 +45,6 @@ class ArchiveStore:
 
     def ensure_ready(self, force: bool = False) -> None:
         self._index.ensure_ready(force=force)
-
-    def rebuild_index(self) -> int:
-        return self._index.rebuild()
-
-    def _creator_dirs(self) -> List[str]:
-        if not os.path.isdir(self.base_dir):
-            return []
-        dirs = []
-        for item in os.listdir(self.base_dir):
-            path = os.path.join(self.base_dir, item)
-            if os.path.isdir(path) and item not in EXCLUDED_FOLDERS:
-                dirs.append(item)
-        return dirs
 
     def list_creators(self) -> List[Dict[str, Any]]:
         return self._index.list_creators()
@@ -146,32 +112,16 @@ class ArchiveStore:
             offset=offset,
         )
 
-    def count_photos(self, creator: Optional[str] = None) -> int:
-        with self._index._lock:
-            if creator:
-                row = self._index._conn.execute(
-                    "SELECT COUNT(*) AS c FROM photos WHERE creator = ?", (creator,)
-                ).fetchone()
-            else:
-                row = self._index._conn.execute(
-                    "SELECT COUNT(*) AS c FROM photos"
-                ).fetchone()
-        return int(row["c"])
-
     def resolve_path(self, rel_path: str) -> Optional[str]:
         """Resolve an archive-relative path, or None if it escapes the archive.
 
-        A plain `startswith(base)` check is not containment: with base
-        `~/Pictures/InstagramSaved`, the path `../InstagramSaved_backup/x.jpg`
-        shares the prefix and would resolve outside the archive. Every media
-        route (`/media/…`, `/api/media/detail`, `DELETE /api/photo`) goes
-        through here, and CORS is `*`, so compare on path boundaries.
+        Every media route (`/media/…`, `/api/media/detail`, `DELETE /api/photo`)
+        goes through here, and CORS is `*`. Containment itself lives in
+        `storage.paths.safe_join` — see that module for why a `startswith`
+        prefix test is not enough.
         """
-        base = os.path.normpath(self.base_dir)
-        full = os.path.normpath(os.path.join(base, rel_path))
-        if full != base and not full.startswith(base + os.sep):
-            return None
-        if not os.path.isfile(full):
+        full = safe_join(self.base_dir, rel_path)
+        if full is None or not os.path.isfile(full):
             return None
         return full
 
@@ -331,7 +281,3 @@ class ArchiveStore:
         rel = normalize_rel_path(f"{creator}/{safe_name}")
         self._index.upsert_photo(rel)
         return safe_name
-
-    def index_photo(self, rel_path: str, taken_at: Optional[str] = None) -> None:
-        """Upsert a newly downloaded/saved image into the catalog."""
-        self._index.upsert_photo(rel_path, taken_at=taken_at)

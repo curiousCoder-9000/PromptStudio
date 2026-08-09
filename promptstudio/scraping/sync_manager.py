@@ -6,6 +6,7 @@ import json
 import threading
 import time
 import traceback
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
@@ -17,13 +18,12 @@ from promptstudio.config import (
     BATCH_PAUSE_MAX_SEC,
     BATCH_PAUSE_MIN_SEC,
     CREATOR_SCRAPE_QUEUE_ENABLED,
-    DEFAULT_MAX_POSTS_PER_CREATOR,
-    FULL_SCRAPE_MAX_POSTS,
     INCLUDE_VIDEOS_DEFAULT,
     SYNC_STATUS_FILE,
 )
 from promptstudio.jobs import INSTAGRAM, LEASES
 from promptstudio.logging_setup import get_logger
+from promptstudio.scraping.sources.base import ScrapeOptions
 from promptstudio.storage.atomic import atomic_write_json
 from promptstudio.storage.journal import RunHandle, RunJournal
 
@@ -41,6 +41,8 @@ class SyncManager:
     def __init__(self) -> None:
         self._job_lock = threading.Lock()
         self._cancel = threading.Event()
+        # Why the last start_job() returned False, for the API's 409 message.
+        self.last_refusal = ""
         self._run: Optional[RunHandle] = None
         self._status: Dict[str, Any] = self._load_status()
         self._recover_stuck_running()
@@ -187,17 +189,27 @@ class SyncManager:
             self._save_status()
 
     def start_job(self, job_type: str, fn: Callable[..., Any]) -> bool:
-        """Start a background job. Returns False if one is already running."""
+        """Start a background job. Returns False if one is already running.
+
+        On False, `last_refusal` says why — the API turns that into the 409
+        message so "busy" is attributable to a named holder.
+        """
         # One Instagram session, one job. Taken before the status flip so two
         # simultaneous requests cannot both observe running=False and proceed.
         blocker = LEASES.acquire([INSTAGRAM], LEASE_OWNER)
         if blocker:
+            self.last_refusal = (
+                f"{LEASES.holder(blocker) or 'another job'} is using the "
+                "Instagram session"
+            )
             return False
 
         with self._job_lock:
             if self._status.get("running"):
                 LEASES.release(LEASE_OWNER)
+                self.last_refusal = "Sync already running"
                 return False
+            self.last_refusal = ""
             self._cancel.clear()
             self._status = {
                 "running": True,
@@ -356,28 +368,20 @@ class SyncManager:
         job_id = job["id"]
         username = job.get("username") or ""
         source_name = (job.get("source") or "instagram").strip().lower()
-        mode = (job.get("mode") or "full").strip().lower()
-        if mode not in ("full", "bounded", "latest"):
-            mode = "full"
-        # latest always catch-up; full uses deep flag; bounded ignores deep
-        if mode == "latest":
-            deep = False
-        elif mode == "full":
-            deep = bool(job.get("deep", True))
-        else:
-            deep = False
         include_videos = job.get("include_videos")
         if include_videos is None:
             include_videos = INCLUDE_VIDEOS_DEFAULT
-        max_posts = job.get("max_posts")
-        if mode == "full":
-            if max_posts is None or int(max_posts) <= 0:
-                max_posts = FULL_SCRAPE_MAX_POSTS
-            else:
-                max_posts = int(max_posts)
-        else:
-            # bounded + latest: default 50 new downloads ceiling
-            max_posts = int(max_posts or DEFAULT_MAX_POSTS_PER_CREATOR)
+        # The queue stored an already-normalized job; normalize() is idempotent,
+        # so this re-derives nothing — it just re-applies the same rules to a
+        # file that may have been written by an older build or hand-edited.
+        opts = ScrapeOptions.normalize(
+            job.get("mode"),
+            deep=bool(job.get("deep", True)),
+            max_posts=job.get("max_posts"),
+            include_videos=bool(include_videos),
+            catch_up_only=bool(job.get("catch_up_only", False)),
+        )
+        max_posts = opts.resolved_max_posts()
 
         def fn(log, on_rate_limit=None):
             q.mark_running(job_id)
@@ -432,7 +436,7 @@ class SyncManager:
 
             from promptstudio.config import SAVED_DIR
             from promptstudio.scraping.sources import get_source
-            from promptstudio.scraping.sources.base import ScrapeOptions, SourceContext
+            from promptstudio.scraping.sources.base import SourceContext
 
             try:
                 source = get_source(source_name)
@@ -467,12 +471,9 @@ class SyncManager:
                 should_cancel=self.is_cancel_requested,
                 on_rate_limit=on_rate_limit,
             )
-            options = ScrapeOptions(
-                mode=mode,
-                deep=deep,
-                max_posts=max_posts,
-                include_videos=bool(include_videos),
-            )
+            # resolved_max_posts() turns the stored "no explicit limit" into the
+            # number the source runs with; everything else is already normalized.
+            options = replace(opts, max_posts=max_posts)
             try:
                 result = source.run(target, options, ctx)
             except Exception as exc:

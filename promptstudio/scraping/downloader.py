@@ -226,9 +226,6 @@ class InstagramDownloader:
             return "complete"
         return "incomplete"
 
-    def _post_already_archived(self, post, username: str = "") -> bool:
-        return self._post_archive_state(post, username=username) in ("complete", "deleted")
-
     def _backoff_seconds(self) -> int:
         n = max(1, self._consecutive_rate_limits)
         delay = RATE_LIMIT_BACKOFF_SEC * (2 ** (n - 1))
@@ -397,6 +394,11 @@ class InstagramDownloader:
         deep: bool = True,
     ) -> SyncResult:
         """Download posts from a single creator.
+
+        Takes **already-resolved** options. Callers coming from the API or the
+        queue go through `ScrapeOptions.normalize`, which is where the product
+        rule "latest without catch_up_only means a deep full walk" is applied.
+        By the time a request reaches here, a `latest` is a genuine catch-up.
 
         mode:
           - bounded: existing rank/scan/top-N path (default; used by following bulk)

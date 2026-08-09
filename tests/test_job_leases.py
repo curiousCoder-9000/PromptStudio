@@ -224,3 +224,79 @@ def test_sync_releases_the_lease_when_the_job_raises():
         assert LEASES.holder(INSTAGRAM) is None, "a crash must not strand the session"
     finally:
         LEASES.reset()
+
+
+def test_comfy_takes_the_comfy_lease_while_generating(make_photo, monkeypatch):
+    """COMFY was declared in jobs.py but never acquired — start() self-checked
+    `_status["running"]` instead, which is the race the lease exists to close.
+    """
+    import time
+
+    from promptstudio.comfy import client as comfy
+    from promptstudio.comfy.client import ComfyJobManager
+    from promptstudio.jobs import LEASES
+
+    rel, _ = make_photo(creator="leasetest", name="a.jpg")
+    held = threading.Event()
+    release = threading.Event()
+
+    def fake_queue(self, workflow, client_id):
+        held.set()
+        release.wait(5)
+        return "prompt-1"
+
+    monkeypatch.setattr(comfy, "upload_image_to_comfy", lambda *a, **k: "ref.jpg")
+    monkeypatch.setattr(ComfyJobManager, "_queue_prompt", fake_queue)
+    monkeypatch.setattr(
+        ComfyJobManager,
+        "_wait_for_images",
+        lambda self, pid, timeout_sec=600: [
+            {"filename": "o.png", "subfolder": "", "type": "output"}
+        ],
+    )
+    monkeypatch.setattr(ComfyJobManager, "_download_image", lambda self, m: b"\x89PNG")
+
+    LEASES.reset()
+    mgr = ComfyJobManager()
+    try:
+        assert mgr.start(source_rel=rel, positive="a", negative="b") is True
+        assert held.wait(5)
+        assert LEASES.holder(COMFY) == "comfy"
+    finally:
+        release.set()
+        for _ in range(150):
+            if LEASES.holder(COMFY) is None:
+                break
+            time.sleep(0.02)
+        assert LEASES.holder(COMFY) is None, "a finished job must release ComfyUI"
+        LEASES.reset()
+
+
+def test_comfy_refuses_and_explains_when_comfyui_is_held(make_photo):
+    from promptstudio.comfy.client import ComfyJobManager
+    from promptstudio.jobs import LEASES
+
+    rel, _ = make_photo(creator="leasetest", name="b.jpg")
+    LEASES.reset()
+    LEASES.acquire([COMFY], "someone_else")
+    try:
+        mgr = ComfyJobManager()
+        assert mgr.start(source_rel=rel, positive="a", negative="b") is False
+        assert "someone_else" in mgr.last_refusal
+    finally:
+        LEASES.reset()
+
+
+def test_sync_explains_which_holder_refused_it():
+    """The API turns last_refusal into the 409 body, so "busy" is attributable."""
+    from promptstudio.jobs import LEASES
+    from promptstudio.scraping.sync_manager import SyncManager
+
+    LEASES.reset()
+    LEASES.acquire([INSTAGRAM], "creator_queue")
+    try:
+        mgr = SyncManager()
+        assert mgr.start_job("saved", lambda log: None) is False
+        assert "creator_queue" in mgr.last_refusal
+    finally:
+        LEASES.reset()

@@ -37,17 +37,6 @@ class SyncCheckpoints:
     def get(self, username: str) -> Dict[str, Any]:
         return dict(self.load().get(username.lstrip("@").lower(), {}))
 
-    def should_skip_post(self, username: str, shortcode: str, post_id: str) -> bool:
-        """Skip if this post was already recorded as last downloaded (resume)."""
-        entry = self.get(username)
-        if not entry:
-            return False
-        if shortcode and entry.get("last_shortcode") == shortcode:
-            return True
-        if post_id and str(entry.get("last_post_id")) == str(post_id):
-            return True
-        return False
-
     def update(
         self,
         username: str,
