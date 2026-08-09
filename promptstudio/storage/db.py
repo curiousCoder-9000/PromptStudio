@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from promptstudio.config import (
     ARCHIVE_DB_FILE,
+    CLASSIFY_REJECT_MAX_TIER,
     EXCLUDED_FOLDERS,
     FTS_SEARCH,
     IMAGE_EXTENSIONS,
@@ -101,6 +102,65 @@ CREATE TABLE IF NOT EXISTS phashes (
 );
 CREATE INDEX IF NOT EXISTS idx_phashes_hash ON phashes(phash);
 """
+
+# Keep/reject verdicts from the media classifier. Its own table rather than
+# columns on `photos`, for the same reason as phashes: written by a separate
+# background pass, absent until that pass runs, and it would otherwise widen the
+# row every gallery query reads. It also keeps a clean distance from the
+# orphaned glam_* columns that 1cc0f44 left behind on pre-existing DBs.
+#
+# `creator` is denormalised so the sidebar counters are a single GROUP BY rather
+# than a join back to photos on every sidebar render.
+#
+# What is NOT here: the keep/reject string. Only `tier` is stored, and the
+# verdict is derived at query time against CLASSIFY_REJECT_MAX_TIER — so moving
+# the threshold re-thresholds the whole archive without re-running the model.
+_VERDICT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS media_verdicts (
+  rel_path       TEXT PRIMARY KEY,
+  creator        TEXT NOT NULL,
+  tier           INTEGER NOT NULL DEFAULT -1,
+  manual         TEXT,
+  reason         TEXT,
+  media_kind     TEXT,
+  verdict_source TEXT,
+  confidence     REAL,
+  prompt_version TEXT,
+  sheet_path     TEXT,
+  error          TEXT,
+  classified_at  TEXT,
+  duration_ms    INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_verdicts_creator ON media_verdicts(creator);
+CREATE INDEX IF NOT EXISTS idx_verdicts_tier ON media_verdicts(tier);
+CREATE INDEX IF NOT EXISTS idx_verdicts_version ON media_verdicts(prompt_version);
+"""
+
+# Effective verdict: a manual override always wins, a failed attempt is its own
+# state (so it is retryable and not silently counted as a keep), and everything
+# else falls out of the tier. Written once here and formatted into every query
+# that needs it — two copies of this CASE would drift.
+_VERDICT_CASE = (
+    "CASE WHEN v.manual IS NOT NULL THEN v.manual "
+    "WHEN v.rel_path IS NULL THEN 'unclassified' "
+    "WHEN v.tier < 0 THEN 'error' "
+    "WHEN v.tier <= {cut} THEN 'reject' "
+    "ELSE 'keep' END"
+)
+
+VERDICT_FILTERS = ("keep", "reject", "unclassified", "error", "unusable", "modest")
+
+# Creators with no verdict row at all still need every key present, or the
+# sidebar has to guard each counter individually.
+_EMPTY_VERDICT_COUNTS: Dict[str, int] = {
+    "keep_count": 0,
+    "reject_count": 0,
+    "unclassified_count": 0,
+    "error_count": 0,
+    "unusable_count": 0,
+    "modest_count": 0,
+    "stale_count": 0,
+}
 
 # Standalone rather than an external-content FTS table: the content table is
 # tiny, and standalone avoids rowid-sync triggers that silently rot if a write
@@ -260,6 +320,7 @@ class ArchiveIndex:
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._conn.executescript(_PHASH_SCHEMA)
+            self._conn.executescript(_VERDICT_SCHEMA)
             self._init_fts()
             self._migrate_identity_columns()
             self._migrate_deleted_posts()
@@ -495,6 +556,302 @@ class ArchiveIndex:
                 (normalize_rel_path(rel_path),),
             )
             self._conn.commit()
+
+    # ── keep/reject verdicts ─────────────────────────────────────────
+
+    @staticmethod
+    def _reject_cut(cut: Optional[int] = None) -> int:
+        """Highest tier still counted as a reject.
+
+        Read through a helper rather than closing over the module constant, so a
+        test (or a future per-creator override) can pass a different cut without
+        reimporting config.
+        """
+        return int(CLASSIFY_REJECT_MAX_TIER if cut is None else cut)
+
+    @staticmethod
+    def _verdict_row_to_dict(row: Optional[sqlite3.Row], cut: int) -> Dict[str, Any]:
+        if row is None:
+            return {}
+        tier = int(row["tier"] if row["tier"] is not None else -1)
+        manual = row["manual"]
+        if manual:
+            verdict = str(manual)
+        elif tier < 0:
+            verdict = "error"
+        else:
+            verdict = "reject" if tier <= cut else "keep"
+        return {
+            "rel_path": row["rel_path"],
+            "tier": tier,
+            "verdict": verdict,
+            "manual": manual or None,
+            "reason": row["reason"] or "",
+            "media_kind": row["media_kind"] or "",
+            "verdict_source": row["verdict_source"] or "",
+            "confidence": row["confidence"],
+            "prompt_version": row["prompt_version"] or "",
+            "sheet_path": row["sheet_path"] or None,
+            "error": row["error"] or None,
+            "classified_at": row["classified_at"] or "",
+            "duration_ms": row["duration_ms"],
+        }
+
+    def set_verdict(
+        self,
+        rel_path: str,
+        *,
+        creator: str = "",
+        tier: int = -1,
+        reason: str = "",
+        media_kind: str = "",
+        verdict_source: str = "",
+        confidence: Optional[float] = None,
+        prompt_version: Optional[str] = None,
+        sheet_path: Optional[str] = None,
+        error: Optional[str] = None,
+        duration_ms: Optional[int] = None,
+    ) -> None:
+        """Record one classify attempt. Upsert; the manual override survives.
+
+        A failed attempt is written too, with tier -1 and the reason in `error`.
+        Without that a timeout is indistinguishable from "never attempted", which
+        is what made the old error rows unfindable.
+        """
+        rel = normalize_rel_path(rel_path)
+        creator = (creator or rel.split("/", 1)[0]).strip().lstrip("@")
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO media_verdicts ("
+                "rel_path, creator, tier, reason, media_kind, verdict_source, "
+                "confidence, prompt_version, sheet_path, error, classified_at, "
+                "duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(rel_path) DO UPDATE SET "
+                "creator=excluded.creator, tier=excluded.tier, "
+                "reason=excluded.reason, media_kind=excluded.media_kind, "
+                "verdict_source=excluded.verdict_source, "
+                "confidence=excluded.confidence, "
+                "prompt_version=excluded.prompt_version, "
+                "sheet_path=excluded.sheet_path, error=excluded.error, "
+                "classified_at=excluded.classified_at, "
+                "duration_ms=excluded.duration_ms",
+                (
+                    rel,
+                    creator,
+                    int(tier),
+                    reason or None,
+                    media_kind or None,
+                    verdict_source or None,
+                    float(confidence) if confidence is not None else None,
+                    prompt_version or None,
+                    sheet_path or None,
+                    error or None,
+                    datetime.now(timezone.utc).isoformat(),
+                    int(duration_ms) if duration_ms is not None else None,
+                ),
+            )
+            self._conn.commit()
+
+    def get_verdict(self, rel_path: str, *, cut: Optional[int] = None) -> Dict[str, Any]:
+        rel = normalize_rel_path(rel_path)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM media_verdicts WHERE rel_path = ?", (rel,)
+            ).fetchone()
+        return self._verdict_row_to_dict(row, self._reject_cut(cut))
+
+    def set_manual_verdict(self, rel_path: str, value: Optional[str]) -> bool:
+        """Pin a file to keep/reject by hand, or clear back to the model's call.
+
+        Returns False when there is no verdict row yet — a manual call on an
+        unclassified file is a UI bug, not something to invent a tier for.
+        """
+        if value not in (None, "keep", "reject"):
+            raise ValueError(f"bad manual verdict: {value!r}")
+        rel = normalize_rel_path(rel_path)
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE media_verdicts SET manual = ? WHERE rel_path = ?",
+                (value, rel),
+            )
+            self._conn.commit()
+            return bool(cur.rowcount)
+
+    def verdicts_for(
+        self, rel_paths: Sequence[str], *, cut: Optional[int] = None
+    ) -> Dict[str, Dict[str, Any]]:
+        """Bulk fetch for annotating a gallery page. One query, not one per row."""
+        rels = [normalize_rel_path(p) for p in rel_paths if p]
+        if not rels:
+            return {}
+        cut_v = self._reject_cut(cut)
+        out: Dict[str, Dict[str, Any]] = {}
+        # SQLite caps host parameters (999 on older builds); a gallery page is
+        # well under that, but chunk anyway so a caller passing the whole
+        # archive degrades instead of raising.
+        with self._lock:
+            for start in range(0, len(rels), 400):
+                chunk = rels[start : start + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                rows = self._conn.execute(
+                    f"SELECT * FROM media_verdicts WHERE rel_path IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    out[row["rel_path"]] = self._verdict_row_to_dict(row, cut_v)
+        return out
+
+    def delete_verdict(self, rel_path: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM media_verdicts WHERE rel_path = ?",
+                (normalize_rel_path(rel_path),),
+            )
+            self._conn.commit()
+
+    def creator_verdict_counts(
+        self, *, cut: Optional[int] = None, stale_versions: Sequence[str] = ()
+    ) -> Dict[str, Dict[str, int]]:
+        """Per-creator keep/reject/unclassified counters for the sidebar.
+
+        `unusable` (tier 0) and `modest` (tier 1) are broken out of `reject` on
+        purpose: the 0 boundary is a quality gate anyone would accept, while the
+        1 boundary is a taste call that has never been measured. The review UI
+        lets you act on them separately, so the counts have to arrive separately.
+        """
+        cut_v = self._reject_cut(cut)
+        stale = [v for v in stale_versions if v]
+        stale_expr = "0"
+        params: List[Any] = []
+        if stale:
+            placeholders = ",".join("?" for _ in stale)
+            stale_expr = (
+                "CASE WHEN v.rel_path IS NOT NULL AND v.tier >= 0 AND "
+                f"IFNULL(v.prompt_version, '') NOT IN ({placeholders}) "
+                "THEN 1 ELSE 0 END"
+            )
+            params.extend(stale)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT p.creator AS creator, "
+                f"SUM(CASE WHEN {_VERDICT_CASE.format(cut=cut_v)} = 'keep' "
+                "THEN 1 ELSE 0 END) AS keep_count, "
+                f"SUM(CASE WHEN {_VERDICT_CASE.format(cut=cut_v)} = 'reject' "
+                "THEN 1 ELSE 0 END) AS reject_count, "
+                "SUM(CASE WHEN v.rel_path IS NULL THEN 1 ELSE 0 END) "
+                "AS unclassified_count, "
+                "SUM(CASE WHEN v.rel_path IS NOT NULL AND v.tier < 0 "
+                "AND v.manual IS NULL THEN 1 ELSE 0 END) AS error_count, "
+                "SUM(CASE WHEN v.tier = 0 AND v.manual IS NULL THEN 1 ELSE 0 END) "
+                "AS unusable_count, "
+                "SUM(CASE WHEN v.tier = 1 AND v.manual IS NULL THEN 1 ELSE 0 END) "
+                "AS modest_count, "
+                f"SUM({stale_expr}) AS stale_count "
+                "FROM photos p LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path "
+                "GROUP BY p.creator",
+                params,
+            ).fetchall()
+        return {
+            row["creator"]: {
+                "keep_count": int(row["keep_count"] or 0),
+                "reject_count": int(row["reject_count"] or 0),
+                "unclassified_count": int(row["unclassified_count"] or 0),
+                "error_count": int(row["error_count"] or 0),
+                "unusable_count": int(row["unusable_count"] or 0),
+                "modest_count": int(row["modest_count"] or 0),
+                "stale_count": int(row["stale_count"] or 0),
+            }
+            for row in rows
+        }
+
+    def list_unclassified(
+        self,
+        creator: str,
+        *,
+        include_videos: bool = True,
+        force: bool = False,
+        stale_versions: Sequence[str] = (),
+        retry_errors: bool = True,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Media for `creator` that a classify run should visit.
+
+        Indexed LEFT JOIN, not a directory walk: the old implementation listed
+        the folder and issued one `get_glam_score` per filename, which is O(n)
+        queries to answer a question SQLite can answer in one.
+
+        `force` takes everything. Otherwise: never-classified, plus failed
+        attempts (`retry_errors`), plus anything judged by a prompt version no
+        longer in `stale_versions` — which is what makes "Re-score outdated"
+        cheap instead of a full-archive rescore.
+        """
+        creator = (creator or "").strip().lstrip("@")
+        if not creator or creator in EXCLUDED_FOLDERS or creator.startswith((".", "_")):
+            return []
+
+        exts = MEDIA_EXTENSIONS if include_videos else IMAGE_EXTENSIONS
+        ext_clause = " OR ".join("LOWER(p.filename) LIKE ?" for _ in exts)
+        params: List[Any] = [creator]
+        params.extend(f"%{ext}" for ext in exts)
+        where = ["p.creator = ?", f"({ext_clause})"]
+
+        if not force:
+            conds = ["v.rel_path IS NULL"]
+            if retry_errors:
+                conds.append("v.tier < 0")
+            stale = [v for v in stale_versions if v]
+            if stale:
+                placeholders = ",".join("?" for _ in stale)
+                conds.append(
+                    "(v.tier >= 0 AND IFNULL(v.prompt_version, '') NOT IN "
+                    f"({placeholders}))"
+                )
+            where.append("(" + " OR ".join(conds) + ")")
+            if stale:
+                params.extend(stale)
+
+        sql = (
+            "SELECT p.rel_path, p.creator, p.filename FROM photos p "
+            "LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path "
+            f"WHERE {' AND '.join(where)} ORDER BY p.filename ASC"
+        )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+
+        pending: List[Dict[str, Any]] = []
+        for row in rows:
+            full = os.path.join(self.base_dir, row["creator"], row["filename"])
+            # The index can outlive the file (external delete). Skipping here is
+            # cheaper than a failed classify attempt per ghost row.
+            if not os.path.isfile(full):
+                continue
+            pending.append(
+                {
+                    "rel_path": row["rel_path"],
+                    "creator": row["creator"],
+                    "filename": row["filename"],
+                    "full_path": full,
+                    "is_video": row["filename"].lower().endswith(VIDEO_EXTENSIONS),
+                }
+            )
+        return pending
+
+    def tier_histogram(self) -> Dict[str, int]:
+        """Archive-wide tier distribution for /api/insights.
+
+        A classifier that emits one value for most of the archive carries almost
+        no information — that is how the v2 prompt shipped at 85% one value
+        without anyone noticing. This makes it visible without a labelled set.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT tier, COUNT(*) AS c FROM media_verdicts GROUP BY tier"
+            ).fetchall()
+        return {str(int(row["tier"])): int(row["c"]) for row in rows}
 
     def prompt_import_done(self) -> bool:
         return self._meta_get(_PROMPTS_IMPORTED_KEY) == "1"
@@ -826,10 +1183,22 @@ class ArchiveIndex:
             )
             self._conn.commit()
 
-    def delete_photo(self, rel_path: str) -> None:
+    def delete_photo(self, rel_path: str, *, drop_verdict: bool = True) -> None:
+        """Drop a photo from the index.
+
+        `drop_verdict=False` for a *soft* delete. Trashing 40 rejects and hitting
+        Undo must give back 40 rejects, not 40 unclassified files that need the
+        whole vision pass run again — and the verdict row is invisible while the
+        photo row is gone, because every verdict query joins out from `photos`.
+        Permanent removal (`TrashStore.purge`) is what really drops it.
+        """
         rel = normalize_rel_path(rel_path)
         with self._lock:
             self._conn.execute("DELETE FROM photos WHERE rel_path = ?", (rel,))
+            if drop_verdict:
+                self._conn.execute(
+                    "DELETE FROM media_verdicts WHERE rel_path = ?", (rel,)
+                )
             self._conn.commit()
 
     def get_photo_source(self, rel_path: str) -> str:
@@ -1113,7 +1482,7 @@ class ArchiveIndex:
         creator = row["creator"]
         filename = row["filename"]
         keys = row.keys()
-        return {
+        photo = {
             "filename": filename,
             "creator": creator,
             "rel_path": rel,
@@ -1127,11 +1496,39 @@ class ArchiveIndex:
             "post_id": row["post_id"] if "post_id" in keys else None,
             "shortcode": row["shortcode"] if "shortcode" in keys else None,
         }
+        # Only present when the caller joined media_verdicts (query_photos does;
+        # rebuild's internal row reads do not).
+        if "v_verdict" in keys and row["v_verdict"] != "unclassified":
+            photo["verdict"] = {
+                "verdict": row["v_verdict"],
+                "tier": int(row["v_tier"] if row["v_tier"] is not None else -1),
+                "manual": row["v_manual"] or None,
+                "reason": row["v_reason"] or "",
+                "media_kind": row["v_media_kind"] or "",
+                "verdict_source": row["v_source"] or "",
+                "confidence": row["v_confidence"],
+                "prompt_version": row["v_prompt_version"] or "",
+                "sheet_path": row["v_sheet_path"] or None,
+                "error": row["v_error"] or None,
+                "classified_at": row["v_classified_at"] or "",
+            }
+        return photo
 
-    def list_creators(self) -> List[Dict[str, Any]]:
+    def list_creators(self, *, with_verdicts: bool = True) -> List[Dict[str, Any]]:
         from promptstudio.scraping.checkpoints import SyncCheckpoints
 
         sync = SyncCheckpoints().load()
+        counts: Dict[str, Dict[str, int]] = {}
+        if with_verdicts:
+            try:
+                from promptstudio.scraping.media_classifier import (
+                    active_prompt_versions,
+                )
+
+                stale_versions = active_prompt_versions()
+            except Exception:
+                stale_versions = ()
+            counts = self.creator_verdict_counts(stale_versions=stale_versions)
         with self._lock:
             rows = self._conn.execute(
                 "SELECT creator, "
@@ -1153,6 +1550,7 @@ class ArchiveIndex:
                     "cover_thumb_url": thumb_url(f"{name}/{cover}"),
                     "last_synced_at": entry.get("updated_at") or None,
                     "synced_count": entry.get("downloaded_count"),
+                    **(counts.get(name) or _EMPTY_VERDICT_COUNTS),
                 }
             )
         return creators
@@ -1194,28 +1592,46 @@ class ArchiveIndex:
         unanalyzed: bool = False,
         favorite_only: bool = False,
         media_type: Optional[str] = None,
+        verdict: Optional[str] = None,
         sort: str = "name",
         limit: Optional[int] = None,
         offset: int = 0,
+        reject_cut: Optional[int] = None,
     ) -> Tuple[List[Dict[str, Any]], int]:
         where: List[str] = []
         params: List[Any] = []
-
+        # Every predicate is table-qualified because of the media_verdicts join:
+        # both tables carry `rel_path` and `creator`, so a bare `creator = ?`
+        # is an "ambiguous column" error rather than a silently wrong answer.
         if creator:
-            where.append("creator = ?")
+            where.append("p.creator = ?")
             params.append(creator)
         if favorite_only:
-            where.append("favorite = 1")
+            where.append("p.favorite = 1")
         if unanalyzed:
-            where.append("has_prompt = 0")
+            where.append("p.has_prompt = 0")
         if media_type == "video":
-            video_likes = " OR ".join("LOWER(filename) LIKE ?" for _ in VIDEO_EXTENSIONS)
+            video_likes = " OR ".join("LOWER(p.filename) LIKE ?" for _ in VIDEO_EXTENSIONS)
             where.append(f"({video_likes})")
             params.extend(f"%{ext}" for ext in VIDEO_EXTENSIONS)
         elif media_type == "photo":
-            photo_likes = " OR ".join("LOWER(filename) LIKE ?" for _ in IMAGE_EXTENSIONS)
+            photo_likes = " OR ".join("LOWER(p.filename) LIKE ?" for _ in IMAGE_EXTENSIONS)
             where.append(f"({photo_likes})")
             params.extend(f"%{ext}" for ext in IMAGE_EXTENSIONS)
+
+        cut = self._reject_cut(reject_cut)
+        verdict_case = _VERDICT_CASE.format(cut=cut)
+        if verdict in ("keep", "reject", "unclassified", "error"):
+            where.append(f"{verdict_case} = ?")
+            params.append(verdict)
+        elif verdict == "unusable":
+            # Tier 0 alone: no woman / man in frame / poster / unusable quality.
+            # Split out from `reject` so a cautious cleanup pass can act on the
+            # boundary that is a quality gate, not a taste call.
+            where.append("v.manual IS NULL AND v.tier = 0")
+        elif verdict == "modest":
+            where.append("v.manual IS NULL AND v.tier = 1")
+
         if search:
             q = search.lower().strip()
             like = f"%{q}%"
@@ -1233,14 +1649,14 @@ class ArchiveIndex:
                 # The index is still maintained so this can flip when the
                 # archive is large enough to change the answer.
                 where.append(
-                    "(LOWER(creator) LIKE ? OR LOWER(filename) LIKE ? OR rel_path IN "
+                    "(LOWER(p.creator) LIKE ? OR LOWER(p.filename) LIKE ? OR p.rel_path IN "
                     "(SELECT rel_path FROM prompts_fts WHERE prompts_fts MATCH ?))"
                 )
                 params.extend([like, like, fts_query])
             else:
                 where.append(
-                    "(LOWER(creator) LIKE ? OR LOWER(filename) LIKE ? "
-                    "OR IFNULL(prompt_search, '') LIKE ?)"
+                    "(LOWER(p.creator) LIKE ? OR LOWER(p.filename) LIKE ? "
+                    "OR IFNULL(p.prompt_search, '') LIKE ?)"
                 )
                 params.extend([like, like, like])
 
@@ -1251,29 +1667,46 @@ class ArchiveIndex:
         # posted = Instagram/post chronology via mtime, falling back to added_at
         # (file birth/ctime at index time) when mtime is missing or zero.
         if sort == "newest":
-            order = "ORDER BY IFNULL(added_at, mtime) DESC, filename ASC"
+            order = "ORDER BY IFNULL(p.added_at, p.mtime) DESC, p.filename ASC"
         elif sort == "oldest":
-            order = "ORDER BY IFNULL(added_at, mtime) ASC, filename ASC"
+            order = "ORDER BY IFNULL(p.added_at, p.mtime) ASC, p.filename ASC"
         elif sort == "posted":
             order = (
                 "ORDER BY CASE "
-                "WHEN mtime IS NOT NULL AND mtime > 0 THEN mtime "
-                "ELSE IFNULL(added_at, 0) END DESC, filename ASC"
+                "WHEN p.mtime IS NOT NULL AND p.mtime > 0 THEN p.mtime "
+                "ELSE IFNULL(p.added_at, 0) END DESC, p.filename ASC"
             )
         elif sort == "posted_oldest":
             order = (
                 "ORDER BY CASE "
-                "WHEN mtime IS NOT NULL AND mtime > 0 THEN mtime "
-                "ELSE IFNULL(added_at, 0) END ASC, filename ASC"
+                "WHEN p.mtime IS NOT NULL AND p.mtime > 0 THEN p.mtime "
+                "ELSE IFNULL(p.added_at, 0) END ASC, p.filename ASC"
+            )
+        elif sort == "tier":
+            # Harshest first: this is the review order, so the files most likely
+            # to be deleted are the ones you see without scrolling. Errors (-1)
+            # sort after tier 0 rather than before it — an unreadable file is a
+            # retry, not a verdict.
+            order = (
+                "ORDER BY CASE WHEN v.tier IS NULL THEN 9 WHEN v.tier < 0 THEN 8 "
+                "ELSE v.tier END ASC, p.filename ASC"
             )
         else:
-            order = "ORDER BY creator ASC, filename ASC"
+            order = "ORDER BY p.creator ASC, p.filename ASC"
 
+        join = " FROM photos p LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path"
+        select_cols = (
+            "p.*, v.tier AS v_tier, v.manual AS v_manual, v.reason AS v_reason, "
+            "v.media_kind AS v_media_kind, v.verdict_source AS v_source, "
+            "v.confidence AS v_confidence, v.prompt_version AS v_prompt_version, "
+            "v.sheet_path AS v_sheet_path, v.error AS v_error, "
+            f"v.classified_at AS v_classified_at, {verdict_case} AS v_verdict"
+        )
         with self._lock:
             total = self._conn.execute(
-                f"SELECT COUNT(*) AS c FROM photos{where_sql}", params
+                f"SELECT COUNT(*) AS c{join}{where_sql}", params
             ).fetchone()["c"]
-            sql = f"SELECT * FROM photos{where_sql} {order}"
+            sql = f"SELECT {select_cols}{join}{where_sql} {order}"
             page_params = list(params)
             if limit is not None:
                 sql += " LIMIT ? OFFSET ?"

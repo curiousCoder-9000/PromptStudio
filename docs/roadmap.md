@@ -90,7 +90,7 @@ Agent map: [context.md](context.md). Phased plan: **scrape → organize → anal
 | Paginated gallery (`offset` / `limit` + infinite scroll) | Done |
 | SQLite `archive.db` photo catalog (list/filter/sort) | Done |
 | In-memory write-through prompt + favorites caches | Done |
-| Per-creator **Classify unscored** job + Rejects review/delete UI | Done |
+| Per-creator **Classify unscored** job + Rejects review/delete UI | Superseded — removed in `1cc0f44`, rebuilt as Phase 12c |
 
 ---
 
@@ -204,6 +204,40 @@ isn't interruptible, and abandoning it mid-write would poison the prompt cache.
 Navigation state is deliberately **not** restored — selected creator, selection,
 and reject-review mode all start clean, so a refresh can't drop you into a
 destructive mode.
+
+---
+
+## Phase 12c — Keep/reject classification, rebuilt ✅
+
+**Goal:** get the per-creator "classify this folder, then let me delete the
+failures" loop back, without re-importing the flaw that killed the first one.
+
+| Deliverable | Status |
+|-------------|--------|
+| `media_verdicts` table — stores the **0–4 tier only**; keep/reject derived at query time | Done |
+| `scraping/media_classifier.py` — ordinal photos + whole-timeline reel contact sheets | Done |
+| `scraping/classify_job.py` — `ollama` lease, cooperative cancel, run journal | Done |
+| APIs: `/api/classify/{start,status,cancel,verdict,sheet}`, `?verdict=` on `/api/photos` | Done |
+| Sidebar keep/reject/to-do meter + job chip | Done |
+| Review mode: verdict badges, reject tinting, `Unusable`/`Modest` split, select-non-favourites | Done |
+| Triage lightbox: tier, reason, contact sheet, `K`/`R`/`X` keys, manual override | Done |
+| Per-run tier histogram + `top_tier_share` in the journal and `/api/insights` | Done |
+
+Two properties make this different from the Phase 5 version, and both are the
+direct lesson of its removal:
+
+1. **Only the measurement is stored.** `CLASSIFY_REJECT_MAX_TIER` re-thresholds
+   the whole archive at query time. The old `glam_score` baked the policy into a
+   column, so six changes of mind cost six full-archive rescores and produced six
+   incomparable archives.
+2. **The distribution is surfaced.** `top_tier_share` per run and archive-wide.
+   The v2 prompt shipped at 85% on one value — a filter that is a no-op — and
+   nothing was measuring it.
+
+Scope is deliberately **triage, not ranking**. "Show me my best 50" still needs
+the learned-preference work in `design_sexy_score_v2.md`; the manual-override
+column here is what produces the labelled pairs that design needs. See
+[design_media_classifier.md](design_media_classifier.md).
 
 ---
 

@@ -76,6 +76,10 @@ def clean_archive():
         # clears them — without this they leak between tests.
         index._conn.execute("DELETE FROM prompts")
         index._conn.execute("DELETE FROM phashes")
+        # Verdicts deliberately survive a soft delete, so wiping the archive
+        # directory does not clear them either — without this a stale keep/reject
+        # leaks into the next test's counters.
+        index._conn.execute("DELETE FROM media_verdicts")
         if index.fts_enabled:
             index._conn.execute("DELETE FROM prompts_fts")
         index._conn.execute(

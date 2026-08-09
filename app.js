@@ -35,6 +35,13 @@ const state = {
     batchPollTimer: null,
     // Tracks the running → stopped transition so completion is announced once
     batchWasRunning: false,
+    classifyPollTimer: null,
+    classifyStatus: null,
+    // Review mode is deliberately NOT in PREF_FIELDS: a refresh must never drop
+    // you into a delete-oriented mode. Same rule as selection and select mode.
+    reviewMode: false,
+    verdictFilter: 'reject',
+    tierLabels: null,
     healthPollTimer: null,
     photoOffset: 0,
     photoLimit: 60,
@@ -226,6 +233,41 @@ const elements = {
     batchJobChipSub: document.getElementById('batchJobChipSub'),
     batchJobChipFill: document.getElementById('batchJobChipFill'),
     batchJobChipCancel: document.getElementById('batchJobChipCancel'),
+    // Classify job chip — same ids-by-convention shape, so renderJobChip works
+    classifyJobChip: document.getElementById('classifyJobChip'),
+    classifyJobChipIcon: document.getElementById('classifyJobChipIcon'),
+    classifyJobChipTitle: document.getElementById('classifyJobChipTitle'),
+    classifyJobChipSub: document.getElementById('classifyJobChipSub'),
+    classifyJobChipFill: document.getElementById('classifyJobChipFill'),
+    classifyJobChipCancel: document.getElementById('classifyJobChipCancel'),
+    // Sidebar classify section
+    verdictMeter: document.getElementById('verdictMeter'),
+    verdictMeterKeep: document.getElementById('verdictMeterKeep'),
+    verdictMeterReject: document.getElementById('verdictMeterReject'),
+    verdictMeterTodo: document.getElementById('verdictMeterTodo'),
+    verdictMeterLegend: document.getElementById('verdictMeterLegend'),
+    classifyCreatorBtn: document.getElementById('classifyCreatorBtn'),
+    reviewRejectsBtn: document.getElementById('reviewRejectsBtn'),
+    rescoreStaleBtn: document.getElementById('rescoreStaleBtn'),
+    cancelClassifyBtn: document.getElementById('cancelClassifyBtn'),
+    // Review mode strip
+    reviewBar: document.getElementById('reviewBar'),
+    reviewBarTitle: document.getElementById('reviewBarTitle'),
+    reviewBarFilters: document.getElementById('reviewBarFilters'),
+    reviewBarCount: document.getElementById('reviewBarCount'),
+    reviewSelectAllBtn: document.getElementById('reviewSelectAllBtn'),
+    reviewDeleteBtn: document.getElementById('reviewDeleteBtn'),
+    reviewExitBtn: document.getElementById('reviewExitBtn'),
+    // Triage block in the lightbox inspector
+    triageBlock: document.getElementById('triageBlock'),
+    triageTierChip: document.getElementById('triageTierChip'),
+    triageMeta: document.getElementById('triageMeta'),
+    triageReason: document.getElementById('triageReason'),
+    triageSheetWrap: document.getElementById('triageSheetWrap'),
+    triageSheet: document.getElementById('triageSheet'),
+    triageKeepBtn: document.getElementById('triageKeepBtn'),
+    triageRejectBtn: document.getElementById('triageRejectBtn'),
+    triageAutoBtn: document.getElementById('triageAutoBtn'),
     batchPromptBtn: document.getElementById('batchPromptBtn'),
     unanalyzedFilterBtn: document.getElementById('unanalyzedFilterBtn'),
     favoritesFilterBtn: document.getElementById('favoritesFilterBtn'),
@@ -386,6 +428,7 @@ async function initApp() {
     // Resume job chips if work is mid-flight — jobs live on the server, so a
     // browser refresh must not orphan a running batch/scrape.
     pollBatchStatus();
+    pollClassifyStatus();
     // Restore scrape/sync chip after refresh (queue lives on the server)
     await hydrateScrapeUiFromServer();
     if (!state.healthPollTimer) {
@@ -671,6 +714,9 @@ async function fetchCreators() {
         elements.creatorCount.textContent = state.creators.length;
         renderCreatorList();
         populateUploadCreators();
+        // Verdict counters ride along on /api/creators, so the review strip's
+        // chip counts refresh whenever the sidebar does.
+        if (state.reviewMode) updateReviewBar();
     } catch (err) {
         console.error('Error fetching creators:', err);
     }
@@ -710,7 +756,14 @@ async function fetchPhotos({ append = false } = {}) {
             params.append('favorite', '1');
         }
         params.append('media_type', state.mediaType || 'all');
-        params.append('sort', state.sortMode || 'name');
+        if (state.reviewMode && state.verdictFilter) {
+            params.append('verdict', state.verdictFilter);
+            // Harshest first while triaging — the files most likely to be
+            // deleted should be the ones on screen without scrolling.
+            params.append('sort', 'tier');
+        } else {
+            params.append('sort', state.sortMode || 'name');
+        }
         params.append('offset', String(requestOffset));
         params.append('limit', String(state.photoLimit));
 
@@ -743,6 +796,9 @@ async function fetchPhotos({ append = false } = {}) {
             if (!state.photos.length) {
                 elements.emptyState.style.display = 'flex';
             }
+            // photoTotal is only known once the page lands, and the review
+            // strip prints it.
+            if (state.reviewMode) updateReviewBar();
         }
     }
 }
@@ -1101,6 +1157,13 @@ function togglePhotoSelection(relPath, selected) {
 function updateBulkBar() {
     const count = state.selectedPaths.size;
     if (!elements.bulkBar) return;
+    // Review mode owns its own action strip; two floating bars stacked on each
+    // other was the old behaviour and it hid the one that mattered.
+    if (state.reviewMode) {
+        elements.bulkBar.style.display = 'none';
+        updateReviewBar();
+        return;
+    }
     if (!state.selectMode || count === 0) {
         elements.bulkBar.style.display = 'none';
         return;
@@ -1150,13 +1213,20 @@ function renderCreatorList() {
     });
     elements.creatorList.appendChild(allItem);
 
+    const classifySt = state.classifyStatus;
+    const classifyRunning = !!(classifySt && classifySt.running);
+
     const filtered = state.creators.filter(c => !q || c.name.toLowerCase().includes(q));
     filtered.forEach(c => {
         const item = document.createElement('div');
         item.className = `creator-item ${state.selectedCreator === c.name ? 'active' : ''}`;
+        // Lets the classify poll patch one row's pill instead of re-rendering
+        // the sidebar (which would refetch creator style every 3 seconds).
+        item.dataset.creator = c.name;
         item.innerHTML = `
             <span class="creator-name">@${escapeHtml(c.name)}${syncBadgeHtml(c)}</span>
             <span style="display:inline-flex;align-items:center;gap:6px;">
+                ${rejectPillHtml(c, classifyRunning && classifySt.creator === c.name ? classifySt : null)}
                 <span class="creator-badge">${escapeHtml(c.photo_count)}</span>
             </span>
         `;
@@ -1177,6 +1247,22 @@ function renderCreatorList() {
         elements.creatorList.appendChild(item);
     });
     updateCreatorStylePanel();
+}
+
+/**
+ * Sidebar pill: live progress while this creator is being classified, then the
+ * reject count if there is anything to clean up. Nothing at all when the pile
+ * is empty — a "0" on every row is noise, and its absence is the signal.
+ */
+function rejectPillHtml(creator, runningStatus) {
+    if (runningStatus) {
+        const done = Number(runningStatus.completed) || 0;
+        const total = Number(runningStatus.total) || 0;
+        return `<span class="creator-reject-pill running" title="Classifying…">${done}/${total}</span>`;
+    }
+    const rejects = Number(creator.reject_count) || 0;
+    if (!rejects) return '';
+    return `<span class="creator-reject-pill" title="${rejects} reject${rejects === 1 ? '' : 's'} to review">${rejects}</span>`;
 }
 
 function syncBadgeHtml(creator) {
@@ -1281,6 +1367,7 @@ async function updateCreatorStylePanel() {
     }
     elements.creatorStylePanel.style.display = 'flex';
     updateSyncLatestButtonUi();
+    updateClassifyPanelUi();
     elements.creatorStylePrefix.textContent = 'Loading…';
     elements.creatorStyleTerms.innerHTML = '';
     // Clicking through creators quickly would otherwise let a slow earlier
@@ -1382,7 +1469,10 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
         const index = sliceStart + i;
         const card = document.createElement('div');
         const selected = state.selectedPaths.has(p.rel_path);
-        card.className = `photo-card${state.selectMode ? ' select-mode' : ''}${selected ? ' selected' : ''}${p.favorite ? ' is-favorite' : ''}`;
+        // Reject cards are tinted and desaturated so the grid scans without
+        // reading a single badge — only in review mode, where that is the job.
+        const verdictCls = verdictCardClass(p);
+        card.className = `photo-card${state.selectMode ? ' select-mode' : ''}${selected ? ' selected' : ''}${p.favorite ? ' is-favorite' : ''}${verdictCls}`;
         card.dataset.relPath = p.rel_path;
         const imgSrc = p.thumb_url || p.url;
         const status = promptStatusMeta(p);
@@ -1416,6 +1506,7 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
                         : bottomHint}
                 </div>
             </div>
+            ${verdictBadgeHtml(p)}
         `;
 
         card.querySelector('.card-trash-btn').addEventListener('click', (e) => {
@@ -1765,6 +1856,9 @@ function openLightbox(index) {
 
     resetPromptPanel();
     updateFavoriteButton(photo);
+    // Triage sits above both inspector modes, so photos and reels adjudicate
+    // the same way. resetPromptPanel() runs first and does not touch it.
+    renderTriageBlock(photo);
     state.compareMode = false;
     setCompareMode(false);
     elements.lightboxModal.style.display = 'flex';
@@ -3303,6 +3397,8 @@ function setupEventListeners() {
         });
     }
 
+    setupClassifyListeners();
+
     // Lightbox Actions
     elements.lightboxDeleteBtn.addEventListener('click', () => {
         if (state.lightboxIndex !== -1) {
@@ -3626,6 +3722,14 @@ function setupEventListeners() {
             }
 
             if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+                // Triage shortcuts come first while reviewing: K/R/X are the
+                // whole point of the mode, and 'c' (copy prompt) would
+                // otherwise be the only letter doing real work in a pile of
+                // forty rejects.
+                if (handleTriageKey(e)) {
+                    e.preventDefault();
+                    return;
+                }
                 const key = e.key.toLowerCase();
                 if (key === 'g') {
                     e.preventDefault();
@@ -4787,3 +4891,612 @@ async function startBatchAnalyze() {
     }
 }
 
+
+// ─────────────────────────────────────────────────────────────────────
+// Keep/reject classification: sidebar section, job chip, review mode,
+// and the triage panel in the lightbox.
+//
+// The model reports a 0-4 exposure tier; the *server* decides which tiers
+// are rejects (CLASSIFY_REJECT_MAX_TIER) and sends `verdict` alongside it.
+// Nothing here re-derives that — one threshold, one owner.
+// ─────────────────────────────────────────────────────────────────────
+
+const TIER_LABEL_FALLBACK = {
+    '-1': 'Not classified',
+    '0': 'Unusable',
+    '1': 'Fully modest',
+    '2': 'Normal fashion',
+    '3': 'Revealing daywear',
+    '4': 'Swim / lingerie'
+};
+
+// Order matters: it is the order of the chips in the review strip.
+const REVIEW_FILTERS = ['reject', 'unusable', 'modest', 'keep', 'unclassified'];
+
+function tierLabel(tier) {
+    const key = String(tier);
+    const labels = state.tierLabels || TIER_LABEL_FALLBACK;
+    return labels[key] || TIER_LABEL_FALLBACK[key] || 'Unknown';
+}
+
+function verdictCardClass(photo) {
+    if (!state.reviewMode) return '';
+    const v = photo && photo.verdict;
+    if (!v) return ' verdict-none';
+    if (v.verdict === 'reject') return ' verdict-reject';
+    if (v.verdict === 'error') return ' verdict-error';
+    return ' verdict-keep';
+}
+
+/**
+ * Corner pill on a card. Shown quietly outside review mode and prominently
+ * inside it — the same information, weighted to the task at hand.
+ */
+function verdictBadgeHtml(photo) {
+    const v = photo && photo.verdict;
+    if (!v) return '';
+    const quiet = state.reviewMode ? '' : ' quiet';
+    const manual = v.manual
+        ? '<i class="fa-solid fa-hand-pointer verdict-pill-manual" title="Set by hand"></i> '
+        : '';
+    if (v.verdict === 'error') {
+        return `<span class="verdict-pill error${quiet}" title="${escapeHtml(v.error || 'Classify failed')}">
+            <i class="fa-solid fa-triangle-exclamation"></i> Error</span>`;
+    }
+    const isReject = v.verdict === 'reject';
+    const title = `${tierLabel(v.tier)}${v.reason ? ' — ' + v.reason : ''}`;
+    // Rejects name *why* (unusable vs modest are acted on separately); keeps
+    // show the tier, where the number is the interesting part. "T0" on both
+    // told you nothing you could act on.
+    const face = isReject
+        ? (v.tier === 0 ? 'Unusable' : v.tier === 1 ? 'Modest' : 'Reject')
+        : `T${Number(v.tier)}`;
+    return `<span class="verdict-pill ${isReject ? 'reject' : 'keep'}${quiet}" title="${escapeHtml(title)}">
+        ${manual}<i class="fa-solid ${isReject ? 'fa-ban' : 'fa-check'}"></i> ${escapeHtml(face)}</span>`;
+}
+
+// ── sidebar panel ────────────────────────────────────────────────────
+
+function updateClassifyPanelUi() {
+    const creator = state.selectedCreator;
+    const meta = selectedCreatorMeta();
+    const st = state.classifyStatus;
+    const runningHere = !!(st && st.running && st.creator === creator);
+    const runningElsewhere = !!(st && st.running && st.creator && st.creator !== creator);
+
+    const total = meta ? Number(meta.photo_count) || 0 : 0;
+    const keep = meta ? Number(meta.keep_count) || 0 : 0;
+    const reject = meta ? Number(meta.reject_count) || 0 : 0;
+    const todo = meta ? Number(meta.unclassified_count) || 0 : 0;
+    const stale = meta ? Number(meta.stale_count) || 0 : 0;
+    const pct = (n) => (total > 0 ? (n / total) * 100 : 0);
+
+    if (elements.verdictMeterKeep) elements.verdictMeterKeep.style.width = `${pct(keep)}%`;
+    if (elements.verdictMeterReject) elements.verdictMeterReject.style.width = `${pct(reject)}%`;
+    if (elements.verdictMeterTodo) elements.verdictMeterTodo.style.width = `${pct(todo)}%`;
+    if (elements.verdictMeter) elements.verdictMeter.classList.toggle('running', runningHere);
+
+    if (elements.verdictMeterLegend) {
+        if (!creator) {
+            elements.verdictMeterLegend.textContent = '—';
+        } else if (runningHere) {
+            elements.verdictMeterLegend.textContent =
+                `Classifying ${st.completed}/${st.total} · keep ${st.kept || 0} · reject ${st.rejected || 0}` +
+                (st.failed ? ` · err ${st.failed}` : '');
+        } else if (runningElsewhere) {
+            elements.verdictMeterLegend.textContent = `Job running on @${st.creator}…`;
+        } else if (!keep && !reject && !todo) {
+            elements.verdictMeterLegend.textContent = 'Nothing indexed yet';
+        } else {
+            const parts = [`${keep} keep`, `${reject} reject`];
+            if (todo) parts.push(`${todo} to do`);
+            elements.verdictMeterLegend.textContent = parts.join(' · ');
+        }
+    }
+
+    // Why a button is disabled is more useful than that it is disabled.
+    let blockedWhy = '';
+    if (!creator) blockedWhy = 'Select a creator first';
+    else if (runningHere) blockedWhy = 'Already classifying this creator';
+    else if (runningElsewhere) blockedWhy = `Classify is running on @${st.creator}`;
+    else if (state.ollamaOnline === false) blockedWhy = 'Ollama is offline';
+
+    if (elements.classifyCreatorBtn) {
+        const btn = elements.classifyCreatorBtn;
+        btn.disabled = Boolean(blockedWhy);
+        btn.title = blockedWhy || 'Score photos and reels with the vision keep/reject filter';
+        if (runningHere) {
+            btn.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Classifying ${st.completed}/${st.total}`;
+        } else if (todo > 0) {
+            btn.innerHTML = `<i class="fa-solid fa-wand-sparkles"></i> Classify ${todo} unclassified`;
+        } else if (total > 0) {
+            btn.innerHTML = '<i class="fa-solid fa-rotate"></i> Re-classify everything';
+            btn.title = blockedWhy || 'Everything is classified — this re-runs the whole creator';
+        } else {
+            btn.innerHTML = '<i class="fa-solid fa-wand-sparkles"></i> Classify';
+        }
+    }
+    if (elements.reviewRejectsBtn) {
+        // Hidden at zero rather than disabled: an always-present "Review 0" is
+        // noise, and its absence is itself the "nothing to clean" signal.
+        elements.reviewRejectsBtn.style.display = reject > 0 ? '' : 'none';
+        elements.reviewRejectsBtn.innerHTML =
+            `<i class="fa-solid fa-filter-circle-xmark"></i> Review ${reject} reject${reject === 1 ? '' : 's'}`;
+    }
+    if (elements.rescoreStaleBtn) {
+        // Only appears after a prompt-version bump leaves older verdicts behind.
+        elements.rescoreStaleBtn.style.display = stale > 0 ? '' : 'none';
+        elements.rescoreStaleBtn.disabled = Boolean(blockedWhy);
+        elements.rescoreStaleBtn.title = blockedWhy || 'Re-classify only what an older prompt judged';
+        elements.rescoreStaleBtn.innerHTML =
+            `<i class="fa-solid fa-clock-rotate-left"></i> Re-score outdated (${stale})`;
+    }
+    if (elements.cancelClassifyBtn) {
+        elements.cancelClassifyBtn.style.display = runningHere ? '' : 'none';
+        elements.cancelClassifyBtn.disabled = Boolean(st && st.cancel_requested);
+    }
+}
+
+/**
+ * Live progress on one sidebar row. A full renderCreatorList() would refetch
+ * creator style on every 3s poll, so patch the single pill instead.
+ */
+function patchCreatorRejectPill(creator, status) {
+    if (!creator || !elements.creatorList) return;
+    const row = elements.creatorList.querySelector(
+        `.creator-item[data-creator="${cssEscape(creator)}"]`
+    );
+    if (!row) return;
+    const meta = state.creators.find((c) => c.name === creator) || { name: creator };
+    const html = rejectPillHtml(meta, status);
+    const existing = row.querySelector('.creator-reject-pill');
+    if (existing) {
+        if (html) existing.outerHTML = html;
+        else existing.remove();
+    } else if (html) {
+        row.querySelector('.creator-badge')?.insertAdjacentHTML('beforebegin', html);
+    }
+}
+
+// ── job lifecycle ────────────────────────────────────────────────────
+
+async function pollClassifyStatus() {
+    try {
+        const res = await fetch('/api/classify/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        const wasRunning = !!(state.classifyStatus && state.classifyStatus.running);
+        state.classifyStatus = data;
+        if (data.tier_labels) state.tierLabels = data.tier_labels;
+        updateClassifyPanelUi();
+
+        if (data.running) {
+            renderJobChip('classify', {
+                active: true,
+                title: data.cancel_requested
+                    ? `Classifying @${data.creator} — stopping`
+                    : `Classifying @${data.creator}`,
+                sub: `${data.completed}/${data.total} (${jobPct(data.completed, data.total)}%)` +
+                    ` · keep ${data.kept || 0} · reject ${data.rejected || 0}` +
+                    (data.failed ? ` · err ${data.failed}` : ''),
+                completed: data.completed,
+                total: data.total,
+                cancellable: true,
+                cancelled: Boolean(data.cancel_requested)
+            });
+            if (!state.classifyPollTimer) {
+                state.classifyPollTimer = setInterval(pollClassifyStatus, 3000);
+            }
+            patchCreatorRejectPill(data.creator, data);
+            return;
+        }
+
+        if (state.classifyPollTimer) {
+            clearInterval(state.classifyPollTimer);
+            state.classifyPollTimer = null;
+        }
+        renderJobChip('classify', { active: false });
+        // Only announce on an observed running -> stopped transition.
+        if (!wasRunning) return;
+
+        const who = data.creator || 'creator';
+        const rejected = Number(data.rejected) || 0;
+        // Refresh counters first so the toast action opens a truthful pile.
+        await fetchCreators();
+        updateClassifyPanelUi();
+
+        if (data.cancelled) {
+            showToast(`Classify cancelled @${who} — ${data.completed}/${data.total} done · keep ${data.kept || 0} · reject ${rejected}`);
+        } else if (rejected > 0) {
+            // Deliberately does NOT auto-enter review: dropping the user into a
+            // delete-oriented mode unasked is hostile. Offer it instead.
+            showToast({
+                title: `Classify done @${who}`,
+                body: `keep ${data.kept || 0} · reject ${rejected}` + (data.failed ? ` · err ${data.failed}` : ''),
+                actionLabel: `Review ${rejected} reject${rejected === 1 ? '' : 's'}`,
+                onAction: () => enterReviewMode(who)
+            }, 9000);
+        } else {
+            showToast(`Classify done @${who} — keep ${data.kept || 0}, nothing to clean up`);
+        }
+        if (state.selectedCreator === who) await fetchPhotos();
+    } catch (err) {
+        console.error('Classify status error:', err);
+    }
+}
+
+async function startCreatorClassify({ rescoreStale = false, force = false } = {}) {
+    if (!state.selectedCreator) {
+        showToast('Select a creator first');
+        return;
+    }
+    if (!requireOllama()) return;
+    try {
+        const res = await fetch('/api/classify/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                creator: state.selectedCreator,
+                only_unclassified: !force,
+                force,
+                include_videos: true,
+                rescore_stale: rescoreStale
+            })
+        });
+        const data = await res.json();
+        if (res.ok && data.status === 'started') {
+            showToast({
+                title: `Classifying @${data.creator}`,
+                body: `${data.pending} item(s) queued — progress in the corner chip`
+            });
+            state.classifyStatus = {
+                running: true,
+                creator: data.creator,
+                total: data.pending,
+                completed: 0,
+                kept: 0,
+                rejected: 0,
+                failed: 0
+            };
+            updateClassifyPanelUi();
+            pollClassifyStatus();
+        } else if (data.status === 'nothing_to_do') {
+            showToast(rescoreStale
+                ? 'Everything already judged by the current prompt'
+                : 'Everything for this creator is already classified');
+        } else if (data.status === 'ollama_down') {
+            showToast(data.message || 'Ollama offline');
+        } else {
+            showToast(data.message || 'Classify is busy or failed to start');
+        }
+    } catch (err) {
+        showToast('Classify request failed');
+    }
+}
+
+async function cancelCreatorClassify() {
+    try {
+        const res = await fetch('/api/classify/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}'
+        });
+        const data = await res.json();
+        showToast(data.status === 'cancelling'
+            ? 'Stopping classify after the current item…'
+            : 'No classify job running');
+        pollClassifyStatus();
+    } catch (err) {
+        showToast('Cancel failed');
+    }
+}
+
+// ── review mode ──────────────────────────────────────────────────────
+
+function enterReviewMode(creator, verdict = 'reject') {
+    if (creator && creator !== state.selectedCreator) {
+        state.selectedCreator = creator;
+        state.creatorPanelOpen = true;
+        if (elements.galleryTitle) elements.galleryTitle.textContent = `@${creator}`;
+        renderCreatorList();
+        updateCreatorStylePanel();
+    }
+    state.reviewMode = true;
+    state.verdictFilter = REVIEW_FILTERS.includes(verdict) ? verdict : 'reject';
+    clearSelection();
+    setSelectMode(true);
+    updateReviewBar();
+    fetchPhotos();
+}
+
+function exitReviewMode({ refetch = true } = {}) {
+    if (!state.reviewMode) return;
+    state.reviewMode = false;
+    state.verdictFilter = 'reject';
+    clearSelection();
+    setSelectMode(false);
+    updateReviewBar();
+    if (refetch) fetchPhotos();
+}
+
+function setVerdictFilter(verdict) {
+    if (!REVIEW_FILTERS.includes(verdict) || verdict === state.verdictFilter) return;
+    state.verdictFilter = verdict;
+    clearSelection();
+    updateReviewBar();
+    fetchPhotos();
+}
+
+function updateReviewBar() {
+    if (!elements.reviewBar) return;
+    const on = Boolean(state.reviewMode);
+    elements.reviewBar.style.display = on ? 'flex' : 'none';
+    document.body.classList.toggle('review-mode', on);
+    if (!on) return;
+
+    const meta = selectedCreatorMeta();
+    if (elements.reviewBarTitle) {
+        elements.reviewBarTitle.textContent = state.selectedCreator
+            ? `Reviewing @${state.selectedCreator}`
+            : 'Reviewing all creators';
+    }
+
+    const counts = {
+        reject: meta ? Number(meta.reject_count) || 0 : 0,
+        unusable: meta ? Number(meta.unusable_count) || 0 : 0,
+        modest: meta ? Number(meta.modest_count) || 0 : 0,
+        keep: meta ? Number(meta.keep_count) || 0 : 0,
+        unclassified: meta ? Number(meta.unclassified_count) || 0 : 0
+    };
+    if (elements.reviewBarFilters) {
+        elements.reviewBarFilters.querySelectorAll('.review-chip').forEach((chip) => {
+            const key = chip.dataset.verdict;
+            chip.classList.toggle('active', key === state.verdictFilter);
+            const n = chip.querySelector('.review-chip-n');
+            if (n) n.textContent = String(counts[key] ?? 0);
+        });
+    }
+
+    const selected = state.selectedPaths.size;
+    if (elements.reviewBarCount) {
+        elements.reviewBarCount.textContent = selected
+            ? `${selected} selected of ${state.photoTotal}`
+            : `${state.photoTotal} item${state.photoTotal === 1 ? '' : 's'}`;
+    }
+    if (elements.reviewDeleteBtn) {
+        elements.reviewDeleteBtn.disabled = selected === 0;
+        elements.reviewDeleteBtn.innerHTML = selected
+            ? `<i class="fa-solid fa-trash-can"></i> Delete ${selected}`
+            : '<i class="fa-solid fa-trash-can"></i> Delete selected';
+    }
+}
+
+/**
+ * Select everything on the page except favourites. Favourites are the one
+ * signal that is unambiguously the user's own, so they are never swept into a
+ * bulk delete by a machine verdict.
+ */
+function selectNonFavourites() {
+    if (!state.reviewMode) return;
+    setSelectMode(true);
+    let skipped = 0;
+    state.photos.forEach((p) => {
+        if (p.favorite) {
+            state.selectedPaths.delete(p.rel_path);
+            skipped += 1;
+        } else {
+            state.selectedPaths.add(p.rel_path);
+        }
+    });
+    renderGallery();
+    updateReviewBar();
+    const n = state.selectedPaths.size;
+    if (!n) {
+        showToast('Nothing to select on this page');
+    } else {
+        showToast(`Selected ${n}${skipped ? ` · skipped ${skipped} favourite${skipped === 1 ? '' : 's'}` : ''}`);
+    }
+}
+
+// ── triage panel ─────────────────────────────────────────────────────
+
+function currentTriagePhoto() {
+    if (state.lightboxIndex < 0) return null;
+    return state.photos[state.lightboxIndex] || null;
+}
+
+function renderTriageBlock(photo) {
+    if (!elements.triageBlock) return;
+    const v = photo && photo.verdict;
+    if (!state.reviewMode || !v) {
+        elements.triageBlock.style.display = 'none';
+        return;
+    }
+    elements.triageBlock.style.display = 'flex';
+
+    const tier = Number(v.tier);
+    if (elements.triageTierChip) {
+        elements.triageTierChip.textContent = tier >= 0
+            ? `Tier ${tier} · ${tierLabel(tier)}`
+            : 'Classify failed';
+        elements.triageTierChip.className = `tier-chip t${tier >= 0 ? tier : 'err'}`;
+    }
+    if (elements.triageMeta) {
+        const bits = [];
+        if (v.confidence != null) bits.push(`conf ${Math.round(v.confidence * 100)}%`);
+        if (v.prompt_version) bits.push(v.prompt_version);
+        if (v.manual) bits.push(`set to ${v.manual} by hand`);
+        elements.triageMeta.textContent = bits.join(' · ');
+    }
+    if (elements.triageReason) {
+        elements.triageReason.textContent = v.error
+            ? v.error
+            : (v.reason || 'No reason recorded.');
+    }
+
+    // The contact sheet is what the model was actually shown. Without it a
+    // wrong reel verdict is unexplainable, which is how the last classifier
+    // burned trust.
+    if (elements.triageSheetWrap && elements.triageSheet) {
+        if (v.sheet_path) {
+            elements.triageSheetWrap.style.display = '';
+            const want = `/api/classify/sheet?rel_path=${encodeURIComponent(photo.rel_path)}`;
+            if (elements.triageSheet.getAttribute('src') !== want) {
+                elements.triageSheet.src = want;
+            }
+            elements.triageSheet.onerror = () => {
+                elements.triageSheetWrap.style.display = 'none';
+            };
+        } else {
+            elements.triageSheetWrap.style.display = 'none';
+            elements.triageSheet.removeAttribute('src');
+        }
+    }
+
+    const effective = v.verdict;
+    if (elements.triageKeepBtn) elements.triageKeepBtn.classList.toggle('active', effective === 'keep');
+    if (elements.triageRejectBtn) elements.triageRejectBtn.classList.toggle('active', effective === 'reject');
+    if (elements.triageAutoBtn) elements.triageAutoBtn.style.display = v.manual ? '' : 'none';
+}
+
+/**
+ * Pin the current item to keep/reject (or hand it back to the model).
+ * Optimistic: the pill and panel update immediately, and the row is patched
+ * from the server response rather than refetching the page.
+ */
+async function setManualVerdict(value, { advance = false } = {}) {
+    const photo = currentTriagePhoto();
+    if (!photo || !photo.verdict) {
+        showToast('Nothing to judge here');
+        return;
+    }
+    try {
+        const res = await fetch('/api/classify/verdict', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rel_path: photo.rel_path, verdict: value })
+        });
+        const data = await res.json();
+        if (!res.ok || data.status !== 'ok') {
+            showToast(data.message || 'Could not save that verdict');
+            return;
+        }
+        photo.verdict = data.verdict;
+        renderTriageBlock(photo);
+        // Patch just this card; a refetch would drop it out of the filtered
+        // page under the user's cursor and lose their scroll position.
+        const card = elements.galleryGrid.querySelector(
+            `.photo-card[data-rel-path="${cssEscape(photo.rel_path)}"]`
+        );
+        if (card) {
+            card.className = card.className
+                .replace(/ verdict-(reject|keep|error|none)/g, '') + verdictCardClass(photo);
+            const pill = card.querySelector('.verdict-pill');
+            if (pill) pill.outerHTML = verdictBadgeHtml(photo);
+        }
+        if (advance) navigateLightbox(1);
+    } catch (err) {
+        showToast('Verdict request failed');
+    }
+}
+
+/** Delete the item currently open in triage, then advance. */
+async function triageDeleteCurrent() {
+    const photo = currentTriagePhoto();
+    if (!photo) return;
+    const nextIndex = state.lightboxIndex;
+    await executeBulkDelete([photo.rel_path]);
+    // removePhotosFromView() already dropped it, so the same index is the next
+    // item. Clamp when the deleted one was last.
+    if (!state.photos.length) {
+        closeLightbox();
+        return;
+    }
+    openLightbox(Math.min(nextIndex, state.photos.length - 1));
+}
+
+/** CSS.escape with a fallback — attribute selectors on paths need quoting. */
+function cssEscape(value) {
+    if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
+    return String(value).replace(/["\\]/g, '\\$&');
+}
+
+function handleTriageKey(e) {
+    if (!state.reviewMode || state.lightboxIndex < 0) return false;
+    // Never steal a keystroke from a text field — the prompt editor lives in
+    // the same modal.
+    const el = document.activeElement;
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) {
+        return false;
+    }
+    const key = e.key.toLowerCase();
+    if (key === 'k') {
+        setManualVerdict('keep', { advance: true });
+        return true;
+    }
+    if (key === 'r') {
+        setManualVerdict('reject', { advance: true });
+        return true;
+    }
+    if (key === 'x') {
+        triageDeleteCurrent();
+        return true;
+    }
+    return false;
+}
+
+function setupClassifyListeners() {
+    if (elements.classifyCreatorBtn) {
+        elements.classifyCreatorBtn.addEventListener('click', () => {
+            const meta = selectedCreatorMeta();
+            const todo = meta ? Number(meta.unclassified_count) || 0 : 0;
+            // Zero unclassified turns the button into a full re-run, which is
+            // expensive enough to confirm rather than fire on a stray click.
+            if (todo === 0 && meta && Number(meta.photo_count) > 0) {
+                const n = Number(meta.photo_count);
+                if (!window.confirm(`Re-classify all ${n} items for @${state.selectedCreator}? This re-runs the vision model on every file.`)) {
+                    return;
+                }
+                startCreatorClassify({ force: true });
+                return;
+            }
+            startCreatorClassify();
+        });
+    }
+    if (elements.rescoreStaleBtn) {
+        elements.rescoreStaleBtn.addEventListener('click', () => startCreatorClassify({ rescoreStale: true }));
+    }
+    if (elements.cancelClassifyBtn) {
+        elements.cancelClassifyBtn.addEventListener('click', cancelCreatorClassify);
+    }
+    if (elements.classifyJobChipCancel) {
+        elements.classifyJobChipCancel.addEventListener('click', cancelCreatorClassify);
+    }
+    if (elements.reviewRejectsBtn) {
+        elements.reviewRejectsBtn.addEventListener('click', () => enterReviewMode(state.selectedCreator));
+    }
+    if (elements.reviewExitBtn) {
+        elements.reviewExitBtn.addEventListener('click', () => exitReviewMode());
+    }
+    if (elements.reviewSelectAllBtn) {
+        elements.reviewSelectAllBtn.addEventListener('click', selectNonFavourites);
+    }
+    if (elements.reviewDeleteBtn) {
+        elements.reviewDeleteBtn.addEventListener('click', promptBulkDelete);
+    }
+    if (elements.reviewBarFilters) {
+        elements.reviewBarFilters.addEventListener('click', (e) => {
+            const chip = e.target.closest('.review-chip');
+            if (chip) setVerdictFilter(chip.dataset.verdict);
+        });
+    }
+    if (elements.triageKeepBtn) {
+        elements.triageKeepBtn.addEventListener('click', () => setManualVerdict('keep'));
+    }
+    if (elements.triageRejectBtn) {
+        elements.triageRejectBtn.addEventListener('click', () => setManualVerdict('reject'));
+    }
+    if (elements.triageAutoBtn) {
+        elements.triageAutoBtn.addEventListener('click', () => setManualVerdict(null));
+    }
+}

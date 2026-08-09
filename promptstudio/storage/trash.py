@@ -311,12 +311,30 @@ class TrashStore:
     # ------------------------------------------------------------------ purge
 
     def purge(self, entry_id: str) -> bool:
-        """Permanently remove one trash entry."""
+        """Permanently remove one trash entry.
+
+        The single chokepoint for destruction — `purge_expired` and `empty` both
+        route through here — which is why the classify verdict is dropped here
+        rather than in three places. A soft delete deliberately keeps it so Undo
+        restores the review pile; once the media is gone for good, the verdict is
+        an orphan that would be inherited by a same-named re-download.
+        """
         entry_dir = self._entry_dir(entry_id)
         if not entry_dir or not os.path.isdir(entry_dir):
             return False
+        entry = self._read_manifest(entry_dir) or {}
+        rel_path = str(entry.get("rel_path") or "").replace("\\", "/")
         shutil.rmtree(entry_dir, ignore_errors=True)
-        return not os.path.isdir(entry_dir)
+        if os.path.isdir(entry_dir):
+            return False
+        if rel_path:
+            try:
+                from promptstudio.storage.db import ArchiveIndex
+
+                ArchiveIndex.get().delete_verdict(rel_path)
+            except Exception as exc:
+                log.warning("verdict cleanup failed for %s: %s", rel_path, exc)
+        return True
 
     def purge_expired(self, days: Optional[int] = None) -> int:
         """Permanently remove entries older than the retention window."""

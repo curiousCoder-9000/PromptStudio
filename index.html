@@ -110,7 +110,31 @@
                             <i class="fa-solid fa-arrows-rotate"></i> Sync new posts
                         </button>
                     </div>
-                    <div class="sync-status-label" style="margin-top:6px;">Creator Style</div>
+                    <div class="sync-status-label" style="margin-top:10px;">Classify &amp; review</div>
+                    <!-- Verdict meter: keep / reject / unclassified as one bar.
+                         Three counts in three places was the old design and it
+                         never told you the shape of the pile at a glance. -->
+                    <div class="verdict-meter" id="verdictMeter" title="Keep · Reject · Not classified">
+                        <div class="verdict-meter-seg keep" id="verdictMeterKeep" style="width:0%;"></div>
+                        <div class="verdict-meter-seg reject" id="verdictMeterReject" style="width:0%;"></div>
+                        <div class="verdict-meter-seg todo" id="verdictMeterTodo" style="width:100%;"></div>
+                    </div>
+                    <div class="verdict-meter-legend" id="verdictMeterLegend">Not classified yet</div>
+                    <div class="creator-actions">
+                        <button class="btn btn-primary btn-sm full-width" id="classifyCreatorBtn" type="button" title="Score photos and reels with the vision keep/reject filter">
+                            <i class="fa-solid fa-wand-sparkles"></i> Classify
+                        </button>
+                        <button class="btn btn-secondary btn-sm full-width" id="reviewRejectsBtn" type="button" style="display:none;" title="Open the reject pile for this creator">
+                            <i class="fa-solid fa-filter-circle-xmark"></i> Review rejects
+                        </button>
+                        <button class="btn btn-ghost btn-sm full-width" id="rescoreStaleBtn" type="button" style="display:none;" title="Re-classify only the media judged by an older prompt version">
+                            <i class="fa-solid fa-clock-rotate-left"></i> Re-score outdated
+                        </button>
+                        <button class="btn btn-ghost btn-sm full-width" id="cancelClassifyBtn" type="button" style="display:none;" title="Stop after the current item">
+                            <i class="fa-solid fa-stop"></i> Cancel classify
+                        </button>
+                    </div>
+                    <div class="sync-status-label" style="margin-top:10px;">Creator Style</div>
                     <div class="creator-style-prefix" id="creatorStylePrefix">No style yet</div>
                     <div class="creator-style-terms" id="creatorStyleTerms"></div>
                     <button class="btn btn-secondary btn-sm full-width" id="rebuildStyleBtn" type="button">
@@ -153,6 +177,33 @@
                         <span class="control-label">Grid Size:</span>
                         <button class="icon-btn active" id="gridNormal"><i class="fa-solid fa-border-all"></i></button>
                         <button class="icon-btn" id="gridLarge"><i class="fa-solid fa-table-cells-large"></i></button>
+                    </div>
+                </div>
+
+                <!-- Review mode strip. Replaces the view controls while
+                     triaging so a delete-oriented mode is never mistaken for
+                     the normal gallery. -->
+                <div class="review-bar" id="reviewBar" style="display:none;">
+                    <div class="review-bar-head">
+                        <span class="review-bar-title" id="reviewBarTitle">Reviewing</span>
+                        <span class="review-bar-hint">Click any card to open triage · <kbd>K</kbd> keep <kbd>R</kbd> reject</span>
+                    </div>
+                    <div class="review-bar-filters" id="reviewBarFilters">
+                        <button class="filter-chip review-chip active" type="button" data-verdict="reject">Rejects <span class="review-chip-n" data-count="reject">0</span></button>
+                        <button class="filter-chip review-chip" type="button" data-verdict="unusable">Unusable <span class="review-chip-n" data-count="unusable">0</span></button>
+                        <button class="filter-chip review-chip" type="button" data-verdict="modest">Modest <span class="review-chip-n" data-count="modest">0</span></button>
+                        <button class="filter-chip review-chip" type="button" data-verdict="keep">Keeps <span class="review-chip-n" data-count="keep">0</span></button>
+                        <button class="filter-chip review-chip" type="button" data-verdict="unclassified">Not classified <span class="review-chip-n" data-count="unclassified">0</span></button>
+                    </div>
+                    <div class="review-bar-actions">
+                        <span class="review-bar-count" id="reviewBarCount">0 selected</span>
+                        <button class="btn btn-secondary btn-sm" id="reviewSelectAllBtn" type="button" title="Select every non-favourite on this page">
+                            <i class="fa-solid fa-check-double"></i> Select non-favourites
+                        </button>
+                        <button class="btn btn-danger btn-sm" id="reviewDeleteBtn" type="button" disabled>
+                            <i class="fa-solid fa-trash-can"></i> Delete selected
+                        </button>
+                        <button class="btn btn-ghost btn-sm" id="reviewExitBtn" type="button">Done</button>
                     </div>
                 </div>
 
@@ -231,6 +282,35 @@
                             <button class="btn btn-secondary btn-sm" id="regeneratePromptBtn" title="Re-Analyze photo with Ollama Vision Body & Beauty Engine">
                                 <i class="fa-solid fa-arrows-rotate"></i> Refresh
                             </button>
+                        </div>
+                    </div>
+
+                    <!-- Keep/reject triage. Sits above both inspector modes so
+                         photos and reels adjudicate identically, and the reel
+                         still gets its metadata panel underneath. -->
+                    <div class="triage-block" id="triageBlock" style="display:none;">
+                        <div class="triage-head">
+                            <span class="tier-chip" id="triageTierChip">Tier —</span>
+                            <span class="triage-meta" id="triageMeta"></span>
+                        </div>
+                        <p class="triage-reason" id="triageReason"></p>
+                        <div class="triage-sheet-wrap" id="triageSheetWrap" style="display:none;">
+                            <div class="sync-status-label">What the model saw</div>
+                            <img class="triage-sheet" id="triageSheet" src="" alt="Contact sheet the reel was judged from" loading="lazy">
+                        </div>
+                        <div class="triage-verdict-row">
+                            <button type="button" class="triage-btn keep" id="triageKeepBtn" title="Keep this (K)">
+                                <i class="fa-solid fa-check"></i> Keep
+                            </button>
+                            <button type="button" class="triage-btn reject" id="triageRejectBtn" title="Reject this (R)">
+                                <i class="fa-solid fa-ban"></i> Reject
+                            </button>
+                            <button type="button" class="triage-btn auto" id="triageAutoBtn" title="Clear the manual override and use the model's call">
+                                <i class="fa-solid fa-rotate-left"></i> Auto
+                            </button>
+                        </div>
+                        <div class="triage-keys">
+                            <kbd>K</kbd> keep <kbd>R</kbd> reject <kbd>X</kbd> delete <kbd>←</kbd><kbd>→</kbd> move <kbd>Esc</kbd> close
                         </div>
                     </div>
 
@@ -730,6 +810,21 @@
             </div>
             <div class="scrape-job-chip-actions">
                 <button type="button" class="scrape-job-chip-btn" id="batchJobChipCancel" title="Stop after the current photo">Cancel</button>
+            </div>
+        </div>
+
+        <!-- Keep/reject classify -->
+        <div class="scrape-job-chip" id="classifyJobChip" style="display:none;" role="status" aria-live="polite">
+            <div class="scrape-job-chip-main">
+                <i class="fa-solid fa-wand-sparkles scrape-job-chip-icon spinning" id="classifyJobChipIcon"></i>
+                <div class="scrape-job-chip-text">
+                    <div class="scrape-job-chip-title" id="classifyJobChipTitle">Classifying</div>
+                    <div class="scrape-job-chip-sub" id="classifyJobChipSub"></div>
+                    <div class="job-chip-progress"><div class="job-chip-progress-fill" id="classifyJobChipFill"></div></div>
+                </div>
+            </div>
+            <div class="scrape-job-chip-actions">
+                <button type="button" class="scrape-job-chip-btn" id="classifyJobChipCancel" title="Stop after the current item">Cancel</button>
             </div>
         </div>
 

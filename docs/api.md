@@ -10,14 +10,14 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/stats` | Photos, creators, `prompts_ready` |
-| `GET` | `/api/insights` | Quality dashboard — prompt edit/regenerate rates, generation counts |
+| `GET` | `/api/insights` | Quality dashboard — prompt edit/regenerate rates, generation counts, classify tier distribution |
 | `GET` | `/api/health` | Ollama + Comfy reachability + models + job leases |
 | `GET` | `/api/journal` | Run history for a background job kind |
-| `GET` | `/api/creators` | Creator folders with counts + cover + sync meta |
+| `GET` | `/api/creators` | Creator folders with counts + cover + sync meta + keep/reject counters |
 | `GET` | `/api/creator/style` | Learned style prefix for a creator |
 | `POST` | `/api/creator/style/rebuild` | Rebuild style from cached prompts |
 | `GET` | `/api/following` | Accounts from local `following_list.json` |
-| `GET` | `/api/photos` | Paginated (`offset`, `limit`, `creator`, `search`, `unanalyzed`, `favorite`, `media_type`, `sort`) |
+| `GET` | `/api/photos` | Paginated (`offset`, `limit`, `creator`, `search`, `unanalyzed`, `favorite`, `media_type`, `verdict`, `sort`) |
 | `GET` | `/api/media/detail` | Reel/photo inspector (`path`): caption, IG link — not vision prompts |
 | `GET` | `/api/prompt` | Vision prompt bundle (`path`, optional `refresh`) — includes `history` |
 | `PUT` | `/api/prompt` | Save edited positive/negative prompts + tags |
@@ -27,6 +27,11 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/prompt/batch` | Background batch analyze (`creator`, `force`, `limit`, `paths`) |
 | `GET` | `/api/prompt/batch/status` | Batch job progress (cheap — snapshot, no archive scan) |
 | `POST` | `/api/prompt/batch/cancel` | Cooperative cancel after the current photo |
+| `POST` | `/api/classify/start` | Background keep/reject classify for one creator |
+| `GET` | `/api/classify/status` | Classify job progress + tier histogram |
+| `POST` | `/api/classify/cancel` | Cooperative cancel after the current item |
+| `POST` | `/api/classify/verdict` | Pin one file to keep/reject by hand (or clear) |
+| `GET` | `/api/classify/sheet` | Contact sheet a reel was judged from (`rel_path`) |
 | `DELETE` | `/api/photo` | Soft delete → `_trash/` (`permanent=1` to unlink) |
 | `GET` | `/api/trash` | List trashed entries (`limit`, `offset`) + size/retention |
 | `POST` | `/api/trash/restore` | Restore by `id` or `ids` |
@@ -96,6 +101,93 @@ No new scoring jobs.
 
 `keep_rate` stays null until A3 (rate outputs) lands.
 
+A `classify` block reports the tier distribution over everything classified:
+
+```json
+{
+  "classify": {
+    "classified": 812,
+    "errors": 4,
+    "reject_max_tier": 1,
+    "distribution": { "-1": 4, "0": 91, "1": 240, "2": 318, "3": 130, "4": 33 },
+    "labels": { "0": "Unusable", "1": "Fully modest", "…": "…" },
+    "reject_rate": 0.4077,
+    "top_tier_share": 0.3916,
+    "error_rate": 0.0049
+  }
+}
+```
+
+`top_tier_share` is the number to watch. Above ~0.6 the classifier is barely
+discriminating whatever the prompt claims — the previous one shipped at 0.85 and
+nothing was reading it. See [design_media_classifier.md](design_media_classifier.md) §5.
+
+### `POST /api/classify/start`
+
+```json
+{ "creator": "someone", "only_unclassified": true, "include_videos": true,
+  "rescore_stale": false, "force": false, "limit": null }
+```
+
+→ `200 {"status": "started", "pending": 40, "creator": "someone", …}`
+
+| `status` | Code | Meaning |
+|----------|-----:|---------|
+| `started` | 200 | Job running; poll `/api/classify/status` |
+| `nothing_to_do` | 200 | No pending media (`pending: 0`) |
+| `busy` | 409 | Another job holds the `ollama` lease, or a classify is already running |
+| `ollama_down` | 503 | Ollama unreachable |
+| `bad_creator` | 400 | Missing/empty creator |
+
+- `only_unclassified` (default true) visits never-classified media plus previously
+  failed attempts. `force` (or `only_unclassified: false`) re-runs everything.
+- `rescore_stale` adds media judged by a superseded prompt version. Without it a
+  prompt bump never re-runs anything, and the only way to adopt it is a full
+  rescore.
+- Takes the `ollama` lease, so it is mutually exclusive with batch analyze.
+
+### `GET /api/classify/status`
+
+```json
+{ "running": true, "creator": "someone", "total": 40, "completed": 12,
+  "failed": 1, "kept": 8, "rejected": 3, "current": "someone/IMG_9.jpg",
+  "cancelled": false, "cancel_requested": false,
+  "tier_hist": { "-1": 1, "0": 2, "1": 1, "2": 5, "3": 3, "4": 0 },
+  "top_tier_share": 0.4545, "error_rate": 0.0833,
+  "reject_max_tier": 1, "model": "qwen2.5vl:7b",
+  "tier_labels": { "0": "Unusable", "…": "…" },
+  "started_at": "…", "finished_at": null, "error": null }
+```
+
+`pending` (remaining work) is included **only when idle** — during a run it is a
+full re-query on every 3s poll for an answer that is already in `completed`.
+
+### `POST /api/classify/cancel`
+
+`{"status": "cancelling" | "idle", "running": bool}`. Cooperative: stops after
+the item in flight, since a vision call is not interruptible.
+
+### `POST /api/classify/verdict`
+
+```json
+{ "rel_path": "someone/IMG_9.jpg", "verdict": "keep" }
+```
+
+`verdict` is `keep`, `reject`, or `null` (clear the override and fall back to the
+model's tier). Returns `{"status": "ok", "verdict": {…}}` with the refreshed
+block, or `404 {"status": "not_classified"}` when the file has no verdict row —
+there is no tier to override yet.
+
+The override is stored separately from the tier, so it survives a re-classify and
+a soft delete + Undo.
+
+### `GET /api/classify/sheet?rel_path=creator/reel.mp4`
+
+The contact sheet JPEG the reel was judged from, or `404` if there is none
+(photos never have one). Served from `_classify/` through `safe_join`, not the
+media resolver — `_classify` is an `EXCLUDED_FOLDER`, so `/media/…` cannot reach
+it, which is exactly why sheets live there.
+
 ### `GET /api/prompt/batch/status`
 
 ```json
@@ -111,7 +203,10 @@ never recomputed per request. `cancel_requested` flips as soon as
 actually stops, which happens after the in-flight photo finishes (the Ollama
 call isn't interruptible, and a partial write would poison the prompt cache).
 
-`GET /api/creators` includes `last_synced_at` and `synced_count` from `sync_state.json` when available.
+`GET /api/creators` includes `last_synced_at` and `synced_count` from `sync_state.json` when available,
+plus per-creator classify counters: `keep_count`, `reject_count`, `unusable_count`
+(tier 0), `modest_count` (tier 1), `unclassified_count`, `error_count`, `stale_count`
+(judged by a superseded prompt version). All from one indexed `GROUP BY`.
 
 ### `GET /api/health`
 
@@ -131,12 +226,12 @@ When Ollama is down: `{ "ollama": false, ... }`. Also includes `comfy` / `url` f
 
 `leases` names the job holding each exclusive resource, or `null` if free — the
 first thing to check when a job reports `busy` and nothing looks like it is
-running. Owners: `batch_prompt`, `sync`.
+running. Owners: `batch_prompt`, `classify`, `sync`.
 
 ### `GET /api/journal?kind=<kind>&limit=20`
 
 Run history for a background job. Without `kind`, lists the kinds present on
-disk. Kinds: `batch_prompt`, `sync`.
+disk. Kinds: `batch_prompt`, `classify`, `sync`.
 
 ```json
 {
@@ -244,10 +339,11 @@ Reads local `following_list.json` (no live Instagram call).
 
 ### `GET /api/photos`
 
-Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `sort` (`name` | `newest` | `oldest` | `posted` | `posted_oldest`), `offset` (default 0), `limit` (default/max from config, typically 300).
+Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `verdict` (see below), `sort` (`name` | `newest` | `oldest` | `posted` | `posted_oldest` | `tier`), `offset` (default 0), `limit` (default/max from config, typically 300).
 
 - `newest` / `oldest` — archive ingest time (`added_at`; when the file was downloaded/indexed).
 - `posted` / `posted_oldest` — remote post time (`mtime`, which downloaders stamp to the post date); falls back to `added_at` when `mtime` is missing or zero.
+- `tier` — classify tier ascending (harshest first), then errors, then never-classified. The review-mode order.
 
 ```json
 {
@@ -260,16 +356,33 @@ Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), 
       "thumb_url": "/media/thumb/roxeuoon/...",
       "has_prompt": true,
       "prompt_stale": false,
-      "favorite": true
+      "favorite": true,
+      "verdict": {
+        "verdict": "reject",
+        "tier": 1,
+        "manual": null,
+        "reason": "crewneck sweater",
+        "media_kind": "photo",
+        "verdict_source": "image",
+        "confidence": 0.82,
+        "prompt_version": "v4-ordinal-frame-v7a",
+        "sheet_path": null,
+        "error": null,
+        "classified_at": "2026-08-09T16:33:57+00:00"
+      }
     }
   ],
   "total": 1134,
   "offset": 0,
   "limit": 60,
   "has_more": true,
-  "sort": "newest"
+  "sort": "newest",
+  "verdict": ""
 }
 ```
+
+- `verdict` is **absent** on rows that have never been classified — its presence is the "has a verdict" test.
+- `verdict.verdict` is derived server-side from `tier` against `CLASSIFY_REJECT_MAX_TIER` (or from `manual` when set). Clients must not re-derive it; the threshold is configurable and would drift.
 
 - `search` matches creator, filename, and cached prompt text/tags.
 - `unanalyzed=1` returns photos that need analysis (no cache entry or wrong `vision_engine`), same rule as batch.
@@ -277,6 +390,21 @@ Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), 
 - `sort=newest|oldest` uses `taken_at` from `*.meta.json`, then filename UTC stamp, then mtime.
 - `has_prompt`: cache hit with current `vision_engine`.
 - `prompt_stale`: entry exists but engine or `pipeline_version` is outdated.
+
+`verdict=` values:
+
+| Value | Rows returned |
+|-------|---------------|
+| `reject` | effective verdict is reject (`tier ≤ CLASSIFY_REJECT_MAX_TIER`, or `manual='reject'`) |
+| `keep` | effective verdict is keep |
+| `unusable` | raw tier 0 only, no manual override — the quality gate |
+| `modest` | raw tier 1 only, no manual override — the taste call |
+| `error` | classify was attempted and failed; retryable |
+| `unclassified` | no verdict row at all |
+
+`unusable` and `modest` are raw-tier views on purpose: they let a cautious cleanup
+pass act on the boundary nobody argues about without touching the one that has
+never been measured. A hand-kept file drops out of both.
 
 ### `PUT /api/favorite`
 

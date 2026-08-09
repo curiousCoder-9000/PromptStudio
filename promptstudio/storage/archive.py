@@ -83,6 +83,7 @@ class ArchiveStore:
         unanalyzed: bool = False,
         favorite_only: bool = False,
         media_type: Optional[str] = None,
+        verdict: Optional[str] = None,
         sort: str = "name",
     ) -> Tuple[List[Dict[str, Any]], int]:
         return self._index.query_photos(
@@ -91,6 +92,7 @@ class ArchiveStore:
             unanalyzed=unanalyzed,
             favorite_only=favorite_only,
             media_type=media_type,
+            verdict=verdict,
             sort=sort,
             limit=limit,
             offset=offset,
@@ -247,7 +249,9 @@ class ArchiveStore:
         except Exception as exc:
             log.warning("favorite clear failed for %s: %s", rel, exc)
 
-        self._index.delete_photo(rel_path)
+        # Soft delete keeps the classify verdict so Undo restores the review
+        # pile intact; TrashStore.purge drops it when the file really goes.
+        self._index.delete_photo(rel_path, drop_verdict=not soft)
         return {
             "filename": filename,
             "rel_path": rel,

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from promptstudio.comfy.client import ComfyJobManager, check_comfy_health
 from promptstudio.config import (
+    CLASSIFY_REJECT_MAX_TIER,
     CREATOR_SCRAPE_QUEUE_ENABLED,
     DEFAULT_MAX_POSTS_PER_CREATOR,
     FOLLOWING_LIST_FILE,
@@ -28,12 +29,15 @@ from promptstudio.prompts.batch import BatchPromptManager
 from promptstudio.prompts.cache import PromptCache
 from promptstudio.prompts.engine import ENGINE_ID, build_export_variants, get_prompt_for_image
 from promptstudio.prompts.styles import CreatorStyleStore
+from promptstudio.scraping.classify_job import ClassifyJobManager
 from promptstudio.scraping.creator_queue import CreatorScrapeQueue
 from promptstudio.scraping.downloader import InstagramDownloader
+from promptstudio.scraping.media_classifier import TIER_LABELS
 from promptstudio.scraping.sources.base import VALID_MODES, ScrapeOptions
 from promptstudio.scraping.sync_manager import SyncManager
 from promptstudio.server.multipart import parse_multipart_data
 from promptstudio.storage.archive import ArchiveStore, ensure_creator_folder
+from promptstudio.storage.db import VERDICT_FILTERS
 from promptstudio.storage.favorites import FavoritesStore
 from promptstudio.storage.journal import list_kinds as list_journal_kinds
 from promptstudio.storage.journal import read_runs as read_journal_runs
@@ -49,6 +53,7 @@ _batch = BatchPromptManager.get()
 _styles = CreatorStyleStore()
 _trash = TrashStore()
 _comfy = ComfyJobManager.get()
+_classify = ClassifyJobManager.get()
 _scrape_queue = CreatorScrapeQueue.get() if CREATOR_SCRAPE_QUEUE_ENABLED else None
 
 # Prefer 127.0.0.1 over localhost: on Windows, localhost often resolves to ::1
@@ -980,6 +985,88 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({"status": "idle", "message": "No batch job running"})
             return
 
+        if path == "/api/classify/start":
+            try:
+                data = self._read_json_body()
+                creator = (data.get("creator") or "").strip().lstrip("@")
+                if not creator:
+                    self.send_error(400, "creator required")
+                    return
+                limit = data.get("limit")
+                result = _classify.start(
+                    creator,
+                    force=_as_bool(data.get("force")),
+                    include_videos=_as_bool(
+                        data.get("include_videos"), default=INCLUDE_VIDEOS_DEFAULT
+                    ),
+                    limit=int(limit) if limit is not None else None,
+                    only_unclassified=_as_bool(
+                        data.get("only_unclassified"), default=True
+                    ),
+                    rescore_stale=_as_bool(data.get("rescore_stale")),
+                )
+                status = result.get("status")
+                code = 200
+                if status == "busy":
+                    code = 409
+                elif status == "ollama_down":
+                    code = 503
+                elif status == "bad_creator":
+                    code = 400
+                self._send_json(result, code)
+            except (ValueError, json.JSONDecodeError):
+                self.send_error(400, "Invalid JSON body")
+            return
+
+        if path == "/api/classify/cancel":
+            ok = _classify.cancel()
+            self._send_json(
+                {
+                    "status": "cancelling" if ok else "idle",
+                    "running": _classify.is_running(),
+                }
+            )
+            return
+
+        if path == "/api/classify/verdict":
+            # Manual override: pins a file to keep/reject regardless of tier, and
+            # survives re-classify. `verdict: null` hands it back to the model.
+            try:
+                data = self._read_json_body()
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON body")
+                return
+            rel_path = (data.get("rel_path") or "").strip().replace("\\", "/")
+            if not rel_path:
+                self.send_error(400, "rel_path required")
+                return
+            raw = data.get("verdict")
+            value = None if raw in (None, "", "auto") else str(raw).strip().lower()
+            if value not in (None, "keep", "reject"):
+                self.send_error(400, "verdict must be keep, reject, or null")
+                return
+            from promptstudio.storage.db import ArchiveIndex
+
+            index = ArchiveIndex.get()
+            if not index.set_manual_verdict(rel_path, value):
+                self._send_json(
+                    {
+                        "status": "not_classified",
+                        "message": "classify this creator before overriding",
+                        "rel_path": rel_path,
+                    },
+                    404,
+                )
+                return
+            self._send_json(
+                {
+                    "status": "ok",
+                    "rel_path": rel_path,
+                    "verdict": index.get_verdict(rel_path),
+                }
+            )
+            return
+
         if path == "/api/creator/style/rebuild":
             try:
                 data = self._read_json_body()
@@ -1301,8 +1388,16 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             # Prefer reel URL shape when video + shortcode
             if is_video and shortcode and "/p/" in post_url:
                 post_url = f"https://www.instagram.com/reel/{shortcode}/"
+            from promptstudio.storage.db import ArchiveIndex
+
+            verdict = ArchiveIndex.get().get_verdict(rel_path)
+            if verdict:
+                verdict["tier_label"] = TIER_LABELS.get(
+                    int(verdict.get("tier", -1)), "Unknown"
+                )
             self._send_json(
                 {
+                    "verdict": verdict or None,
                     "rel_path": rel_path,
                     "filename": filename,
                     "creator": creator or meta.get("owner_username") or "",
@@ -1320,6 +1415,23 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     "carousel_index": meta.get("carousel_index", 0),
                     "source": meta.get("source") or "",
                 }
+            )
+            return
+
+        if path == "/api/classify/sheet":
+            # The contact sheet the reel was actually judged from. Served from
+            # _classify/ through safe_join rather than the archive resolver:
+            # _classify is an EXCLUDED_FOLDER, so the media route cannot reach
+            # it — which is exactly why it is safe to keep sheets there.
+            from promptstudio.scraping.media_classifier import sheet_full_path
+
+            rel_path = (query.get("rel_path", [""])[0] or "").replace("\\", "/")
+            sheet = sheet_full_path(rel_path) if rel_path else ""
+            if not sheet or not os.path.isfile(sheet):
+                self.send_error(404, "No contact sheet for this file")
+                return
+            self._serve_local_file(
+                sheet, "image/jpeg", cache_control="public, max-age=86400"
             )
             return
 
@@ -1430,8 +1542,18 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             media_type = (query.get("media_type", ["all"])[0] or "all").lower()
             if media_type not in ("video", "photo"):
                 media_type = None
+            verdict = (query.get("verdict", [""])[0] or "").strip().lower()
+            if verdict not in VERDICT_FILTERS:
+                verdict = None
             sort = (query.get("sort", ["name"])[0] or "name").lower()
-            if sort not in ("name", "newest", "oldest", "posted", "posted_oldest"):
+            if sort not in (
+                "name",
+                "newest",
+                "oldest",
+                "posted",
+                "posted_oldest",
+                "tier",
+            ):
                 sort = "name"
             try:
                 offset = int(query.get("offset", ["0"])[0] or 0)
@@ -1450,6 +1572,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 unanalyzed=unanalyzed,
                 favorite_only=favorite_only,
                 media_type=media_type,
+                verdict=verdict,
                 sort=sort,
                 limit=limit,
                 offset=offset,
@@ -1467,6 +1590,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     "limit": limit,
                     "has_more": offset + len(public_photos) < total,
                     "sort": sort,
+                    "verdict": verdict or "",
                 }
             )
             return
@@ -1574,6 +1698,26 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             # list_uncached(), a full archive query + prompt-cache load, on
             # every 4s poll for the whole run.
             self._send_json(_batch.get_status())
+            return
+
+        if path == "/api/classify/status":
+            status = _classify.get_status()
+            status["reject_max_tier"] = int(CLASSIFY_REJECT_MAX_TIER)
+            status["tier_labels"] = {str(k): v for k, v in TIER_LABELS.items()}
+            creator = status.get("creator")
+            if creator and not status.get("running"):
+                # Remaining work for resume UX. Only when idle — during a run
+                # this is a full re-query on every 3s poll for no new answer.
+                try:
+                    status["pending"] = len(
+                        _classify.list_pending(
+                            creator,
+                            include_videos=bool(status.get("include_videos", True)),
+                        )
+                    )
+                except Exception:
+                    status["pending"] = None
+            self._send_json(status)
             return
 
         if path == "/api/comfy/status":

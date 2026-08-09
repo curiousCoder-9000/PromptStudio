@@ -94,6 +94,41 @@ def _generation_insights() -> Dict[str, Any]:
     }
 
 
+def _classify_insights() -> Dict[str, Any]:
+    """Tier distribution and reject rate over everything classified so far.
+
+    This is the metric that would have caught the previous classifier on day
+    one: it shipped with 85% of the archive on a single value, which makes a
+    filter a no-op, and nothing was reading the distribution. `top_tier_share`
+    is the number to watch — above ~0.6 the classifier is barely discriminating.
+    """
+    from promptstudio.config import CLASSIFY_REJECT_MAX_TIER
+    from promptstudio.scraping.media_classifier import TIER_LABELS
+    from promptstudio.storage.db import ArchiveIndex
+
+    index = ArchiveIndex.get()
+    index.ensure_ready()
+    hist = index.tier_histogram()
+
+    scored = sum(c for tier, c in hist.items() if int(tier) >= 0)
+    errors = int(hist.get("-1", 0))
+    cut = int(CLASSIFY_REJECT_MAX_TIER)
+    rejects = sum(c for tier, c in hist.items() if 0 <= int(tier) <= cut)
+    top = max((c for tier, c in hist.items() if int(tier) >= 0), default=0)
+
+    return {
+        "classified": scored,
+        "errors": errors,
+        "reject_max_tier": cut,
+        "distribution": dict(sorted(hist.items(), key=lambda kv: int(kv[0]))),
+        "labels": {str(k): v for k, v in TIER_LABELS.items()},
+        "reject_rate": _rate(rejects, scored),
+        # Fraction of classified media sitting on the single most common tier.
+        "top_tier_share": _rate(top, scored),
+        "error_rate": _rate(errors, scored + errors),
+    }
+
+
 def compute_insights() -> Dict[str, Any]:
     """Aggregate B1 quality signals for GET /api/insights."""
     try:
@@ -106,8 +141,14 @@ def compute_insights() -> Dict[str, Any]:
     except Exception as e:
         log.exception("generation insights failed: %s", e)
         generations = {"total_outputs": 0, "error": str(e)}
+    try:
+        classify = _classify_insights()
+    except Exception as e:
+        log.exception("classify insights failed: %s", e)
+        classify = {"classified": 0, "error": str(e)}
 
     return {
         "prompts": prompts,
         "generations": generations,
+        "classify": classify,
     }

@@ -117,8 +117,8 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
 - **Escape before `innerHTML`.** Handles, captions, bios, filenames, and Ollama tags are all third-party text — run them through `escapeHtml()` (or use `textContent`). Numeric JSON fields get `Number(...)`.
 - **User-typed input is debounced** (`debounce()`; `SEARCH_DEBOUNCE_MS` = 250) and **in-flight fetches are abortable** — `state.photosRequest` / `creatorStyleRequest` / `followingRequest` hold the current `AbortController`. Treat `err.name === 'AbortError'` as success-by-supersession, and only clear loading state if `state.xRequest === controller`.
 - Video type detection goes through `isVideoFilename()` — do not inline extension lists.
-- **Long jobs report progress in a chip, never a repeating toast.** `#jobChipStack` holds one chip per job kind (scrape / batch); drive it with `renderJobChip(kind, {...})` and toast only on start and finish.
-- **View prefs persist, navigation does not.** `PREF_FIELDS` + `saveViewPrefs()` keep sort/media/grid/filters in `localStorage`; selected creator, selection, and reject-review mode are deliberately *not* restored (landing in a destructive mode from a refresh is hostile). Call `saveViewPrefs()` in any new view-control handler.
+- **Long jobs report progress in a chip, never a repeating toast.** `#jobChipStack` holds one chip per job kind (scrape / batch / classify); drive it with `renderJobChip(kind, {...})` and toast only on start and finish.
+- **View prefs persist, navigation does not.** `PREF_FIELDS` + `saveViewPrefs()` keep sort/media/grid/filters in `localStorage`; selected creator, selection, and review mode (`state.reviewMode`) are deliberately *not* restored (landing in a destructive mode from a refresh is hostile). Call `saveViewPrefs()` in any new view-control handler.
 
 ---
 
@@ -128,7 +128,7 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
 |------|------|
 | `<creator>/*.jpg\|png\|webp\|mp4` | Media (creator = IG handle) |
 | `<creator>/*.meta.json` | Sidecar: `post_id`, `shortcode`, `caption`, `taken_at` |
-| `archive.db` | SQLite catalog: `photos`, `prompts`, `prompts_fts`, `phashes`, `deleted_posts` (WAL) |
+| `archive.db` | SQLite catalog: `photos`, `prompts`, `prompts_fts`, `phashes`, `media_verdicts`, `deleted_posts` (WAL) |
 | `prompts_cache.json` | **Legacy.** Imported into `archive.db` once, then left as a rollback snapshot — no longer updated |
 | `favorites.json` | Favorite flags |
 | `creator_styles.json` | Learned style prefixes |
@@ -137,7 +137,8 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
 | `sync_status.json` | Last sync job status |
 | `generations_index.json` | Comfy outputs index |
 | `promptstudio.log` | Rotating app log (`PROMPTSTUDIO_LOG_FILE=` to disable) |
-| `_journal/<kind>.jsonl` | Append-only run history: `batch_prompt`, `sync` |
+| `_journal/<kind>.jsonl` | Append-only run history: `batch_prompt`, `classify`, `sync` |
+| `_classify/<creator>/*.sheet.jpg` | Reel contact sheets — the input a verdict was made from, shown in triage |
 | `_thumbs/` | JPEG thumbs |
 | `_generations/` | Comfy outputs |
 | `_trash/<entry_id>/` | Soft-deleted media + sidecar + `entry.json` manifest |
@@ -148,7 +149,7 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
 **Session:** `INSTALOADER_SESSION_DIR` for user `INSTAGRAM_SESSION_USER` (required in `.env` for scrape).
 
 **Excluded folder names:** `_no_person_detected`, `_thumbs`, `_generations`, `_classify`, `_trash`, `_journal`.
-(`_classify/` is still excluded so any staging left over from the removed classifier stays out of the gallery.)
+(`_classify/` holds saved reel contact sheets; being excluded is what keeps them out of the gallery, the creator list and every rebuild — and it is why `GET /api/classify/sheet` has to serve them rather than `/media/`.)
 
 ---
 
@@ -166,10 +167,11 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
 | `COMFYUI_CHECKPOINT` | `juggernautXL_ragnarok.safetensors` | Default ckpt |
 | `IG_*` | see config | Anti-ban delays, daily cap 20, catch-up streak 3 |
 | `IG_INCLUDE_VIDEOS` | `1` | Creator/following download reels |
-| `IG_QUEUE_PRIORITY_KEEP` | `100` | Classify-keep queue priority |
 | `IG_POST_RANK` | `1` | Rank feed posts by caption/reel signals |
 | `IG_POST_SCAN_FACTOR` | `3` | Scan window = max_posts × factor |
-| `CLASSIFY_*` | see `.env.example` | Reel contact sheet, frame ranking, retries, prompt vocabulary |
+| `CLASSIFY_REJECT_MAX_TIER` | `1` | Tiers `0..N` are rejects. Only the tier is stored, so changing this re-thresholds the archive with no re-classify |
+| `CLASSIFY_REEL_SHEET` | `1` | Score reels from a whole-timeline contact sheet (`0` = ranked frames) |
+| `CLASSIFY_*` | see `.env.example` | Vision request shape, reel contact sheet, frame ranking, retries |
 | `PROMPTSTUDIO_TRASH` | `1` | Soft delete to `_trash/` (`0` = immediate unlink) |
 | `PROMPTSTUDIO_TRASH_DAYS` | `30` | Retention window for `purge expired` |
 | `INSTAGRAM_SESSION_USER` | _(empty)_ | Instaloader session name — set in `.env` |

@@ -11,7 +11,7 @@ Workspace rules, auto-loaded via [CLAUDE.md](CLAUDE.md).
 | Server | `server.py` → `promptstudio.server.handler` · `http://localhost:5000` (threaded) |
 | Vision | Ollama `OLLAMA_VISION_MODEL` default **`qwen2.5vl:7b`** · pipeline `v2-structured` |
 | Frontend | `index.html` / `style.css` / `app.js` (glass dark: `#8b5cf6` `#ec4899` `#06b6d4`) |
-| Archive | `~/Pictures/InstagramSaved` (`PROMPTSTUDIO_ARCHIVE`) · catalog `archive.db` (photos · prompts · phashes) |
+| Archive | `~/Pictures/InstagramSaved` (`PROMPTSTUDIO_ARCHIVE`) · catalog `archive.db` (photos · prompts · phashes · media_verdicts) |
 | Observability | `<archive>/promptstudio.log` · run history `<archive>/_journal/<kind>.jsonl` |
 | Package | All logic under `promptstudio/` · `scripts/` = thin CLIs only |
 
@@ -30,7 +30,11 @@ These are the single source of truth — other docs point here rather than resta
 9. **Never `open(path, "w")` for state.** Use `promptstudio.storage.atomic.atomic_write_json` — a truncated file reads as empty and every loader here swallows the parse error, so a partial write is silent total loss.
 10. **No `print()`.** `log = get_logger(__name__)` from `promptstudio.logging_setup`.
 11. **Cross-job exclusion is a lease** (`promptstudio/jobs.py`), never an `is_running()` check on another manager — polling then starting is a race. Declare the resource, acquire, release in a `finally`.
-12. **Measure before optimising, and report the number.** Two "obvious" wins in this codebase turned out to be losses under measurement (FTS5 search, incremental rebuild) — both recorded in [docs/review_backend_architecture.md](docs/review_backend_architecture.md).
+12. **Classify stores the tier, never the verdict.** `media_verdicts.tier` is the
+    measurement; keep/reject is derived against `CLASSIFY_REJECT_MAX_TIER` at query
+    time. Storing the collapsed answer is what made the previous classifier cost a
+    full-archive rescore per change of mind. Never add a `verdict` column.
+13. **Measure before optimising, and report the number.** Two "obvious" wins in this codebase turned out to be losses under measurement (FTS5 search, incremental rebuild) — both recorded in [docs/review_backend_architecture.md](docs/review_backend_architecture.md).
 13. **IG sync:** multi-day pacing; stop on abort; never password-login every run.
 
 ## Where to look
@@ -39,6 +43,7 @@ These are the single source of truth — other docs point here rather than resta
 |------|------|
 | Any API change | `promptstudio/server/handler.py` |
 | Vision / prompts | `promptstudio/prompts/engine.py` |
+| Keep/reject classify | `promptstudio/scraping/media_classifier.py` · job in `classify_job.py` |
 | Gallery index | `promptstudio/storage/db.py` |
 | Background job contention | `promptstudio/jobs.py` |
 | Why a job did that | `<archive>/_journal/`, `GET /api/journal` |

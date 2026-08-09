@@ -167,11 +167,35 @@ DEFAULT_BIO_KEYWORDS = _env_csv(
     "IG_BIO_KEYWORDS",
     "model,influencer,fitness,glamour,actress,swimwear,cosplay,fashion,beauty,photographer",
 )
-# Video frame selection — used by `scraping/video_frames.py` for video
-# thumbnails (`storage/thumbs.py`) and near-duplicate detection
-# (`storage/dedupe.py`). These outlived the glam classifier that introduced
-# them; the CLASSIFY_REEL_* names are kept so the frame ranker reads unchanged.
+# ── Media keep/reject classifier (scraping/media_classifier.py) ─────────
+# Ollama request shape. One vision call per photo; one per reel contact sheet.
+CLASSIFY_MAX_EDGE = int(os.environ.get("CLASSIFY_MAX_EDGE", "768"))
+# Contact sheets carry 9 panels, so they need a larger edge than a single frame.
+CLASSIFY_SHEET_MAX_EDGE = int(os.environ.get("CLASSIFY_SHEET_MAX_EDGE", "1368"))
+CLASSIFY_NUM_CTX = int(os.environ.get("CLASSIFY_NUM_CTX", "8192"))
+CLASSIFY_NUM_PREDICT = int(os.environ.get("CLASSIFY_NUM_PREDICT", "400"))
+CLASSIFY_TIMEOUT = float(os.environ.get("CLASSIFY_TIMEOUT", "180"))
+CLASSIFY_RETRIES = int(os.environ.get("CLASSIFY_RETRIES", "2"))
+CLASSIFY_KEEP_ALIVE = os.environ.get("CLASSIFY_KEEP_ALIVE", "30m")
+# JSON-schema constrained decoding (Ollama `format`). Off => legacy regex scrape.
+CLASSIFY_STRUCTURED = _env_bool("CLASSIFY_STRUCTURED", "1")
+# Tiers 0..N are rejects; N+1..4 are keeps. The 0-4 tier is what gets persisted,
+# so moving this re-thresholds the whole archive with no re-classify. Default 1
+# = discard the unusable (tier 0) *and* the fully-modest (tier 1). Set to 0 for
+# a cleanup-only pass: the 1<->2 boundary has never been measured, and the one
+# boundary that was (2<->3) came back at 0.576 recall.
+CLASSIFY_REJECT_MAX_TIER = int(os.environ.get("CLASSIFY_REJECT_MAX_TIER", "1"))
+# Reel contact sheets are kept on disk so the review UI can show what the model
+# actually looked at. `_classify` is in EXCLUDED_FOLDERS, so they stay out of
+# the gallery, the creator list and every rebuild.
+CLASSIFY_SHEET_DIR = os.path.join(SAVED_DIR, "_classify")
+
+# Video frame selection — used by `scraping/video_frames.py` for the classifier,
+# for video thumbnails (`storage/thumbs.py`) and for near-duplicate detection
+# (`storage/dedupe.py`).
 CLASSIFY_REEL_CANDIDATES = int(os.environ.get("CLASSIFY_REEL_CANDIDATES", "16"))
+# Vision calls a single reel may spend: the sheet, plus at most one confirm pass.
+CLASSIFY_REEL_VISION_MAX = int(os.environ.get("CLASSIFY_REEL_VISION_MAX", "2"))
 CLASSIFY_REEL_SKIP_HEAD_FRAC = float(os.environ.get("CLASSIFY_REEL_SKIP_HEAD_FRAC", "0.02"))
 # 0.0 on purpose: the interesting frame is often in the final seconds.
 CLASSIFY_REEL_SKIP_TAIL_FRAC = float(os.environ.get("CLASSIFY_REEL_SKIP_TAIL_FRAC", "0.0"))
@@ -180,6 +204,13 @@ CLASSIFY_REEL_MIN_SHARP = float(os.environ.get("CLASSIFY_REEL_MIN_SHARP", "35"))
 # "Sharp enough" reference — frames at/above this stop earning extra rank, so an
 # adequately sharp frame is not beaten by a razor-sharp static intro.
 CLASSIFY_REEL_SHARP_REF = float(os.environ.get("CLASSIFY_REEL_SHARP_REF", "140"))
+# Confidence band that triggers a full-resolution confirm re-read of the peak
+# frame. Outside it the first answer stands.
+CLASSIFY_REEL_UNCERTAIN_LO = float(os.environ.get("CLASSIFY_REEL_UNCERTAIN_LO", "0.45"))
+CLASSIFY_REEL_UNCERTAIN_HI = float(os.environ.get("CLASSIFY_REEL_UNCERTAIN_HI", "0.65"))
+# Whole-reel contact sheet: one vision call sees the entire timeline, so a
+# reveal in the final seconds is judged. Off => rank frames and score the best.
+CLASSIFY_REEL_SHEET = _env_bool("CLASSIFY_REEL_SHEET", "1")
 CLASSIFY_REEL_SHEET_PANELS = int(os.environ.get("CLASSIFY_REEL_SHEET_PANELS", "9"))
 CLASSIFY_REEL_SHEET_PANEL_W = int(os.environ.get("CLASSIFY_REEL_SHEET_PANEL_W", "256"))
 # Skin-tone fraction weight in the frame ranker. 0 disables the term.

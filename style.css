@@ -3682,3 +3682,351 @@ button.tag-pill.tag-clickable:hover {
     margin-top: 8px;
     padding-top: 8px;
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Keep/reject classification
+   Sidebar meter · creator pill · card verdict badges · review strip ·
+   triage panel. Rose = reject, emerald = keep, slate = not yet judged;
+   that mapping is used identically in all four surfaces so the colour
+   itself carries the meaning.
+   ═══════════════════════════════════════════════════════════════════ */
+
+.verdict-meter {
+    display: flex;
+    height: 8px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: rgba(15, 23, 42, 0.85);
+    border: 1px solid var(--border-glass);
+}
+
+.verdict-meter-seg {
+    height: 100%;
+    transition: width var(--transition-smooth);
+}
+
+.verdict-meter-seg.keep { background: linear-gradient(90deg, #10b981, #34d399); }
+.verdict-meter-seg.reject { background: linear-gradient(90deg, #f43f5e, #fb7185); }
+.verdict-meter-seg.todo { background: rgba(100, 116, 139, 0.4); }
+
+/* Only while a job is running — a permanently animated bar reads as broken. */
+.verdict-meter.running .verdict-meter-seg.todo {
+    background-image: repeating-linear-gradient(
+        45deg,
+        rgba(148, 163, 184, 0.45) 0 6px,
+        rgba(148, 163, 184, 0.18) 6px 12px
+    );
+    animation: verdict-meter-march 1.1s linear infinite;
+}
+
+@keyframes verdict-meter-march {
+    from { background-position: 0 0; }
+    to { background-position: 17px 0; }
+}
+
+.verdict-meter-legend {
+    font-family: var(--font-sub);
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    letter-spacing: 0.2px;
+}
+
+.creator-reject-pill {
+    font-family: var(--font-sub);
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: 10px;
+    background: rgba(244, 63, 94, 0.18);
+    color: #fb7185;
+    border: 1px solid rgba(244, 63, 94, 0.35);
+    white-space: nowrap;
+}
+
+.creator-reject-pill.running {
+    background: rgba(139, 92, 246, 0.2);
+    color: #c4b5fd;
+    border-color: rgba(139, 92, 246, 0.4);
+}
+
+/* ── card verdict badge ───────────────────────────────────────────── */
+
+/* Top band, clear of both overlay rows: the action row sits above it and only
+   appears on hover, and `.overlay-bottom-info` owns the bottom. Anchoring the
+   pill to the bottom put it straight on top of the prompt-status badge. */
+.verdict-pill {
+    position: absolute;
+    left: 10px;
+    top: 46px;
+    z-index: 3;
+    font-family: var(--font-sub);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    padding: 3px 8px;
+    border-radius: 20px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    pointer-events: none;
+}
+
+.verdict-pill.keep { background: rgba(16, 185, 129, 0.9); color: #05261c; }
+.verdict-pill.reject { background: rgba(244, 63, 94, 0.92); color: #fff; }
+.verdict-pill.error { background: rgba(249, 115, 22, 0.92); color: #fff; }
+
+/* Outside review mode the verdict is context, not the task. */
+.verdict-pill.quiet {
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity var(--transition-fast), transform var(--transition-fast);
+}
+
+.photo-card:hover .verdict-pill.quiet {
+    opacity: 0.92;
+    transform: translateY(0);
+}
+
+.verdict-pill-manual { font-size: 0.6rem; opacity: 0.85; }
+
+/* Reject cards are dimmed so the pile reads at a glance without labels.
+   Hover restores full fidelity — you still have to judge the image. */
+.photo-card.verdict-reject {
+    border-color: rgba(244, 63, 94, 0.5);
+}
+
+.photo-card.verdict-reject img {
+    filter: saturate(0.45) brightness(0.78);
+    transition: filter var(--transition-smooth);
+}
+
+.photo-card.verdict-reject:hover img { filter: none; }
+
+.photo-card.verdict-error { border-color: rgba(249, 115, 22, 0.5); }
+.photo-card.verdict-keep { border-color: rgba(16, 185, 129, 0.38); }
+
+/* A favourited reject is never swept up by "select non-favourites"; make that
+   visible on the card rather than only in the toast that says it was skipped. */
+.photo-card.verdict-reject.is-favorite::after {
+    content: "\f023";
+    font-family: "Font Awesome 6 Free";
+    font-weight: 900;
+    position: absolute;
+    right: 10px;
+    top: 46px;
+    z-index: 3;
+    font-size: 0.75rem;
+    color: #fcd34d;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+
+/* ── review strip ─────────────────────────────────────────────────── */
+
+.review-bar {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px 14px;
+    margin-bottom: 14px;
+    border-radius: var(--radius-md);
+    background: linear-gradient(
+        180deg,
+        rgba(244, 63, 94, 0.12),
+        rgba(15, 23, 42, 0.72)
+    );
+    border: 1px solid rgba(244, 63, 94, 0.35);
+    box-shadow: var(--shadow-sm);
+}
+
+.review-bar-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.review-bar-title {
+    font-family: var(--font-display, var(--font-sub));
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.review-bar-hint {
+    font-family: var(--font-sub);
+    font-size: 0.72rem;
+    color: var(--text-muted);
+}
+
+.review-bar-filters {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.review-chip.active {
+    background: rgba(244, 63, 94, 0.2);
+    border-color: rgba(244, 63, 94, 0.55);
+    color: #fda4af;
+    box-shadow: 0 0 0 1px rgba(244, 63, 94, 0.14);
+}
+
+.review-chip-n {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+    opacity: 0.85;
+}
+
+.review-bar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.review-bar-count {
+    font-family: var(--font-sub);
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    margin-right: auto;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── triage panel ─────────────────────────────────────────────────── */
+
+.triage-block {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    border-radius: var(--radius-md);
+    background: rgba(15, 23, 42, 0.62);
+    border: 1px solid var(--border-glass);
+    margin-bottom: 12px;
+}
+
+.triage-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.tier-chip {
+    font-family: var(--font-sub);
+    font-size: 0.78rem;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 20px;
+    background: rgba(100, 116, 139, 0.25);
+    color: var(--text-secondary);
+    border: 1px solid var(--border-glass);
+    white-space: nowrap;
+}
+
+/* Tier colour runs cool -> warm with exposure, and the two reject tiers read
+   as muted rather than alarming: most of them are simply not interesting. */
+.tier-chip.t0 { background: rgba(100, 116, 139, 0.28); color: #cbd5e1; }
+.tier-chip.t1 { background: rgba(56, 189, 248, 0.18); color: #7dd3fc; }
+.tier-chip.t2 { background: rgba(16, 185, 129, 0.2); color: #6ee7b7; }
+.tier-chip.t3 { background: rgba(236, 72, 153, 0.2); color: #f9a8d4; }
+.tier-chip.t4 { background: rgba(249, 115, 22, 0.22); color: #fdba74; }
+.tier-chip.terr { background: rgba(249, 115, 22, 0.25); color: #fdba74; }
+
+.triage-meta {
+    font-family: var(--font-sub);
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.triage-reason {
+    font-family: var(--font-sub);
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    line-height: 1.45;
+    margin: 0;
+}
+
+.triage-sheet {
+    width: 100%;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-glass);
+    display: block;
+    margin-top: 4px;
+    cursor: zoom-in;
+}
+
+.triage-verdict-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.triage-btn {
+    flex: 1 1 auto;
+    min-width: 96px;
+    font-family: var(--font-sub);
+    font-size: 0.82rem;
+    font-weight: 600;
+    padding: 9px 12px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-glass);
+    background: rgba(30, 41, 59, 0.78);
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    transition: all var(--transition-fast);
+}
+
+.triage-btn:hover { color: var(--text-primary); border-color: var(--border-hover); }
+
+.triage-btn.keep.active {
+    background: rgba(16, 185, 129, 0.22);
+    border-color: rgba(16, 185, 129, 0.6);
+    color: #6ee7b7;
+}
+
+.triage-btn.reject.active {
+    background: rgba(244, 63, 94, 0.22);
+    border-color: rgba(244, 63, 94, 0.6);
+    color: #fda4af;
+}
+
+.triage-btn.auto { flex: 0 0 auto; min-width: 0; }
+
+.triage-keys {
+    font-family: var(--font-sub);
+    font-size: 0.68rem;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+}
+
+.triage-keys kbd {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.65rem;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(30, 41, 59, 0.9);
+    border: 1px solid var(--border-glass);
+    color: var(--text-secondary);
+}
+
+.review-bar-hint kbd {
+    font-family: var(--font-mono, monospace);
+    font-size: 0.65rem;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(30, 41, 59, 0.9);
+    border: 1px solid var(--border-glass);
+    color: var(--text-secondary);
+}
