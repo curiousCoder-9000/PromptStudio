@@ -7,38 +7,38 @@ the machine that holds the real archive. `--kind reel` (default) or
 `--kind photo`; the two are separate sets with separate labels.
 
     # 1. stratified sample; contact sheets for reels, previews for photos
-    py scripts/eval_reel_classifier.py sample --kind reel  --count 120
-    py scripts/eval_reel_classifier.py sample --kind photo --count 120
+    py scripts/eval_reel_classifier.py sample --kind photo --count 120 --open
 
-    # 2. open the page it prints, label with 0-4 (and `r` for reels), Export
-    py scripts/eval_reel_classifier.py label --kind reel --import ~/Downloads/labels.jsonl
+    # 2. label with 0-4 in the browser (progress auto-saves), Export, then:
+    py scripts/eval_reel_classifier.py label --kind photo --import ~/Downloads/labels.jsonl
 
-    # 3. record the current pipeline as a baseline (needs Ollama)
-    py scripts/eval_reel_classifier.py run --kind reel --name baseline
-
-    # 4. change something, re-run, diff
-    py scripts/eval_reel_classifier.py report --kind reel --name v4-sheet --against baseline
-
-To decide CLASSIFY_PHOTO_ORDINAL, run the photo set twice under both settings
-and compare `glam_accuracy` — the one axis both vocabularies share:
-
-    py scripts/eval_reel_classifier.py run --kind photo --name legacy
-    CLASSIFY_PHOTO_ORDINAL=1 py scripts/eval_reel_classifier.py run --kind photo --name ordinal
+    # 3. A/B the photo vocabularies (needs Ollama). Compare on glam_accuracy.
+    py scripts/eval_reel_classifier.py run --kind photo --name legacy --legacy
+    py scripts/eval_reel_classifier.py run --kind photo --name ordinal --ordinal
     py scripts/eval_reel_classifier.py report --kind photo --name ordinal --against legacy
 
+    # Flip CLASSIFY_PHOTO_ORDINAL=1 only if ordinal wins glam_accuracy AND
+    # top_score_share drops (the saturated glam-3 problem).
+
+    # Reels (contact-sheet pipeline is already the default production path):
+    py scripts/eval_reel_classifier.py sample --kind reel --count 120 --open
+    py scripts/eval_reel_classifier.py run --kind reel --name baseline
+    py scripts/eval_reel_classifier.py report --kind reel --name baseline
+
 Everything lives under <archive>/_eval/ — never in the repo, because the labels
-encode personal taste over personal media.
+encode personal taste over personal media. Back that folder up.
 """
 
 import argparse
 import os
 import sys
+import webbrowser
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from promptstudio.config import MODEL_NAME, SAVED_DIR
+from promptstudio.config import CLASSIFY_PHOTO_ORDINAL, MODEL_NAME, SAVED_DIR
 from promptstudio.evalset import (
     EVAL_DIR,
     KINDS,
@@ -46,6 +46,8 @@ from promptstudio.evalset import (
     EvalItem,
     choose_sample,
     compute_metrics,
+    eval_status,
+    file_url,
     labels_file,
     list_results,
     load_labels,
@@ -69,6 +71,41 @@ def _candidate_rows(kind: str):
         media_type="video" if kind == "reel" else "photo", limit=None
     )
     return [{"rel_path": r["rel_path"], "glam_score": r.get("glam_score")} for r in rows]
+
+
+def _open_page(path: str) -> None:
+    if not path or not os.path.isfile(path):
+        print(f"(no page at {path})")
+        return
+    url = file_url(path)
+    print(f"Opening: {url}")
+    try:
+        webbrowser.open(url)
+    except Exception as e:
+        print(f"Could not open browser ({e}). Paste the file:// URL above manually.")
+
+
+def cmd_status(args) -> None:
+    print(f"archive: {SAVED_DIR}")
+    print(f"eval:    {EVAL_DIR}")
+    print(f"model:   {MODEL_NAME}")
+    print(f"CLASSIFY_PHOTO_ORDINAL={1 if CLASSIFY_PHOTO_ORDINAL else 0}")
+    print()
+    kinds = [args.kind] if args.kind else list(KINDS)
+    for kind in kinds:
+        st = eval_status(kind)
+        print(f"=== {kind} ===")
+        print(f"  sample:   {st['sample_size']}  (previews: {st['with_preview']})")
+        print(f"  labelled: {st['labelled']}/{st['sample_size']}  remaining {st['remaining']}")
+        if st["true_tiers"]:
+            print("  true tiers: " + ", ".join(f"{k}={v}" for k, v in st["true_tiers"].items()))
+        page = st["label_page"]
+        if os.path.isfile(page):
+            print(f"  label UI: {file_url(page)}")
+        else:
+            print("  label UI: (run sample first)")
+        print(f"  results:  {', '.join(st['results']) or '(none yet)'}")
+        print()
 
 
 def cmd_sample(args) -> None:
@@ -133,10 +170,18 @@ def cmd_sample(args) -> None:
     noun = "sheet" if kind == "reel" else "preview"
     print(f"\n{len(items)} {noun}(s) ready" + (f", {failed} unreadable" if failed else ""))
     print(f"{done}/{len(merged)} already labelled")
-    print(f"\nOpen:   file://{page}")
+    print(f"labels:  {labels_file(kind)}")
+    print(f"\nOpen:   {file_url(page)}")
     keys = "0-4, 'r' for reveal-at-end" if kind == "reel" else "0-4"
     print(f"Label with {keys}, then Export and:")
     print(f"  py scripts/eval_reel_classifier.py label --kind {kind} --import <labels.jsonl>")
+    if kind == "photo":
+        print("\nAfter labelling, A/B the photo vocabularies:")
+        print(f"  py scripts/eval_reel_classifier.py run --kind photo --name legacy --legacy")
+        print(f"  py scripts/eval_reel_classifier.py run --kind photo --name ordinal --ordinal")
+        print(f"  py scripts/eval_reel_classifier.py report --kind photo --name ordinal --against legacy")
+    if args.open:
+        _open_page(page)
 
 
 def cmd_label(args) -> None:
@@ -168,30 +213,57 @@ def cmd_label(args) -> None:
         for i in done:
             hist[i.true_exposure] = hist.get(i.true_exposure, 0) + 1
         print("true tiers: " + ", ".join(f"{t}={hist.get(t, 0)}" for t in range(5)))
+    page = os.path.join(EVAL_DIR, f"label-{kind}.html")
     if len(done) < len(items):
-        print(f"\nKeep going: file://{os.path.join(EVAL_DIR, f'label-{kind}.html')}")
+        print(f"\nKeep going: {file_url(page)}")
+    else:
+        print("\nAll labelled. Next:")
+        if kind == "photo":
+            print("  py scripts/eval_reel_classifier.py run --kind photo --name legacy --legacy")
+            print("  py scripts/eval_reel_classifier.py run --kind photo --name ordinal --ordinal")
+            print("  py scripts/eval_reel_classifier.py report --kind photo --name ordinal --against legacy")
+        else:
+            print(f"  py scripts/eval_reel_classifier.py run --kind {kind} --name baseline")
+    if args.open:
+        _open_page(page)
 
 
 def cmd_run(args) -> None:
-    from promptstudio.config import CLASSIFY_PHOTO_ORDINAL
+    from promptstudio.config import CLASSIFY_PHOTO_ORDINAL as env_ordinal
     from promptstudio.scraping.outfit_classifier import ollama_reachable
 
     kind = args.kind
     labelled = [i for i in load_labels(labels_file(kind)) if i.is_labelled()]
     if not labelled:
         print(f"Nothing labelled for {kind} yet.")
-        return
+        print(f"  py scripts/eval_reel_classifier.py sample --kind {kind} --open")
+        sys.exit(1)
     if not ollama_reachable():
         print(f"Ollama not reachable (need {MODEL_NAME}).")
         sys.exit(1)
 
-    print(f"Scoring {len(labelled)} labelled {kind}(s) with {MODEL_NAME}...")
+    # Resolve vocabulary for photos. Reels always use the live video path.
+    ordinal_flag = None  # None = env default for photos
     if kind == "photo":
-        print(f"  CLASSIFY_PHOTO_ORDINAL={'1' if CLASSIFY_PHOTO_ORDINAL else '0'}"
-              " — set it and re-run under another name to A/B the vocabulary")
+        if args.ordinal and args.legacy:
+            print("Pass only one of --ordinal / --legacy.")
+            sys.exit(2)
+        if args.ordinal:
+            ordinal_flag = True
+        elif args.legacy:
+            ordinal_flag = False
+        else:
+            ordinal_flag = bool(env_ordinal)
+
+    vocab = (
+        "n/a (reel pipeline)"
+        if kind == "reel"
+        else ("ordinal/v4" if ordinal_flag else "legacy/boolean")
+    )
+    print(f"Scoring {len(labelled)} labelled {kind}(s) with {MODEL_NAME} [{vocab}]...")
     results = []
     for n, item in enumerate(labelled, start=1):
-        results.append(score_item(item.rel_path, kind=kind))
+        results.append(score_item(item.rel_path, kind=kind, ordinal=ordinal_flag))
         if n % 10 == 0 or n == len(labelled):
             print(f"  {n}/{len(labelled)}")
 
@@ -204,7 +276,8 @@ def cmd_run(args) -> None:
             "prompt_versions": versions,
             "count": len(results),
             "kind": kind,
-            "photo_ordinal": bool(CLASSIFY_PHOTO_ORDINAL) if kind == "photo" else None,
+            "photo_ordinal": ordinal_flag if kind == "photo" else None,
+            "vocab": vocab,
         },
         kind=kind,
     )
@@ -236,6 +309,8 @@ def _print_report(name: str, against: str = "", kind: str = "reel") -> None:
 
     print(f"\n=== {kind}: {name} ===")
     print(f"model {meta.get('model', '?')} · prompts {', '.join(meta.get('prompt_versions') or []) or '?'}")
+    if meta.get("vocab"):
+        print(f"vocab {meta.get('vocab')}")
     print(f"{m.scored} scored of {m.labelled} labelled\n")
 
     rows = [("glam_accuracy", m.glam_accuracy, "  (0-3 axis, both vocabularies)")]
@@ -281,6 +356,12 @@ def _print_report(name: str, against: str = "", kind: str = "reel") -> None:
     failures = [k for k, v, _ in rows if meets_target(k, v) is False]
     print("\n" + ("All targets met." if not failures else "Missing targets: " + ", ".join(failures)))
 
+    if kind == "photo" and against:
+        print(
+            "\nDecision rule: flip CLASSIFY_PHOTO_ORDINAL=1 only if ordinal "
+            "glam_accuracy >= legacy AND top_score_share drops."
+        )
+
 
 def cmd_report(args) -> None:
     _print_report(args.name, args.against, kind=args.kind)
@@ -292,26 +373,46 @@ def main() -> None:
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    def add_kind(parser):
+    def add_kind(parser, *, required=False, default="reel"):
         parser.add_argument(
-            "--kind", choices=KINDS, default="reel",
+            "--kind",
+            choices=KINDS,
+            default=None if required else default,
+            required=required,
             help="reel (contact sheets) or photo (the image itself)",
         )
 
-    s = sub.add_parser("sample", help="pick reels and render contact sheets")
+    st = sub.add_parser("status", help="show sample/label/results progress")
+    st.add_argument(
+        "--kind", choices=KINDS, default=None,
+        help="one kind only (default: both)",
+    )
+    st.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("sample", help="pick items and render label previews")
     s.add_argument("--count", type=int, default=120)
     s.add_argument("--seed", type=int, default=20260809, help="same seed = same sample")
     s.add_argument("--resheet", action="store_true", help="re-render existing sheets")
+    s.add_argument("--open", action="store_true", help="open the labelling page in a browser")
     add_kind(s)
     s.set_defaults(func=cmd_sample)
 
     lab = sub.add_parser("label", help="show progress / import an export")
     lab.add_argument("--import", dest="import_path", default="", help="labels.jsonl to merge")
+    lab.add_argument("--open", action="store_true", help="open the labelling page")
     add_kind(lab)
     lab.set_defaults(func=cmd_label)
 
     r = sub.add_parser("run", help="score the labelled set (needs Ollama)")
     r.add_argument("--name", default="run", help="name this run, e.g. baseline")
+    r.add_argument(
+        "--ordinal", action="store_true",
+        help="photos only: force v4 exposure_tier vocabulary",
+    )
+    r.add_argument(
+        "--legacy", action="store_true",
+        help="photos only: force the old three-boolean prompt",
+    )
     add_kind(r)
     r.set_defaults(func=cmd_run)
 

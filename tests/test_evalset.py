@@ -18,6 +18,8 @@ from promptstudio.evalset import (
     EvalResult,
     choose_sample,
     compute_metrics,
+    eval_status,
+    file_url,
     load_labels,
     meets_target,
     merge_labels,
@@ -374,6 +376,21 @@ def test_true_glam_maps_the_label_onto_the_product_axis():
 
 def test_true_glam_is_undefined_without_a_label():
     assert EvalItem(rel_path="x").true_glam() == -1
+
+
+def test_file_url_is_browser_openable():
+    url = file_url(r"C:\Users\archi\Pictures\InstagramSaved\_eval\label-photo.html")
+    assert url.startswith("file:///")
+    assert "\\" not in url
+    assert "label-photo.html" in url
+
+
+def test_eval_status_reports_empty_progress():
+    st = eval_status("photo")
+    assert st["kind"] == "photo"
+    assert st["sample_size"] >= 0
+    assert "labels_file" in st
+    assert isinstance(st["results"], list)
 
 
 def _legacy(path, true_tier, glam):

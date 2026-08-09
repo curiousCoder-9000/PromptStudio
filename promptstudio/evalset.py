@@ -388,12 +388,15 @@ def score_item(
     rel_path: str,
     kind: str = "reel",
     base_dir: str = SAVED_DIR,
+    *,
+    ordinal: Optional[bool] = None,
 ) -> EvalResult:
     """Score one item with the *current* pipeline. Requires Ollama.
 
-    Photos go through `classify_image`, which honours CLASSIFY_PHOTO_ORDINAL —
-    so flipping that env var and re-running is exactly the A/B the flag needs
-    before it can be turned on for the real archive.
+    Photos go through `classify_image`. Pass ``ordinal=True/False`` to force
+    the v4 tier vocabulary or the legacy booleans for an A/B run without
+    mutating the process-wide ``CLASSIFY_PHOTO_ORDINAL`` env flag. ``None``
+    keeps whatever the env currently says.
     """
     from promptstudio.scraping.outfit_classifier import classify_image, classify_video
 
@@ -405,7 +408,10 @@ def score_item(
 
     started = time.monotonic()
     try:
-        verdict = classify_video(full) if kind == "reel" else classify_image(full)
+        if kind == "reel":
+            verdict = classify_video(full)
+        else:
+            verdict = classify_image(full, ordinal=ordinal)
     except Exception as exc:
         result.error = f"{type(exc).__name__}: {exc}"[:200]
         result.ms = int((time.monotonic() - started) * 1000)
@@ -458,6 +464,37 @@ def list_results(kind: str = "reel") -> List[str]:
         )
     except OSError:
         return []
+
+
+def eval_status(kind: str = "reel") -> Dict[str, Any]:
+    """Snapshot of sample / label / results progress for one media kind."""
+    path = labels_file(kind)
+    items = load_labels(path)
+    labelled = [i for i in items if i.is_labelled()]
+    with_sheet = [i for i in items if i.sheet]
+    tier_hist: Dict[str, int] = {}
+    for i in labelled:
+        key = str(i.true_exposure)
+        tier_hist[key] = tier_hist.get(key, 0) + 1
+    return {
+        "kind": kind,
+        "eval_dir": EVAL_DIR,
+        "labels_file": path,
+        "sample_size": len(items),
+        "with_preview": len(with_sheet),
+        "labelled": len(labelled),
+        "remaining": max(0, len(items) - len(labelled)),
+        "true_tiers": dict(sorted(tier_hist.items(), key=lambda kv: int(kv[0]))),
+        "label_page": os.path.join(EVAL_DIR, f"label-{kind}.html"),
+        "results": list_results(kind),
+    }
+
+
+def file_url(path: str) -> str:
+    """Browser-openable file:// URL (Windows-safe)."""
+    abs_path = os.path.abspath(path)
+    # pathlib would add an extra slash on Windows as file:///C:/...
+    return "file:///" + abs_path.replace("\\", "/")
 
 
 def render_photo_preview(full_path: str, out_path: str, max_edge: int = 900) -> bool:
