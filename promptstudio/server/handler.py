@@ -200,20 +200,17 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, fmt, *args):
         """Access log that must never break the response.
 
-        BaseHTTPRequestHandler writes to ``sys.stderr``. On Windows a detached
-        or invalidated console makes that raise ``OSError: [Errno 22] Invalid
-        argument`` — and because ``log_request`` runs inside ``send_response``,
-        the exception aborts the whole JSON body. That is exactly how a running
-        classify job stopped updating the corner chip: status polls failed while
-        the background thread kept scoring.
+        ``BaseHTTPRequestHandler.log_message`` writes to ``sys.stderr``. On
+        Windows a detached or invalidated console raises
+        ``OSError: [Errno 22] Invalid argument`` inside ``send_response`` →
+        ``log_request``, which aborts the response before any body is written
+        (browser shows connection closed / blank page). Do not call ``super()``
+        — route through the package logger only.
         """
         try:
-            super().log_message(fmt, *args)
-        except OSError:
-            try:
-                log.debug("http %s - %s", self.address_string(), fmt % args)
-            except Exception:
-                pass
+            log.debug("%s - %s", self.address_string(), fmt % args)
+        except Exception:
+            pass
 
     def _send_json_500(self) -> None:
         """Best-effort 500. Silent if headers already went out."""
