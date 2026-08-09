@@ -234,45 +234,40 @@
                         </div>
                     </div>
 
-                    <!-- Video / Reel inspector (shown instead of prompt generator) -->
-                    <div class="video-detail-panel" id="videoDetailPanel" style="display:none;">
-                        <div class="video-detail-hero">
-                            <div class="video-detail-thumb-wrap">
-                                <img id="videoDetailThumb" src="" alt="Reel frame" loading="lazy">
-                                <span class="video-detail-play-badge"><i class="fa-solid fa-clapperboard"></i> Reel</span>
+                    <!-- Media Detail inspector (shown for both photos and videos) -->
+                    <div class="media-detail-panel" id="mediaDetailPanel" style="display:none;">
+                        <div class="media-detail-hero">
+                            <div class="media-detail-thumb-wrap">
+                                <img id="mediaDetailThumb" src="" alt="Media frame" loading="lazy">
+                                <span class="media-detail-play-badge" id="mediaDetailTypeBadge"><i class="fa-solid fa-image"></i> Photo</span>
                             </div>
-                            <div class="video-detail-hero-text">
-                                <div class="video-detail-handle" id="videoDetailHandle">@creator</div>
-                                <div class="video-detail-file" id="videoDetailFile">filename.mp4</div>
-                                <div class="video-detail-pills" id="videoDetailPills"></div>
+                            <div class="media-detail-hero-text">
+                                <div class="media-detail-handle" id="mediaDetailHandle">@creator</div>
+                                <div class="media-detail-file" id="mediaDetailFile">filename.mp4</div>
+                                <div class="media-detail-pills" id="mediaDetailPills"></div>
                             </div>
                         </div>
 
-                        <div class="video-detail-grid" id="videoDetailGrid">
+                        <div class="media-detail-grid" id="mediaDetailGrid">
                             <!-- filled by JS: duration, size, date -->
                         </div>
 
-                        <div class="video-detail-block">
+                        <div class="media-detail-block">
                             <div class="sync-status-label">Caption</div>
-                            <div class="video-caption" id="videoDetailCaption">No caption in archive metadata.</div>
+                            <div class="media-caption" id="mediaDetailCaption">No caption in archive metadata.</div>
                         </div>
 
-                        <div class="video-detail-actions">
-                            <a class="btn btn-primary btn-sm" id="videoOpenIgBtn" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">
+                        <div class="media-detail-actions">
+                            <a class="btn btn-primary btn-sm" id="mediaOpenIgBtn" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">
                                 <i class="fa-brands fa-instagram"></i> Open on Instagram
                             </a>
-                            <button type="button" class="btn btn-secondary btn-sm" id="videoExpandFromPanelBtn" title="Fullscreen player">
+                            <button type="button" class="btn btn-secondary btn-sm" id="mediaExpandFromPanelBtn" title="Fullscreen player" style="display:none;">
                                 <i class="fa-solid fa-expand"></i> Fullscreen
                             </button>
-                            <button type="button" class="btn btn-ghost btn-sm" id="videoCopyPathBtn" title="Copy archive path">
+                            <button type="button" class="btn btn-ghost btn-sm" id="mediaCopyPathBtn" title="Copy archive path">
                                 <i class="fa-solid fa-link"></i> Copy path
                             </button>
                         </div>
-
-                        <p class="video-detail-note">
-                            <i class="fa-solid fa-circle-info"></i>
-                            AI image prompts are for still photos. Reels show archive metadata and caption instead.
-                        </p>
                     </div>
 
                     <!-- Generate Prompt Action Button (photos only) -->

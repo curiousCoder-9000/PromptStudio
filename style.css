@@ -1407,23 +1407,22 @@ body {
     border-left: 1px solid var(--border-glass);
 }
 
-/* ── Reel / video detail panel (replaces prompt generator) ── */
-.video-detail-panel {
+/* ── Media detail panel (shown for both photos and videos) ── */
+.media-detail-panel {
     display: flex;
     flex-direction: column;
     gap: 14px;
-    flex: 1;
-    min-height: 0;
+    flex-shrink: 0;
     text-align: left;
 }
 
-.video-detail-hero {
+.media-detail-hero {
     display: flex;
     gap: 14px;
     align-items: flex-start;
 }
 
-.video-detail-thumb-wrap {
+.media-detail-thumb-wrap {
     position: relative;
     flex: 0 0 96px;
     width: 96px;
@@ -1435,14 +1434,14 @@ body {
     box-shadow: var(--shadow-sm);
 }
 
-.video-detail-thumb-wrap img {
+.media-detail-thumb-wrap img {
     width: 100%;
     height: 100%;
     object-fit: cover;
     display: block;
 }
 
-.video-detail-play-badge {
+.media-detail-play-badge {
     position: absolute;
     left: 6px;
     bottom: 6px;
@@ -1459,7 +1458,7 @@ body {
     gap: 4px;
 }
 
-.video-detail-hero-text {
+.media-detail-hero-text {
     flex: 1;
     min-width: 0;
     display: flex;
@@ -1467,13 +1466,13 @@ body {
     gap: 6px;
 }
 
-.video-detail-handle {
+.media-detail-handle {
     font-size: 1.05rem;
     font-weight: 600;
     color: var(--accent-cyan);
 }
 
-.video-detail-file {
+.media-detail-file {
     font-family: var(--font-code);
     font-size: 0.72rem;
     color: var(--text-muted);
@@ -1481,7 +1480,7 @@ body {
     line-height: 1.35;
 }
 
-.video-detail-pills {
+.media-detail-pills {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
@@ -1498,7 +1497,7 @@ body {
     color: var(--text-secondary);
 }
 
-.video-detail-grid {
+.media-detail-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 8px;
@@ -1530,13 +1529,13 @@ body {
     word-break: break-word;
 }
 
-.video-detail-block {
+.media-detail-block {
     display: flex;
     flex-direction: column;
     gap: 8px;
 }
 
-.video-caption {
+.media-caption {
     max-height: 160px;
     overflow-y: auto;
     padding: 12px 14px;
@@ -1550,23 +1549,23 @@ body {
     word-break: break-word;
 }
 
-.video-caption.empty {
+.media-caption.empty {
     color: var(--text-muted);
     font-style: italic;
 }
 
-.video-detail-actions {
+.media-detail-actions {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
     align-items: center;
 }
 
-.video-detail-actions .btn {
+.media-detail-actions .btn {
     text-decoration: none;
 }
 
-.video-detail-note {
+.media-detail-note {
     margin: 0;
     font-size: 0.75rem;
     color: var(--text-muted);
@@ -1576,7 +1575,7 @@ body {
     align-items: flex-start;
 }
 
-.video-detail-note i {
+.media-detail-note i {
     margin-top: 2px;
     color: var(--accent-cyan);
     opacity: 0.8;
@@ -2870,9 +2869,11 @@ button.tag-pill.tag-clickable:hover {
 /* Generate Prompt Section */
 .generate-prompt-section {
     flex: 1;
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: center;
+    padding: 20px 0;
 }
 
 .generate-prompt-placeholder {

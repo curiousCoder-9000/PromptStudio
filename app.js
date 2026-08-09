@@ -120,16 +120,16 @@ const elements = {
     promptContent: document.getElementById('promptContent'),
     inspectorPanelTitle: document.getElementById('inspectorPanelTitle'),
     inspectorModelTag: document.getElementById('inspectorModelTag'),
-    videoDetailPanel: document.getElementById('videoDetailPanel'),
-    videoDetailThumb: document.getElementById('videoDetailThumb'),
-    videoDetailHandle: document.getElementById('videoDetailHandle'),
-    videoDetailFile: document.getElementById('videoDetailFile'),
-    videoDetailPills: document.getElementById('videoDetailPills'),
-    videoDetailGrid: document.getElementById('videoDetailGrid'),
-    videoDetailCaption: document.getElementById('videoDetailCaption'),
-    videoOpenIgBtn: document.getElementById('videoOpenIgBtn'),
-    videoExpandFromPanelBtn: document.getElementById('videoExpandFromPanelBtn'),
-    videoCopyPathBtn: document.getElementById('videoCopyPathBtn'),
+    mediaDetailPanel: document.getElementById('mediaDetailPanel'),
+    mediaDetailThumb: document.getElementById('mediaDetailThumb'),
+    mediaDetailHandle: document.getElementById('mediaDetailHandle'),
+    mediaDetailFile: document.getElementById('mediaDetailFile'),
+    mediaDetailPills: document.getElementById('mediaDetailPills'),
+    mediaDetailGrid: document.getElementById('mediaDetailGrid'),
+    mediaDetailCaption: document.getElementById('mediaDetailCaption'),
+    mediaOpenIgBtn: document.getElementById('mediaOpenIgBtn'),
+    mediaExpandFromPanelBtn: document.getElementById('mediaExpandFromPanelBtn'),
+    mediaCopyPathBtn: document.getElementById('mediaCopyPathBtn'),
     // Inspector Controls
     promptTagsContainer: document.getElementById('promptTagsContainer'),
     positivePromptText: document.getElementById('positivePromptText'),
@@ -1768,15 +1768,15 @@ function openLightbox(index) {
     state.compareMode = false;
     setCompareMode(false);
     elements.lightboxModal.style.display = 'flex';
+    
+    // Always load the media details for both photos and videos
+    loadMediaDetailPanel(photo);
 
     if (isVideo) {
-        // Reels: show archive metadata — not the image prompt generator
-        loadVideoDetailPanel(photo);
         // Skip Comfy generations / prompt auto-load for videos
         if (elements.compareToggleBtn) elements.compareToggleBtn.style.display = 'none';
         state.currentGenerations = [];
     } else {
-        setInspectorMode('photo');
         loadGenerationsForPhoto(photo.rel_path);
         // Auto-load Ready cached prompts for stills only
         if (photo.has_prompt && !photo.prompt_stale) {
@@ -2009,8 +2009,8 @@ function formatTakenAt(iso) {
 
 
 /**
- * Photos: prompt generator. Videos: reel metadata
- * (vision image prompts are unreliable on MP4s).
+ * Photos: show media details + prompt generator. 
+ * Videos: show media details only.
  */
 function setInspectorMode(mode) {
     const panel = document.querySelector('.inspector-panel');
@@ -2025,8 +2025,9 @@ function setInspectorMode(mode) {
     if (elements.inspectorModelTag) {
         elements.inspectorModelTag.textContent = isVideo ? 'Archive' : 'Ollama Vision';
     }
-    if (elements.videoDetailPanel) {
-        elements.videoDetailPanel.style.display = isVideo ? 'flex' : 'none';
+    // Media details panel is now shown for both photos and videos
+    if (elements.mediaDetailPanel) {
+        elements.mediaDetailPanel.style.display = 'flex';
     }
     if (elements.generatePromptSection) {
         elements.generatePromptSection.style.display = isVideo ? 'none' : 'flex';
@@ -2082,36 +2083,44 @@ function metaCard(label, value) {
 }
 
 
-async function loadVideoDetailPanel(photo) {
-    if (!elements.videoDetailPanel || !photo) return;
-    setInspectorMode('video');
+async function loadMediaDetailPanel(photo) {
+    if (!elements.mediaDetailPanel || !photo) return;
+    const isVideo = isVideoPhoto(photo);
 
     // Immediate shell from gallery card data
-    if (elements.videoDetailHandle) {
-        elements.videoDetailHandle.textContent = `@${photo.creator || 'unknown'}`;
+    if (elements.mediaDetailHandle) {
+        elements.mediaDetailHandle.textContent = `@${photo.creator || 'unknown'}`;
     }
-    if (elements.videoDetailFile) {
-        elements.videoDetailFile.textContent = photo.filename || photo.rel_path || '';
+    if (elements.mediaDetailFile) {
+        elements.mediaDetailFile.textContent = photo.filename || photo.rel_path || '';
     }
-    if (elements.videoDetailThumb) {
-        elements.videoDetailThumb.src = photo.thumb_url || photo.url || '';
-        elements.videoDetailThumb.alt = photo.filename || 'Reel';
+    if (elements.mediaDetailThumb) {
+        elements.mediaDetailThumb.src = photo.thumb_url || photo.url || '';
+        elements.mediaDetailThumb.alt = photo.filename || 'Media';
     }
-    if (elements.videoDetailCaption) {
-        elements.videoDetailCaption.textContent = 'Loading metadata…';
-        elements.videoDetailCaption.classList.add('empty');
+    const badge = document.getElementById('mediaDetailTypeBadge');
+    if (badge) {
+        badge.innerHTML = isVideo ? '<i class="fa-solid fa-clapperboard"></i> Reel' : '<i class="fa-solid fa-image"></i> Photo';
     }
-    if (elements.videoDetailGrid) {
-        elements.videoDetailGrid.innerHTML = metaCard('Type', 'Reel / video');
+    if (elements.mediaDetailCaption) {
+        elements.mediaDetailCaption.textContent = 'Loading metadata…';
+        elements.mediaDetailCaption.classList.add('empty');
     }
-    if (elements.videoOpenIgBtn) elements.videoOpenIgBtn.style.display = 'none';
+    if (elements.mediaDetailGrid) {
+        elements.mediaDetailGrid.innerHTML = metaCard('Type', isVideo ? 'Reel / video' : 'Photo');
+    }
+    if (elements.mediaOpenIgBtn) elements.mediaOpenIgBtn.style.display = 'none';
+    if (elements.mediaExpandFromPanelBtn) {
+        elements.mediaExpandFromPanelBtn.style.display = isVideo ? 'inline-flex' : 'none';
+    }
 
     // Live duration when video element has metadata
     const paintDuration = () => {
+        if (!isVideo) return;
         const v = elements.lightboxVideo;
         const dur = getMediaDuration(v);
-        if (!Number.isFinite(dur) || !elements.videoDetailGrid) return;
-        const cards = elements.videoDetailGrid.querySelectorAll('.video-meta-card');
+        if (!Number.isFinite(dur) || !elements.mediaDetailGrid) return;
+        const cards = elements.mediaDetailGrid.querySelectorAll('.video-meta-card');
         // Update or append duration card
         let found = false;
         cards.forEach((c) => {
@@ -2123,13 +2132,13 @@ async function loadVideoDetailPanel(photo) {
             }
         });
         if (!found) {
-            elements.videoDetailGrid.insertAdjacentHTML(
+            elements.mediaDetailGrid.insertAdjacentHTML(
                 'beforeend',
                 metaCard('Duration', formatVideoTime(dur))
             );
         }
     };
-    if (elements.lightboxVideo) {
+    if (isVideo && elements.lightboxVideo) {
         if (elements.lightboxVideo.readyState >= 1) paintDuration();
         else {
             elements.lightboxVideo.addEventListener('loadedmetadata', paintDuration, { once: true });
@@ -2145,17 +2154,17 @@ async function loadVideoDetailPanel(photo) {
         const cur = state.photos[state.lightboxIndex];
         if (!cur || cur.rel_path !== photo.rel_path) return;
 
-        if (elements.videoDetailHandle) {
-            elements.videoDetailHandle.textContent = `@${data.creator || photo.creator || 'unknown'}`;
+        if (elements.mediaDetailHandle) {
+            elements.mediaDetailHandle.textContent = `@${data.creator || photo.creator || 'unknown'}`;
         }
-        if (elements.videoDetailFile) {
-            elements.videoDetailFile.textContent = data.filename || photo.filename || '';
+        if (elements.mediaDetailFile) {
+            elements.mediaDetailFile.textContent = data.filename || photo.filename || '';
         }
-        if (elements.videoDetailThumb && (data.thumb_url || photo.thumb_url)) {
-            elements.videoDetailThumb.src = data.thumb_url || photo.thumb_url;
+        if (elements.mediaDetailThumb && (data.thumb_url || photo.thumb_url)) {
+            elements.mediaDetailThumb.src = data.thumb_url || photo.thumb_url;
         }
 
-        if (elements.videoDetailPills) {
+        if (elements.mediaDetailPills) {
             const pills = [];
             if (data.favorite || photo.favorite) {
                 pills.push('<span class="video-pill is-favorite">Favorite</span>');
@@ -2163,50 +2172,55 @@ async function loadVideoDetailPanel(photo) {
             if (data.shortcode) {
                 pills.push(`<span class="video-pill">${escapeHtml(data.shortcode)}</span>`);
             }
-            elements.videoDetailPills.innerHTML = pills.join('');
+            elements.mediaDetailPills.innerHTML = pills.join('');
         }
 
-        const durationLive = getMediaDuration(elements.lightboxVideo);
         const gridParts = [
-            metaCard('Type', 'Reel / video'),
+            metaCard('Type', isVideo ? 'Reel / video' : 'Photo'),
             metaCard('Size', formatBytes(data.file_size)),
-            metaCard('Posted', formatTakenAt(data.taken_at)),
-            metaCard(
+            metaCard('Posted', formatTakenAt(data.taken_at))
+        ];
+        
+        if (isVideo) {
+            const durationLive = getMediaDuration(elements.lightboxVideo);
+            gridParts.push(metaCard(
                 'Duration',
                 Number.isFinite(durationLive) ? formatVideoTime(durationLive) : '…'
-            ),
-        ];
-        if (elements.videoDetailGrid) {
-            elements.videoDetailGrid.innerHTML = gridParts.join('');
+            ));
+        }
+        
+        if (elements.mediaDetailGrid) {
+            elements.mediaDetailGrid.innerHTML = gridParts.join('');
         }
 
         const caption = (data.caption || '').trim();
-        if (elements.videoDetailCaption) {
+        if (elements.mediaDetailCaption) {
             if (caption) {
-                elements.videoDetailCaption.textContent = caption;
-                elements.videoDetailCaption.classList.remove('empty');
+                elements.mediaDetailCaption.textContent = caption;
+                elements.mediaDetailCaption.classList.remove('empty');
             } else {
-                elements.videoDetailCaption.textContent =
-                    'No caption stored for this reel (metadata missing or empty).';
-                elements.videoDetailCaption.classList.add('empty');
+                elements.mediaDetailCaption.textContent =
+                    isVideo ? 'No caption stored for this reel (metadata missing or empty).'
+                            : 'No caption stored for this photo.';
+                elements.mediaDetailCaption.classList.add('empty');
             }
         }
 
-        if (elements.videoOpenIgBtn) {
+        if (elements.mediaOpenIgBtn) {
             if (data.post_url) {
-                elements.videoOpenIgBtn.href = data.post_url;
-                elements.videoOpenIgBtn.style.display = 'inline-flex';
+                elements.mediaOpenIgBtn.href = data.post_url;
+                elements.mediaOpenIgBtn.style.display = 'inline-flex';
             } else {
-                elements.videoOpenIgBtn.style.display = 'none';
+                elements.mediaOpenIgBtn.style.display = 'none';
             }
         }
 
     } catch (err) {
-        console.error('Video detail load failed', err);
-        if (elements.videoDetailCaption) {
-            elements.videoDetailCaption.textContent =
-                'Could not load reel metadata. File still plays on the left.';
-            elements.videoDetailCaption.classList.add('empty');
+        console.error('Media detail load failed', err);
+        if (elements.mediaDetailCaption) {
+            elements.mediaDetailCaption.textContent =
+                'Could not load media metadata.';
+            elements.mediaDetailCaption.classList.add('empty');
         }
     }
 }
