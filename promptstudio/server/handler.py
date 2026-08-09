@@ -51,7 +51,12 @@ _trash = TrashStore()
 _comfy = ComfyJobManager.get()
 _scrape_queue = CreatorScrapeQueue.get() if CREATOR_SCRAPE_QUEUE_ENABLED else None
 
-OLLAMA_TAGS_URL = os.environ.get("OLLAMA_TAGS_URL", "http://localhost:11434/api/tags")
+# Prefer 127.0.0.1 over localhost: on Windows, localhost often resolves to ::1
+# first while Ollama may only be listening on IPv4, which makes /api/health hang
+# for the full urllib timeout and the UI looks offline on every boot.
+OLLAMA_TAGS_URL = os.environ.get(
+    "OLLAMA_TAGS_URL", "http://127.0.0.1:11434/api/tags"
+)
 
 _following_cache: Dict[str, Any] = {"mtime": None, "accounts": []}
 

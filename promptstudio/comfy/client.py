@@ -46,7 +46,10 @@ PRO_NODE_FACE_DETAILER = "22"
 PRO_NODE_CHECKPOINT = "1"
 
 
-def check_comfy_health(timeout: float = 1.5) -> Dict[str, Any]:
+def check_comfy_health(timeout: float = 0.4) -> Dict[str, Any]:
+    """Probe ComfyUI. Default timeout is short: Comfy is usually off, and a
+    stacked 1.5s+1.5s miss made every /api/health (and the UI boot) feel hung.
+    """
     try:
         req = urllib.request.Request(f"{COMFYUI_URL}/system_stats", method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
