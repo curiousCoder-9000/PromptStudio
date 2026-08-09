@@ -445,6 +445,7 @@ body {
 .stat-icon.pink { background: rgba(236, 72, 153, 0.15); color: var(--accent-pink); }
 .stat-icon.cyan { background: rgba(6, 182, 212, 0.15); color: var(--accent-cyan); }
 .stat-icon.red { background: rgba(239, 68, 68, 0.15); color: var(--accent-red); }
+.stat-icon.orange { background: rgba(249, 115, 22, 0.15); color: #f97316; }
 
 .stat-info {
     display: flex;

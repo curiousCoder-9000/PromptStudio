@@ -1328,15 +1328,23 @@ class ArchiveIndex:
         count_prompts_ready() iterated every photo in the archive and loaded the
         whole prompt cache on each call, and /api/stats is on the init path.
         """
+        video_case = " OR ".join(
+            "LOWER(filename) LIKE ?" for _ in VIDEO_EXTENSIONS
+        )
         with self._lock:
             row = self._conn.execute(
-                "SELECT COUNT(*) AS photos, "
+                "SELECT COUNT(*) AS total, "
                 "COUNT(DISTINCT creator) AS creators, "
-                "SUM(CASE WHEN has_prompt = 1 THEN 1 ELSE 0 END) AS prompts_ready "
-                "FROM photos"
+                "SUM(CASE WHEN has_prompt = 1 THEN 1 ELSE 0 END) AS prompts_ready, "
+                f"SUM(CASE WHEN ({video_case}) THEN 1 ELSE 0 END) AS videos "
+                "FROM photos",
+                [f"%{ext}" for ext in VIDEO_EXTENSIONS],
             ).fetchone()
+        total = int(row["total"] or 0)
+        videos = int(row["videos"] or 0)
         return {
-            "total_photos": int(row["photos"] or 0),
+            "total_photos": total - videos,
+            "total_videos": videos,
             "total_creators": int(row["creators"] or 0),
             "prompts_ready": int(row["prompts_ready"] or 0),
         }

@@ -73,6 +73,7 @@ const state = {
 // DOM Elements
 const elements = {
     statTotalPhotos: document.getElementById('statTotalPhotos'),
+    statTotalVideos: document.getElementById('statTotalVideos'),
     statCreators: document.getElementById('statCreators'),
     statPersonPhotos: document.getElementById('statPersonPhotos'),
     creatorCount: document.getElementById('creatorCount'),
@@ -587,6 +588,7 @@ async function fetchStats() {
         const res = await fetch('/api/stats');
         const data = await res.json();
         elements.statTotalPhotos.textContent = data.total_photos.toLocaleString();
+        elements.statTotalVideos.textContent = (data.total_videos ?? 0).toLocaleString();
         elements.statCreators.textContent = data.total_creators.toLocaleString();
         elements.statPersonPhotos.textContent = (data.prompts_ready ?? 0).toLocaleString();
         if (typeof data.trash_enabled === 'boolean') {
