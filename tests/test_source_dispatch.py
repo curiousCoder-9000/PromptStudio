@@ -157,7 +157,7 @@ def dispatch(monkeypatch, tmp_path):
         done = threading.Event()
         original = manager.start_job
 
-        def sync_start(job_type, fn):
+        def sync_start(job_type, fn, *, source="instagram"):
             try:
                 fn(lambda _m: None, None)
             finally:

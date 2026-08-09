@@ -13,11 +13,11 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `GET` | `/api/insights` | Quality dashboard — prompt edit/regenerate rates, generation counts, classify tier distribution |
 | `GET` | `/api/health` | Ollama + Comfy reachability + models + job leases |
 | `GET` | `/api/journal` | Run history for a background job kind |
-| `GET` | `/api/creators` | Creator folders with counts + cover + sync meta + keep/reject counters |
+| `GET` | `/api/creators` | Creator folders with counts + cover + sync meta + keep/reject counters. `?source=` scopes them |
 | `GET` | `/api/creator/style` | Learned style prefix for a creator |
 | `POST` | `/api/creator/style/rebuild` | Rebuild style from cached prompts |
 | `GET` | `/api/following` | Accounts from local `following_list.json` |
-| `GET` | `/api/photos` | Paginated (`offset`, `limit`, `creator`, `search`, `unanalyzed`, `favorite`, `media_type`, `verdict`, `sort`) |
+| `GET` | `/api/photos` | Paginated (`offset`, `limit`, `creator`, `search`, `unanalyzed`, `favorite`, `media_type`, `verdict`, `source`, `sort`) |
 | `GET` | `/api/media/detail` | Reel/photo inspector (`path`): caption, IG link — not vision prompts |
 | `GET` | `/api/prompt` | Vision prompt bundle (`path`, optional `refresh`) — includes `history` |
 | `PUT` | `/api/prompt` | Save edited positive/negative prompts + tags |
@@ -41,14 +41,14 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/sync/saved` | Sync Instagram saved posts |
 | `POST` | `/api/sync/creator` | Sync one creator feed (`mode`, `deep` optional) |
 | `POST` | `/api/sync/following` | Bulk sync from following list |
-| `POST` | `/api/sync/cancel` | Cooperative cancel of running IG job |
+| `POST` | `/api/sync/cancel` | Cooperative cancel. Optional `source` — omitted cancels every lane |
 | `GET` | `/api/sync/status` | Sync job progress / abort / `creator_queue` summary |
 | `POST` | `/api/scrape/enqueue` | Enqueue serial full/bounded scrape (Instagram / X / Reddit) |
 | `GET` | `/api/sources` | Available scrape sources |
 | `GET` | `/api/scrape/status` | Creator scrape queue + embedded sync status |
 | `POST` | `/api/scrape/cancel` | Cancel pending job or all pending (`scope`) |
-| `POST` | `/api/scrape/pause` | Pause queue drain |
-| `POST` | `/api/scrape/resume` | Resume queue + try drain |
+| `POST` | `/api/scrape/pause` | Pause drain. Optional `source` — omitted pauses every lane |
+| `POST` | `/api/scrape/resume` | Resume + try drain. Optional `source` |
 | `POST` | `/api/comfy/generate` | Queue ComfyUI Pro (ref) or txt2img |
 | `GET` | `/api/comfy/status` | ComfyUI job progress |
 | `GET` | `/api/generations` | Saved generations for a source photo |
@@ -213,6 +213,16 @@ plus per-creator classify counters: `keep_count`, `reject_count`, `unusable_coun
 (tier 0), `modest_count` (tier 1), `unclassified_count`, `error_count`, `stale_count`
 (judged by a superseded prompt version). All from one indexed `GROUP BY`.
 
+Each creator also carries `sources` — `{"instagram": 120, "x": 37}` — because a
+folder can hold media from more than one platform (`SCRAPE_FOLDER_SUFFIX=0`, or
+manual uploads). Provenance is `photos.source`, **never** the folder-name suffix.
+
+`?source=<name>` scopes `photo_count`, the cover and every verdict counter to one
+platform, and drops creators with nothing from it. `sources` stays **unfiltered**
+so the sidebar can still mark a folder multi-source while a filter is active.
+`all` and an empty value both mean unfiltered; anything unregistered is a **400**,
+not a silent full result. See [design_source_filter.md](design_source_filter.md).
+
 ### `GET /api/health`
 
 Probes Ollama at `http://localhost:11434/api/tags` (1.5s timeout).
@@ -344,7 +354,9 @@ Reads local `following_list.json` (no live Instagram call).
 
 ### `GET /api/photos`
 
-Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `verdict` (see below), `sort` (`name` | `newest` | `oldest` | `posted` | `posted_oldest` | `tier`), `offset` (default 0), `limit` (default/max from config, typically 300).
+Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `verdict` (see below), `source` (`instagram` | `x` | `reddit` | omit/`all`), `sort` (`name` | `newest` | `oldest` | `posted` | `posted_oldest` | `tier`), `offset` (default 0), `limit` (default/max from config, typically 300).
+
+- `source` — ANDs with `creator`, so a merged folder can be split by platform. An unregistered value is a **400**.
 
 - `newest` / `oldest` — archive ingest time (`added_at`; when the file was downloaded/indexed).
 - `posted` / `posted_oldest` — remote post time (`mtime`, which downloaders stamp to the post date); falls back to `added_at` when `mtime` is missing or zero.
@@ -490,11 +502,21 @@ Updates cache, sets `parameters.manual_edit: true`, rebuilds `exports`, returns 
 `mode`: `bounded` (default, keyword rank/top-N) or `full` (stream entire feed).  
 `deep` (full only): `true` = catch-up off (true archive); `false` = catch-up on.
 
-**409** if creator scrape queue has pending jobs and is not paused (fairness).
+**409** if the **Instagram** lane has pending jobs and is not paused (fairness).
+Lane-scoped: these routes are Instagram-only, so a queued Reddit job does not
+block them.
 
 ### `POST /api/sync/cancel`
 
-Cooperative cancel of whatever IG job is running (`saved` / `creator` / `following` / `creator_queue`).
+Cooperative cancel of a running job (`saved` / `creator` / `following` /
+`creator_queue`). Body is optional:
+
+```json
+{ "source": "x" }
+```
+
+`source` cancels one lane. **No body cancels every lane** — a bare "stop" from
+the user means stop everything, not whichever lane happens to be first.
 
 ```json
 { "status": "cancelling" }
@@ -611,22 +633,54 @@ Body: `{"id"}` / `{"ids"}` / `{"all": true}` / `{"expired": true, "days": 30}`. 
 
 ### `GET /api/scrape/status`
 
+`lanes` is the real shape — one entry per source, each running at most one job.
+The flat keys beside it are the **union** across lanes, kept so a pre-lane client
+degrades sensibly: `paused` means *nothing* can run, `running_job` is whichever
+lane started first, `pending_count` is the total.
+
 ```json
 {
+  "lanes": {
+    "instagram": {
+      "source": "instagram",
+      "paused": false,
+      "pause_reason": "",
+      "paused_at": null,
+      "pending": [],
+      "pending_count": 0,
+      "running_job": null,
+      "depth": 0,
+      "finished_session": 3,
+      "stats": { "completed_today": 3, "downloaded_today": 41, "errors_today": 0 }
+    },
+    "x":      { "source": "x", "paused": true, "pause_reason": "cookies expired", "…": "…" },
+    "reddit": { "source": "reddit", "paused": false, "…": "…" }
+  },
   "paused": false,
-  "pause_reason": "",
+  "pause_reason": "cookies expired",
   "pending": [],
   "pending_count": 0,
   "running_job": null,
+  "running_jobs": [],
   "history": [],
-  "stats": { "completed_today": 0, "downloaded_today": 0, "errors_today": 0 },
-  "sync": { "running": false, "progress": "", "creator_queue": {} }
+  "stats": { "completed_today": 3, "downloaded_today": 41, "errors_today": 0 },
+  "sync": { "running": false, "progress": "", "lanes": {}, "creator_queue": {} }
 }
 ```
 
+A job's `position` is its place **within its own lane**. With lanes draining in
+parallel, a global position predicts nothing about when a job starts.
+
 ### `POST /api/scrape/pause` / `POST /api/scrape/resume`
 
-Pause stops auto-drain (hard rate-limit abort also pauses). Resume clears pause and tries drain.
+```json
+{ "reason": "Paused by user", "source": "x" }
+```
+
+`source` is optional: **omitted (or `all`) means every lane** — what the global
+button does. A named lane pauses only that platform, which is also what an
+auto-pause does (an expired X cookie must not stop Instagram). Resume clears the
+pause and tries to drain that lane. An unregistered `source` is a 400.
 
 ### `POST /api/scrape/cancel`
 
@@ -634,7 +688,10 @@ Pause stops auto-drain (hard rate-limit abort also pauses). Resume clears pause 
 { "job_id": "csq_…", "scope": "job" }
 ```
 
-`scope: all_pending` cancels all pending; optional `cancel_running: true` also requests IG cancel.
+`scope: all_pending` cancels pending jobs — in one lane with `source`, in all of
+them without. Optional `cancel_running: true` also cancels the running job(s) in
+that scope. Cancelling by `job_id` resolves the job's **own** lane, so it never
+stops a different platform that happens to also be running.
 
 ### `POST /api/sync/following`
 
@@ -676,6 +733,10 @@ Response / status `result` may include:
 
 ### `GET /api/sync/status`
 
+Same convention as `/api/scrape/status`: `lanes` is authoritative, and the flat
+keys are the **Instagram lane** (the primary one, and the only one a
+single-source archive has).
+
 ```json
 {
   "running": false,
@@ -684,9 +745,18 @@ Response / status `result` may include:
   "rate_limit_hits": 2,
   "consecutive_rate_limits": 0,
   "last_backoff_sec": 120,
-  "result": { "downloaded": 15, "skipped": 40, "errors": 1, "rate_limit_hits": 2, "aborted": false }
+  "result": { "downloaded": 15, "skipped": 40, "errors": 1, "rate_limit_hits": 2, "aborted": false },
+  "lanes": {
+    "instagram": { "source": "instagram", "running": false, "progress": "Complete", "…": "…" },
+    "x":         { "source": "x", "running": true, "progress": "Downloading…", "…": "…" },
+    "reddit":    { "source": "reddit", "running": false, "…": "…" }
+  },
+  "running_lanes": ["x"],
+  "any_running": true,
+  "creator_queue": { "enabled": true, "depth": 2, "lanes": {} }
 }
 ```
+
 ### `POST /api/prompt/batch`
 
 ```json

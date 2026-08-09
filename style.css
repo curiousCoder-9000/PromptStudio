@@ -3958,6 +3958,12 @@ button.tag-pill.tag-clickable:hover {
     font-variant-numeric: tabular-nums;
 }
 
+/* Lane chips share the stack's column layout, so the container has to be
+   transparent to it rather than introduce a second box. */
+.scrape-lane-chips {
+    display: contents;
+}
+
 /* Multi-source folder marker in the creator row. */
 .creator-source-mark {
     margin-left: 5px;

@@ -42,10 +42,45 @@ log = get_logger(__name__)
 
 # Resource names. Values are user-facing — they appear in "busy" messages.
 OLLAMA = "ollama"
-INSTAGRAM = "instagram"
 COMFY = "comfy"
 
-ALL_RESOURCES = (OLLAMA, INSTAGRAM, COMFY)
+# Scrape capacity is per platform, not global. Instagram's session is the thing
+# that cannot be shared; Reddit has nothing in common with it, so serialising
+# the two only ever cost throughput. One lease name per source turns the single
+# global scrape slot into one slot per lane — see docs/design_scrape_lanes.md.
+SCRAPE_PREFIX = "scrape:"
+
+
+def scrape_resource(source: str) -> str:
+    """Lease name for one source's scrape lane."""
+    name = (source or "").strip().lower()
+    if not name:
+        raise ValueError("source required for a scrape lease")
+    return f"{SCRAPE_PREFIX}{name}"
+
+
+# Back-compat alias. Every caller that meant "the Instagram session" still gets
+# exactly that; it is now simply one lane among several.
+INSTAGRAM = scrape_resource("instagram")
+
+_STATIC_RESOURCES = (OLLAMA, COMFY)
+
+
+def all_resources() -> tuple:
+    """Every lease name, for /api/health and debugging.
+
+    Scrape lanes are derived from the source registry rather than hardcoded, so
+    registering a source creates its lane with no edit here. The import is lazy
+    and the registry itself is lazy, so this does not drag in instaloader or
+    probe for the gallery-dl binary.
+    """
+    try:
+        from promptstudio.scraping.sources import known_sources
+
+        lanes = tuple(scrape_resource(name) for name in known_sources())
+    except Exception:  # pragma: no cover - registry import should not fail
+        lanes = (INSTAGRAM,)
+    return _STATIC_RESOURCES + lanes
 
 
 class LeaseRegistry:
@@ -92,10 +127,17 @@ class LeaseRegistry:
             return self._held.get(resource)
 
     def snapshot(self) -> Dict[str, Optional[str]]:
-        """Current holders, for /api/health and debugging."""
+        """Current holders, for /api/health and debugging.
+
+        Includes any held resource that is not a known lane, so a lease taken
+        under an unexpected name shows up rather than vanishing from the health
+        endpoint that exists to find exactly that.
+        """
         with self._lock:
             held = dict(self._held)
-        return {name: held.get(name) for name in ALL_RESOURCES}
+        names = list(all_resources())
+        names.extend(n for n in held if n not in names)
+        return {name: held.get(name) for name in names}
 
     @contextmanager
     def hold(self, resources: Iterable[str], owner: str) -> Iterator[None]:

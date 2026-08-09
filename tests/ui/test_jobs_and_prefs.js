@@ -113,7 +113,7 @@ const { Session, Report, sleep } = require('./cdp');
       }
       return real(u, o);
     };
-    state.scrapeChipDismissed = false;
+    state.scrapeChipDismissed.clear();
     await pollScrapeStatus();
     await new Promise(r => setTimeout(r, 200));
     const chip = document.getElementById('scrapeJobChip');

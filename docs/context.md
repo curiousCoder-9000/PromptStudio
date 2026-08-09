@@ -117,7 +117,8 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
 - **Escape before `innerHTML`.** Handles, captions, bios, filenames, and Ollama tags are all third-party text — run them through `escapeHtml()` (or use `textContent`). Numeric JSON fields get `Number(...)`.
 - **User-typed input is debounced** (`debounce()`; `SEARCH_DEBOUNCE_MS` = 250) and **in-flight fetches are abortable** — `state.photosRequest` / `creatorStyleRequest` / `followingRequest` hold the current `AbortController`. Treat `err.name === 'AbortError'` as success-by-supersession, and only clear loading state if `state.xRequest === controller`.
 - Video type detection goes through `isVideoFilename()` — do not inline extension lists.
-- **Long jobs report progress in a chip, never a repeating toast.** `#jobChipStack` holds one chip per job kind (scrape / batch / classify); drive it with `renderJobChip(kind, {...})` and toast only on start and finish.
+- **Long jobs report progress in a chip, never a repeating toast.** `#jobChipStack` holds one chip per job kind — where **each scrape lane is its own kind**, because cancel and pause are lane-scoped. Batch and classify use `renderJobChip(kind, {...})` against static ids; scrape chips are cloned per lane from `#scrapeLaneChipTemplate` by `updateScrapeJobChip()` (Instagram keeps the unsuffixed `scrapeJobChip*` ids). Toast only on start and finish.
+- **Source is a view filter, from `photos.source` — never the folder name.** `state.sourceFilter` cross-filters the sidebar and gallery; `SCRAPE_FOLDER_SUFFIX=0` and manual uploads both make one folder multi-source.
 - **View prefs persist, navigation does not.** `PREF_FIELDS` + `saveViewPrefs()` keep sort/media/grid/filters in `localStorage`; selected creator, selection, and review mode (`state.reviewMode`) are deliberately *not* restored (landing in a destructive mode from a refresh is hostile). Call `saveViewPrefs()` in any new view-control handler.
 
 ---
@@ -297,5 +298,7 @@ section drifted four rules behind.
 | [backlog_features.md](backlog_features.md) | F1–F8 in detail — captions, archive-wide classify, duplicates UI, activity view |
 | [backlog_engineering.md](backlog_engineering.md) | E1–E5 — pollers, `app.js` ownership, runtime reject-cut, verification gaps |
 | [design_generation_loop.md](design_generation_loop.md) | Theme A spec — generations table, rating, outputs gallery, batch, workflow registry |
+| [design_source_filter.md](design_source_filter.md) | Source as a view filter — `photos.source`, never the folder suffix |
+| [design_scrape_lanes.md](design_scrape_lanes.md) | Per-source scrape lanes — one job per platform, lane-scoped cancel/pause/pacing |
 | [scripts/README.md](../scripts/README.md) · [tests/ui/README.md](../tests/ui/README.md) | CLI examples · browser suites |
 | `archive/` | **Do not load.** Shipped/superseded designs, kept for history |

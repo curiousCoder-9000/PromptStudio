@@ -10,12 +10,13 @@ import threading
 import pytest
 
 from promptstudio.jobs import (
-    ALL_RESOURCES,
     COMFY,
     INSTAGRAM,
     OLLAMA,
     LeaseRegistry,
     ResourceBusy,
+    all_resources,
+    scrape_resource,
 )
 
 
@@ -54,6 +55,61 @@ def test_unrelated_resources_do_not_block_each_other(leases):
     assert leases.acquire([COMFY], "comfy") is None
 
 
+# ── per-source scrape lanes (docs/design_scrape_lanes.md §3) ────────────
+
+def test_scrape_resource_is_namespaced_per_source():
+    assert scrape_resource("x") == "scrape:x"
+    assert scrape_resource("  Reddit ") == "scrape:reddit"
+
+
+def test_instagram_alias_is_the_instagram_lane():
+    """Existing callers meaning "the Instagram session" keep working."""
+    assert INSTAGRAM == scrape_resource("instagram")
+
+
+def test_scrape_resource_rejects_an_empty_source():
+    with pytest.raises(ValueError):
+        scrape_resource("")
+
+
+def test_two_sources_scrape_concurrently(leases):
+    """The whole point: Reddit must not wait on Instagram."""
+    assert leases.acquire([scrape_resource("instagram")], "sync:instagram") is None
+    assert leases.acquire([scrape_resource("x")], "sync:x") is None
+    assert leases.acquire([scrape_resource("reddit")], "sync:reddit") is None
+
+
+def test_same_source_still_blocks_with_an_attributable_holder(leases):
+    """Instagram stays pinned to one job — that part must not regress."""
+    leases.acquire([scrape_resource("instagram")], "sync:instagram")
+    blocked = leases.acquire([scrape_resource("instagram")], "creator_queue")
+    assert blocked == scrape_resource("instagram")
+    assert leases.holder(blocked) == "sync:instagram"
+
+
+def test_releasing_one_lane_leaves_the_others_held(leases):
+    leases.acquire([scrape_resource("instagram")], "sync:instagram")
+    leases.acquire([scrape_resource("x")], "sync:x")
+    leases.release("sync:x")
+    assert leases.holder(scrape_resource("instagram")) == "sync:instagram"
+    assert leases.holder(scrape_resource("x")) is None
+
+
+def test_all_resources_covers_every_registered_source():
+    from promptstudio.scraping.sources import known_sources
+
+    names = all_resources()
+    assert OLLAMA in names and COMFY in names
+    for source in known_sources():
+        assert scrape_resource(source) in names, f"{source} lane missing"
+
+
+def test_snapshot_surfaces_an_unregistered_lease(leases):
+    """A lease under an unexpected name must not vanish from /api/health."""
+    leases.acquire(["scrape:mystery"], "someone")
+    assert leases.snapshot()["scrape:mystery"] == "someone"
+
+
 def test_reacquiring_your_own_lease_succeeds(leases):
     leases.acquire([OLLAMA], "classify")
     assert leases.acquire([OLLAMA], "classify") is None
@@ -69,7 +125,7 @@ def test_multi_resource_acquire_is_all_or_nothing(leases):
 def test_snapshot_lists_every_resource(leases):
     leases.acquire([OLLAMA], "classify")
     snap = leases.snapshot()
-    assert set(snap) == set(ALL_RESOURCES)
+    assert set(snap) == set(all_resources())
     assert snap[OLLAMA] == "classify"
     assert snap[INSTAGRAM] is None
 
@@ -133,7 +189,7 @@ def test_repeated_acquire_release_cycles_leave_nothing_held(leases):
     for t in threads:
         t.join()
 
-    assert leases.snapshot() == {name: None for name in ALL_RESOURCES}
+    assert leases.snapshot() == {name: None for name in all_resources()}
 
 
 # ── wiring into the real managers ────────────────────────────────────

@@ -171,6 +171,66 @@ SCRAPE_RETRIES = int(os.environ.get("SCRAPE_RETRIES", "3"))
 # gallery-dl's own catch-up: stop after N consecutive already-downloaded files.
 SCRAPE_ABORT_AFTER_KNOWN = int(os.environ.get("SCRAPE_ABORT_AFTER_KNOWN", "0"))
 
+# ---------------------------------------------------------------------------
+# Per-lane pacing (docs/design_scrape_lanes.md §8)
+# ---------------------------------------------------------------------------
+# The IG_* pauses above are Instagram anti-ban constants: 30-120s between
+# creators and a 5-15 minute pause every 10 jobs. Non-Instagram sources used to
+# inherit them because there was one global worker — pure dead time, since
+# gallery-dl already self-paces via SCRAPE_SLEEP / SCRAPE_SLEEP_REQUEST.
+#
+# Each knob is overridable per source with an explicit env var, so a lane that
+# does start getting rate-limited can be slowed without touching Instagram:
+#   SCRAPE_ACCOUNT_PAUSE_MIN_X=20  SCRAPE_BATCH_EVERY_REDDIT=25
+_GALLERY_DL_LANE_PACING = {
+    "account_pause_min": 2.0,
+    "account_pause_max": 6.0,
+    "batch_every": 0,          # 0 disables the long batch pause entirely
+    "batch_pause_min": 0.0,
+    "batch_pause_max": 0.0,
+}
+
+_INSTAGRAM_LANE_PACING = {
+    "account_pause_min": ACCOUNT_PAUSE_MIN_SEC,
+    "account_pause_max": ACCOUNT_PAUSE_MAX_SEC,
+    "batch_every": BATCH_PAUSE_EVERY,
+    "batch_pause_min": BATCH_PAUSE_MIN_SEC,
+    "batch_pause_max": BATCH_PAUSE_MAX_SEC,
+}
+
+
+def _lane_pacing(source: str, key: str) -> float:
+    """One pacing value for one lane, env override winning.
+
+    Instagram keeps the IG_* defaults untouched. Everything else gets the
+    gentle gallery-dl profile unless explicitly overridden.
+    """
+    name = (source or "instagram").strip().lower() or "instagram"
+    override = os.environ.get(f"SCRAPE_{key.upper()}_{name.upper()}")
+    if override not in (None, ""):
+        try:
+            return float(override)
+        except ValueError:
+            pass
+    table = _INSTAGRAM_LANE_PACING if name == "instagram" else _GALLERY_DL_LANE_PACING
+    return float(table[key])
+
+
+def account_pause_range_for(source: str) -> tuple:
+    """(min, max) seconds to wait between two jobs in the same lane."""
+    lo = max(0.0, _lane_pacing(source, "account_pause_min"))
+    return lo, max(lo, _lane_pacing(source, "account_pause_max"))
+
+
+def batch_pause_range_for(source: str) -> tuple:
+    lo = max(0.0, _lane_pacing(source, "batch_pause_min"))
+    return lo, max(lo, _lane_pacing(source, "batch_pause_max"))
+
+
+def batch_pause_every_for(source: str) -> int:
+    """Jobs between long batch pauses. 0 disables them for this lane."""
+    return int(_lane_pacing(source, "batch_every"))
+
 # X: pull the media timeline (photos/videos only) rather than the full timeline.
 X_MEDIA_TIMELINE_ONLY = _env_bool("X_MEDIA_TIMELINE_ONLY", "1")
 X_INCLUDE_RETWEETS = _env_bool("X_INCLUDE_RETWEETS", "0")

@@ -174,10 +174,22 @@ gallery-dl -K https://x.com/someone/media
 
 Defaults are deliberately gentler than gallery-dl's own
 (`SCRAPE_SLEEP`, `SCRAPE_SLEEP_REQUEST`, `SCRAPE_SLEEP_429`, `SCRAPE_RETRIES`).
-Only one scrape job runs at a time globally, as before — single-flight is an
-Instagram requirement, but it's kept for all sources for now. Per-source
-concurrency (Reddit could safely run alongside Instagram) is a deliberate
-follow-up, not part of this work.
+
+**Scrape capacity is per platform.** One lane per source, one job per lane, so
+Instagram / X / Reddit run concurrently while Instagram stays pinned to a single
+job. Cancel, pause, status and pacing are all lane-scoped — full design in
+[design_scrape_lanes.md](design_scrape_lanes.md).
+
+Per-lane anti-ban waits: Instagram keeps `IG_ACCOUNT_PAUSE_MIN/MAX` (30-120s
+between creators) and `IG_BATCH_*` (5-15 min every 10 jobs). gallery-dl lanes
+default to ~2-6s and no batch pause, since `SCRAPE_SLEEP*` already paces them.
+Override per source when a lane starts getting throttled:
+
+```ini
+SCRAPE_ACCOUNT_PAUSE_MIN_X=20
+SCRAPE_ACCOUNT_PAUSE_MAX_X=60
+SCRAPE_BATCH_EVERY_REDDIT=25
+```
 
 ## 7. Adding another source
 

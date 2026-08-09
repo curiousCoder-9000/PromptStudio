@@ -85,6 +85,21 @@ class _BadSource(ValueError):
     """An unrecognised ?source= value. Carries its own 400 message."""
 
 
+def _parse_body_source(data: Dict[str, Any]) -> Optional[str]:
+    """Read an optional `source` from a JSON body. None means "every lane"."""
+    from promptstudio.scraping.sources import known_sources, normalize_source
+
+    raw = str(data.get("source") or "").strip().lower()
+    if not raw or raw == "all":
+        return None
+    name = normalize_source(raw)
+    if name not in known_sources():
+        raise _BadSource(
+            f"Unknown source '{raw}'. Known: {', '.join(sorted(known_sources()))}, all"
+        )
+    return name
+
+
 def _parse_source_filter(query: Dict[str, List[str]]) -> Optional[str]:
     """Read `?source=` as a filter, or None for "every source".
 
@@ -105,27 +120,33 @@ def _parse_source_filter(query: Dict[str, List[str]]) -> Optional[str]:
     return name
 
 
-def _creator_queue_blocks_oneshot() -> Optional[Dict[str, Any]]:
-    """If scrape queue has pending jobs and is not paused, block one-shot sync.
+def _creator_queue_blocks_oneshot(source: str = "instagram") -> Optional[Dict[str, Any]]:
+    """If this lane has pending jobs and is not paused, block one-shot sync.
 
-    Policy, not mutual exclusion — the Instagram lease in `SyncManager.start_job`
-    is what prevents two syncs from actually overlapping. This exists so a
-    one-shot request does not jump the queue's pacing, and being advisory is
-    fine: the worst case is a job that the lease then refuses anyway.
+    Policy, not mutual exclusion — the per-source lease in
+    `SyncManager.start_job` is what prevents two syncs from actually
+    overlapping. This exists so a one-shot request does not jump the queue's
+    pacing, and being advisory is fine: the worst case is a job that the lease
+    then refuses anyway.
+
+    Lane-scoped since lanes shipped. The one-shot routes are all Instagram, and
+    a queued *Reddit* job has nothing to do with Instagram's pacing — blocking
+    on it was only ever an artefact of there being one global worker.
     """
     if not CREATOR_SCRAPE_QUEUE_ENABLED:
         return None
     try:
         q = CreatorScrapeQueue.get()
-        n = q.pending_count()
-        if n > 0 and not q.is_paused():
+        n = q.pending_count(source)
+        if n > 0 and not q.is_paused(source):
             return {
                 "status": "busy",
                 "message": (
-                    f"Creator scrape queue has {n} pending — "
-                    "pause or empty the queue first"
+                    f"The {source} scrape queue has {n} pending — "
+                    "pause or empty it first"
                 ),
                 "creator_queue_depth": n,
+                "source": source,
             }
     except Exception:
         # Never block a sync because the queue file could not be read, but do
@@ -687,7 +708,9 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 )
                 started = False
                 if out["status"] == "queued":
-                    started = _sync.try_drain_creator_queue()
+                    # Only this job's lane: draining the others here would
+                    # report "started" for work the caller did not enqueue.
+                    started = _sync.try_drain_creator_queue(target.source)
                     if started:
                         out["status"] = "started"
                 self._send_json(
@@ -712,17 +735,23 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 data = self._read_json_body()
                 scope = (data.get("scope") or "job").strip().lower()
+                try:
+                    source = _parse_body_source(data)
+                except _BadSource as e:
+                    self.send_error(400, str(e))
+                    return
                 q = CreatorScrapeQueue.get()
                 if scope == "all_pending":
-                    n = q.cancel_all_pending()
+                    n = q.cancel_all_pending(source)
                     cancel_running = bool(data.get("cancel_running"))
                     if cancel_running:
-                        _sync.request_cancel()
+                        _sync.request_cancel(source)
                     self._send_json(
                         {
                             "status": "ok",
                             "cancelled_pending": n,
                             "cancel_running": cancel_running,
+                            "source": source or "all",
                         }
                     )
                     return
@@ -739,8 +768,16 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     self._send_json({"status": "cancelled", "job_id": job_id})
                     return
                 if job.get("status") == "running":
-                    _sync.request_cancel()
-                    self._send_json({"status": "cancelling", "job_id": job_id})
+                    # The job names its own lane — cancelling by job_id must not
+                    # stop a different platform that happens to also be running.
+                    _sync.request_cancel(job.get("source") or "instagram")
+                    self._send_json(
+                        {
+                            "status": "cancelling",
+                            "job_id": job_id,
+                            "source": job.get("source") or "instagram",
+                        }
+                    )
                     return
                 self._send_json(
                     {"status": "already_terminal", "job_id": job_id, "job_status": job.get("status")}
@@ -758,19 +795,52 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             except Exception:
                 data = {}
             reason = ""
+            source = None
             if isinstance(data, dict):
                 reason = str(data.get("reason") or "Paused by user")
-            CreatorScrapeQueue.get().pause(reason or "Paused by user")
-            self._send_json({"status": "paused", "pause_reason": reason or "Paused by user"})
+                try:
+                    source = _parse_body_source(data)
+                except _BadSource as e:
+                    self.send_error(400, str(e))
+                    return
+            # source=None pauses every lane, which is what the global button
+            # means. A named source pauses only that lane.
+            CreatorScrapeQueue.get().pause(
+                reason or "Paused by user", source=source
+            )
+            self._send_json(
+                {
+                    "status": "paused",
+                    "pause_reason": reason or "Paused by user",
+                    "source": source or "all",
+                }
+            )
             return
 
         if path == "/api/scrape/resume":
             if not CREATOR_SCRAPE_QUEUE_ENABLED:
                 self.send_error(404, "Creator scrape queue disabled")
                 return
-            CreatorScrapeQueue.get().resume()
-            started = _sync.try_drain_creator_queue()
-            self._send_json({"status": "resumed", "drain_started": started})
+            try:
+                data = self._read_json_body()
+            except Exception:
+                data = {}
+            source = None
+            if isinstance(data, dict):
+                try:
+                    source = _parse_body_source(data)
+                except _BadSource as e:
+                    self.send_error(400, str(e))
+                    return
+            CreatorScrapeQueue.get().resume(source)
+            started = _sync.try_drain_creator_queue(source)
+            self._send_json(
+                {
+                    "status": "resumed",
+                    "drain_started": started,
+                    "source": source or "all",
+                }
+            )
             return
 
         if path == "/api/sync/saved":
@@ -782,14 +852,14 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 dl = InstagramDownloader(
                     log=log,
                     on_rate_limit=on_rate_limit,
-                    should_cancel=_sync.is_cancel_requested,
+                    should_cancel=lambda: _sync.is_cancel_requested("instagram"),
                 )
                 return dl.sync_saved_posts()
 
             # No is_running() pre-check: start_job takes the Instagram lease and
             # flips status under one lock, so it is the only answer that cannot
             # be stale by the time the job starts.
-            if _sync.start_job("saved", job):
+            if _sync.start_job("saved", job, source="instagram"):
                 self._send_json({"status": "started", "job_type": "saved"})
             else:
                 self._send_json({"status": "busy", "message": _sync.last_refusal}, 409)
@@ -826,7 +896,8 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     )
                     started = False
                     if out["status"] == "queued":
-                        started = _sync.try_drain_creator_queue()
+                        # This route is Instagram-only.
+                        started = _sync.try_drain_creator_queue("instagram")
                         if started:
                             out["status"] = "started"
                     self._send_json(
@@ -869,7 +940,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     dl = InstagramDownloader(
                         log=log,
                         on_rate_limit=on_rate_limit,
-                        should_cancel=_sync.is_cancel_requested,
+                        should_cancel=lambda: _sync.is_cancel_requested("instagram"),
                     )
                     return dl.sync_creator_feed(
                         username,
@@ -879,7 +950,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                         deep=deep,
                     )
 
-                if _sync.start_job("creator", job):
+                if _sync.start_job("creator", job, source="instagram"):
                     self._send_json(
                         {
                             "status": "started",
@@ -929,7 +1000,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     dl = InstagramDownloader(
                         log=log,
                         on_rate_limit=on_rate_limit,
-                        should_cancel=_sync.is_cancel_requested,
+                        should_cancel=lambda: _sync.is_cancel_requested("instagram"),
                     )
                     return dl.sync_following(
                         max_accounts=max_accounts,
@@ -939,7 +1010,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                         include_videos=include_videos,
                     )
 
-                if _sync.start_job("following", job):
+                if _sync.start_job("following", job, source="instagram"):
                     self._send_json(
                         {
                             "status": "started",

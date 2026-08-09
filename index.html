@@ -797,23 +797,32 @@
     <!-- Background job chips (non-modal). Long jobs report progress here rather
          than through repeating toasts. One chip per job kind; several can run. -->
     <div class="job-chip-stack" id="jobChipStack">
-        <!-- Instagram scrape / sync queue -->
-        <div class="scrape-job-chip" id="scrapeJobChip" style="display:none;" role="status" aria-live="polite">
-            <div class="scrape-job-chip-main">
-                <i class="fa-solid fa-arrows-rotate scrape-job-chip-icon" id="scrapeJobChipIcon"></i>
-                <div class="scrape-job-chip-text">
-                    <div class="scrape-job-chip-title" id="scrapeJobChipTitle">Sync idle</div>
-                    <div class="scrape-job-chip-sub" id="scrapeJobChipSub"></div>
+        <!-- One scrape chip per source lane, built from #scrapeLaneChipTemplate.
+             Static markup would mean one hand-written block per platform, and
+             each lane needs its own Cancel/Resume because both are lane-scoped
+             now. The Instagram lane deliberately keeps the original element ids
+             (scrapeJobChip*) — it is the primary lane and the one a
+             single-source archive has. -->
+        <div class="scrape-lane-chips" id="scrapeLaneChips"></div>
+
+        <template id="scrapeLaneChipTemplate">
+            <div class="scrape-job-chip" style="display:none;" role="status" aria-live="polite">
+                <div class="scrape-job-chip-main">
+                    <i class="fa-solid fa-arrows-rotate scrape-job-chip-icon" data-role="icon"></i>
+                    <div class="scrape-job-chip-text">
+                        <div class="scrape-job-chip-title" data-role="title">Sync idle</div>
+                        <div class="scrape-job-chip-sub" data-role="sub"></div>
+                    </div>
+                </div>
+                <div class="scrape-job-chip-actions">
+                    <button type="button" class="scrape-job-chip-btn primary" data-role="resume" style="display:none;" title="Resume this queue">Resume</button>
+                    <button type="button" class="scrape-job-chip-btn" data-role="cancel" title="Cancel running job">Cancel</button>
+                    <button type="button" class="scrape-job-chip-btn ghost" data-role="dismiss" title="Hide">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
                 </div>
             </div>
-            <div class="scrape-job-chip-actions">
-                <button type="button" class="scrape-job-chip-btn primary" id="scrapeJobChipResume" style="display:none;" title="Resume scrape queue">Resume</button>
-                <button type="button" class="scrape-job-chip-btn" id="scrapeJobChipCancel" title="Cancel running job">Cancel</button>
-                <button type="button" class="scrape-job-chip-btn ghost" id="scrapeJobChipDismiss" title="Hide">
-                    <i class="fa-solid fa-xmark"></i>
-                </button>
-            </div>
-        </div>
+        </template>
 
         <!-- Batch vision analyze -->
         <div class="scrape-job-chip" id="batchJobChip" style="display:none;" role="status" aria-live="polite">

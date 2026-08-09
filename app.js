@@ -29,7 +29,9 @@ const state = {
     syncPollTimer: null,
     scrapePollTimer: null,
     scrapeStatus: null,
-    scrapeChipDismissed: false,
+    // Lane names whose chip the user hid. Per lane, not one flag: dismissing
+    // a stuck X chip must not also hide a live Instagram job.
+    scrapeChipDismissed: new Set(),
     scrapeNotifiedFinished: null,
     scrapeWasActive: false,
     batchPollTimer: null,
@@ -232,13 +234,10 @@ const elements = {
     scrapeQueueStatus: document.getElementById('scrapeQueueStatus'),
     scrapeQueueList: document.getElementById('scrapeQueueList'),
     syncOneShotBanner: document.getElementById('syncOneShotBanner'),
-    scrapeJobChip: document.getElementById('scrapeJobChip'),
-    scrapeJobChipIcon: document.getElementById('scrapeJobChipIcon'),
-    scrapeJobChipTitle: document.getElementById('scrapeJobChipTitle'),
-    scrapeJobChipSub: document.getElementById('scrapeJobChipSub'),
-    scrapeJobChipResume: document.getElementById('scrapeJobChipResume'),
-    scrapeJobChipCancel: document.getElementById('scrapeJobChipCancel'),
-    scrapeJobChipDismiss: document.getElementById('scrapeJobChipDismiss'),
+    // Scrape chips are built per lane at render time, so they are looked up
+    // through renderScrapeLaneChips rather than cached here.
+    scrapeLaneChips: document.getElementById('scrapeLaneChips'),
+    scrapeLaneChipTemplate: document.getElementById('scrapeLaneChipTemplate'),
     // Batch job chip (same shape as the scrape chip)
     jobChipStack: document.getElementById('jobChipStack'),
     batchJobChip: document.getElementById('batchJobChip'),
@@ -3650,18 +3649,6 @@ function setupEventListeners() {
     if (elements.syncLatestCreatorBtn) {
         elements.syncLatestCreatorBtn.addEventListener('click', syncLatestSelectedCreator);
     }
-    if (elements.scrapeJobChipResume) {
-        elements.scrapeJobChipResume.addEventListener('click', resumeScrapeQueue);
-    }
-    if (elements.scrapeJobChipCancel) {
-        elements.scrapeJobChipCancel.addEventListener('click', cancelRunningSyncJob);
-    }
-    if (elements.scrapeJobChipDismiss) {
-        elements.scrapeJobChipDismiss.addEventListener('click', () => {
-            state.scrapeChipDismissed = true;
-            hideScrapeJobChip();
-        });
-    }
     if (elements.batchJobChipCancel) {
         elements.batchJobChipCancel.addEventListener('click', cancelBatchAnalyze);
     }
@@ -4324,77 +4311,210 @@ function setOneShotSyncEnabled(enabled, reason) {
     }
 }
 
-function hideScrapeJobChip() {
-    if (elements.scrapeJobChip) elements.scrapeJobChip.style.display = 'none';
+/** Every lane chip currently in the DOM, keyed by source. */
+const _laneChips = new Map();
+
+/**
+ * Element ids for one lane's chip.
+ *
+ * Instagram keeps the original unsuffixed ids. It is the primary lane, the
+ * only one a single-source archive has, and every existing selector — the UI
+ * suites included — is written against those names.
+ */
+function laneChipId(source, part) {
+    const base = source === 'instagram' ? 'scrapeJobChip' : `scrapeJobChip_${source}`;
+    return part ? base + part : base;
+}
+
+function hideScrapeJobChip(source) {
+    if (source) {
+        const chip = _laneChips.get(source);
+        if (chip) chip.root.style.display = 'none';
+        return;
+    }
+    _laneChips.forEach((chip) => { chip.root.style.display = 'none'; });
+}
+
+/**
+ * Create (or fetch) the chip for one lane.
+ *
+ * Listeners are bound once at creation and close over the lane name, which is
+ * what makes Cancel and Resume lane-scoped — the thing the shared static chip
+ * could not express.
+ */
+function ensureLaneChip(source) {
+    const existing = _laneChips.get(source);
+    if (existing) return existing;
+    const tpl = elements.scrapeLaneChipTemplate;
+    const host = elements.scrapeLaneChips;
+    if (!tpl || !host) return null;
+
+    const root = tpl.content.firstElementChild.cloneNode(true);
+    root.id = laneChipId(source);
+    root.dataset.source = source;
+    const pick = (role) => root.querySelector(`[data-role="${role}"]`);
+    const chip = {
+        source,
+        root,
+        icon: pick('icon'),
+        title: pick('title'),
+        sub: pick('sub'),
+        resume: pick('resume'),
+        cancel: pick('cancel'),
+        dismiss: pick('dismiss'),
+    };
+    // Stable ids per part, so tests and any external selector can address a
+    // specific lane rather than "whichever chip is first".
+    if (chip.icon) chip.icon.id = laneChipId(source, 'Icon');
+    if (chip.title) chip.title.id = laneChipId(source, 'Title');
+    if (chip.sub) chip.sub.id = laneChipId(source, 'Sub');
+    if (chip.resume) chip.resume.id = laneChipId(source, 'Resume');
+    if (chip.cancel) chip.cancel.id = laneChipId(source, 'Cancel');
+    if (chip.dismiss) chip.dismiss.id = laneChipId(source, 'Dismiss');
+
+    if (chip.resume) {
+        chip.resume.addEventListener('click', () => resumeScrapeQueue(source));
+    }
+    if (chip.cancel) {
+        chip.cancel.addEventListener('click', () => cancelRunningSyncJob(source));
+    }
+    if (chip.dismiss) {
+        chip.dismiss.addEventListener('click', () => {
+            state.scrapeChipDismissed.add(source);
+            hideScrapeJobChip(source);
+        });
+    }
+    host.appendChild(root);
+    _laneChips.set(source, chip);
+    return chip;
+}
+
+function isLaneActive(lane) {
+    if (!lane) return false;
+    return !!(
+        lane.running_job ||
+        (lane.pending || []).length ||
+        lane.paused ||
+        (lane.sync && lane.sync.running)
+    );
 }
 
 function isScrapeOrSyncActive(data) {
     if (!data) return false;
-    const pending = data.pending || [];
-    const running = data.running_job;
-    const paused = Boolean(data.paused);
-    const sync = data.sync || {};
-    return !!(running || pending.length || paused || sync.running);
+    return laneViews(data).some(isLaneActive);
 }
 
-function updateScrapeJobChip(data) {
-    if (!elements.scrapeJobChip) return;
-    const pending = data.pending || [];
-    const running = data.running_job;
-    const paused = Boolean(data.paused);
+/**
+ * Normalise `/api/scrape/status` into one view per lane.
+ *
+ * Falls back to synthesising a single Instagram lane from the flat keys, so a
+ * response from a pre-lane server (or a stubbed one) still renders.
+ */
+function laneViews(data) {
+    if (!data) return [];
     const sync = data.sync || {};
-    const active = isScrapeOrSyncActive(data);
-
-    if (!active) {
-        hideScrapeJobChip();
-        return;
+    const lanes = data.lanes;
+    if (lanes && typeof lanes === 'object' && Object.keys(lanes).length) {
+        const syncLanes = (sync && sync.lanes) || {};
+        return Object.keys(lanes).sort().map((name) => ({
+            source: name,
+            ...lanes[name],
+            sync: syncLanes[name] || {},
+        }));
     }
-    if (state.scrapeChipDismissed && !running && !sync.running) {
-        // Allow hide while only pending if user dismissed; re-show if running again
-        if (!pending.length) {
-            hideScrapeJobChip();
+    return [
+        {
+            source: 'instagram',
+            pending: data.pending || [],
+            running_job: data.running_job || null,
+            paused: Boolean(data.paused),
+            pause_reason: data.pause_reason || '',
+            sync,
+        },
+    ];
+}
+
+function laneLabel(source) {
+    const meta = (state.knownSources || []).find((s) => s.name === source);
+    if (meta && meta.label) return meta.label;
+    return source.charAt(0).toUpperCase() + source.slice(1);
+}
+
+/** Render one chip per active lane, removing chips for lanes that went idle. */
+function updateScrapeJobChip(data) {
+    const views = laneViews(data);
+    const seen = new Set();
+
+    views.forEach((lane) => {
+        if (!isLaneActive(lane)) return;
+        seen.add(lane.source);
+        renderOneLaneChip(lane);
+    });
+
+    _laneChips.forEach((chip, source) => {
+        if (!seen.has(source)) {
+            chip.root.style.display = 'none';
+            state.scrapeChipDismissed.delete(source);
+        }
+    });
+
+    updateQueueModalButtons(data);
+}
+
+function renderOneLaneChip(lane) {
+    const chip = ensureLaneChip(lane.source);
+    if (!chip) return;
+
+    const pending = lane.pending || [];
+    const running = lane.running_job;
+    const paused = Boolean(lane.paused);
+    const sync = lane.sync || {};
+
+    // A dismissed chip stays hidden only while the lane is merely queued —
+    // it comes back the moment that lane actually starts work again.
+    if (state.scrapeChipDismissed.has(lane.source)) {
+        if (!running && !sync.running && !paused) {
+            chip.root.style.display = 'none';
             return;
         }
-    }
-    if (running || sync.running || paused) {
-        state.scrapeChipDismissed = false;
+        state.scrapeChipDismissed.delete(lane.source);
     }
 
-    elements.scrapeJobChip.style.display = 'flex';
-    elements.scrapeJobChip.classList.toggle('paused', paused);
+    chip.root.style.display = 'flex';
+    chip.root.classList.toggle('paused', paused);
 
-    if (elements.scrapeJobChipIcon) {
-        elements.scrapeJobChipIcon.className =
+    if (chip.icon) {
+        chip.icon.className =
             'fa-solid scrape-job-chip-icon ' +
             (paused ? 'fa-pause' : 'fa-arrows-rotate spinning');
     }
 
-    let title = 'Sync idle';
+    const label = laneLabel(lane.source);
+    let title = `${label} idle`;
     if (paused) {
-        title = `Paused${data.pause_reason ? ' — ' + data.pause_reason : ''}`;
+        title = `${label} paused${lane.pause_reason ? ' — ' + lane.pause_reason : ''}`;
     } else if (running) {
-        title = `Syncing @${running.username}`;
+        title = `${label} — @${running.username}`;
     } else if (sync.running && sync.scrape_username) {
-        title = `Syncing @${sync.scrape_username}`;
+        title = `${label} — @${sync.scrape_username}`;
     } else if (sync.running) {
         const jt = sync.job_type ? String(sync.job_type).replace(/_/g, ' ') : 'sync';
-        title = sync.progress || `${jt} running…`;
+        title = sync.progress || `${label} ${jt} running…`;
     } else if (pending.length) {
-        title = `Queued @${pending[0].username}`;
+        title = `${label} queued — @${pending[0].username}`;
     }
 
     let sub = '';
     if (running) {
         const mode = running.mode || 'full';
-        const deep = running.deep === true ? ' deep' : running.deep === false ? '' : '';
+        const deep = running.deep === true ? ' deep' : '';
         sub = mode + deep;
         if (pending.length) sub += ` · +${pending.length} queued`;
         if (sync.progress) {
-            // Keep chip readable — show last progress fragment
             const p = String(sync.progress);
             sub += ` · ${p.length > 80 ? p.slice(-80) : p}`;
         }
-    } else if (sync.running && !running) {
+    } else if (sync.running) {
         sub = sync.progress || sync.job_type || 'in progress';
         if (pending.length) sub += ` · +${pending.length} queued`;
     } else if (paused) {
@@ -4405,29 +4525,39 @@ function updateScrapeJobChip(data) {
         sub = `position 1 · ${pending.length} in queue`;
     }
 
-    if (elements.scrapeJobChipTitle) elements.scrapeJobChipTitle.textContent = title;
-    if (elements.scrapeJobChipSub) elements.scrapeJobChipSub.textContent = sub;
-    // Resume only when the queue is paused (rate-limit hard abort or user pause).
-    // Cancel only while a job is actively running.
-    if (elements.scrapeJobChipResume) {
-        elements.scrapeJobChipResume.style.display = paused ? '' : 'none';
-    }
-    if (elements.scrapeJobChipCancel) {
-        elements.scrapeJobChipCancel.style.display =
+    // textContent, not innerHTML: usernames and pause reasons are third-party
+    // text (a pause reason can be a verbatim gallery-dl line).
+    if (chip.title) chip.title.textContent = title;
+    if (chip.sub) chip.sub.textContent = sub;
+
+    // Resume only when this lane is paused. Cancel only while it is running.
+    if (chip.resume) chip.resume.style.display = paused ? '' : 'none';
+    if (chip.cancel) {
+        chip.cancel.style.display =
             running || (sync.running && sync.job_type === 'creator_queue') ? '' : 'none';
     }
-    // Keep modal Pause/Resume buttons in sync with queue state.
+}
+
+/** Modal Pause/Resume reflect the whole queue, so they use the union view. */
+function updateQueueModalButtons(data) {
+    const views = laneViews(data);
+    const anyRunning = views.some((l) => l.running_job || (l.sync && l.sync.running));
+    const anyPending = views.some((l) => (l.pending || []).length);
+    const anyPaused = views.some((l) => l.paused);
+    const allPaused = views.length > 0 && views.every((l) => l.paused);
+
     if (elements.scrapePauseBtn) {
-        elements.scrapePauseBtn.disabled = paused || (!running && !pending.length && !sync.running);
-        elements.scrapePauseBtn.title = paused
-            ? 'Queue is already paused'
+        elements.scrapePauseBtn.disabled =
+            allPaused || (!anyRunning && !anyPending);
+        elements.scrapePauseBtn.title = allPaused
+            ? 'Every queue is already paused'
             : 'Pause after current job';
     }
     if (elements.scrapeResumeBtn) {
-        elements.scrapeResumeBtn.disabled = !paused;
-        elements.scrapeResumeBtn.title = paused
-            ? 'Resume scrape queue and start next job'
-            : 'Queue is not paused';
+        elements.scrapeResumeBtn.disabled = !anyPaused;
+        elements.scrapeResumeBtn.title = anyPaused
+            ? 'Resume paused queues and start the next job'
+            : 'No queue is paused';
     }
 }
 
@@ -4513,14 +4643,23 @@ async function refreshScrapeStatusOnce() {
         const active = isScrapeOrSyncActive(data);
 
         // Modal-only queue panel (if open)
+        const lanes = laneViews(data);
+        const activeLanes = lanes.filter(isLaneActive);
         if (elements.scrapeQueueStatus) {
-            let line = paused
-                ? `Paused — ${data.pause_reason || 'queue paused'}`
-                : running
-                  ? `Running @${running.username} (${running.mode || 'full'})`
-                  : pending.length
-                    ? `${pending.length} pending`
-                    : 'Queue idle';
+            // One clause per busy lane, because "Running @nina" no longer
+            // describes the queue when three platforms can run at once.
+            const parts = activeLanes.map((lane) => {
+                const label = laneLabel(lane.source);
+                if (lane.paused) {
+                    return `${label} paused — ${lane.pause_reason || 'paused'}`;
+                }
+                if (lane.running_job) {
+                    return `${label} @${lane.running_job.username} (${lane.running_job.mode || 'full'})`;
+                }
+                const n = (lane.pending || []).length;
+                return n ? `${label} ${n} pending` : `${label} idle`;
+            });
+            let line = parts.length ? parts.join(' · ') : 'Queues idle';
             if (sync.running && sync.progress) line += ` · ${sync.progress}`;
             if (data.stats) {
                 line += ` · today ${data.stats.completed_today || 0} jobs / ${data.stats.downloaded_today || 0} files`;
@@ -4529,17 +4668,23 @@ async function refreshScrapeStatusOnce() {
         }
         if (elements.scrapeQueueList) {
             const rows = [];
-            if (running) {
-                rows.push(
-                    `▶ @${running.username} [${running.mode}${running.deep ? ' deep' : ''}] running`
-                );
-            }
-            pending.slice(0, 8).forEach((j, i) => {
-                rows.push(`${i + 1}. @${j.username} [${j.mode}] prio ${j.priority || 0}`);
+            // Grouped by lane so the reading order matches the chip stack.
+            lanes.forEach((lane) => {
+                const tag = laneLabel(lane.source);
+                if (lane.running_job) {
+                    const j = lane.running_job;
+                    rows.push(
+                        `▶ [${tag}] @${j.username} [${j.mode}${j.deep ? ' deep' : ''}] running`
+                    );
+                }
+                (lane.pending || []).slice(0, 8).forEach((j, i) => {
+                    rows.push(`${i + 1}. [${tag}] @${j.username} [${j.mode}] prio ${j.priority || 0}`);
+                });
             });
             (data.history || []).slice(0, 5).forEach((j) => {
+                const tag = laneLabel(j.source || 'instagram');
                 rows.push(
-                    `✓ @${j.username} → ${j.status}${j.stop_reason ? ' (' + j.stop_reason + ')' : ''}`
+                    `✓ [${tag}] @${j.username} → ${j.status}${j.stop_reason ? ' (' + j.stop_reason + ')' : ''}`
                 );
             });
             elements.scrapeQueueList.innerHTML = rows.length
@@ -4547,34 +4692,44 @@ async function refreshScrapeStatusOnce() {
                 : '<div class="scrape-queue-row" style="opacity:0.55">No jobs yet — add a creator below</div>';
         }
 
-        // Lock Saved/Following while anything holds the worker (running or unpaused pending).
+        // Saved and Following are Instagram-only routes, so only the Instagram
+        // lane can block them. A busy Reddit lane used to grey them out purely
+        // because there was one global worker.
+        const ig = lanes.find((l) => l.source === 'instagram') || {};
+        const igPending = ig.pending || [];
+        const igRunning = ig.running_job;
+        const igSync = ig.sync || sync;
         const workerBusy =
-            Boolean(running) ||
-            Boolean(sync.running) ||
-            (pending.length > 0 && !paused);
+            Boolean(igRunning) ||
+            Boolean(igSync.running) ||
+            (igPending.length > 0 && !ig.paused);
         let busyReason = '';
-        if (running) {
-            busyReason = `Scraping @${running.username} now` +
-                (pending.length ? ` · ${pending.length} more queued` : '') +
+        if (igRunning) {
+            busyReason = `Scraping @${igRunning.username} now` +
+                (igPending.length ? ` · ${igPending.length} more queued` : '') +
                 ' — wait, Cancel job, or Clear pending';
-        } else if (sync.running) {
-            busyReason = `Sync busy (${sync.job_type || 'job'}) — wait or cancel`;
-        } else if (pending.length > 0 && !paused) {
+        } else if (igSync.running) {
+            busyReason = `Sync busy (${igSync.job_type || 'job'}) — wait or cancel`;
+        } else if (igPending.length > 0 && !ig.paused) {
             busyReason =
-                `Creator scrape queue has ${pending.length} pending — Clear pending or Pause queue first`;
+                `Instagram scrape queue has ${igPending.length} pending — Clear pending or Pause queue first`;
         }
         setOneShotSyncEnabled(!workerBusy, busyReason);
 
         updateScrapeJobChip(data);
         updateSyncLatestButtonUi();
 
-        // Creator list pills only when active set changes
-        const pillKey = [
-            running && running.username,
-            pending.map((j) => j.username).join(','),
-            paused ? '1' : '0',
-            sync.running ? 's1' : 's0',
-        ].join('|');
+        // Creator list pills only when the active set changes — across every
+        // lane, or a Reddit job starting would not refresh the sidebar.
+        const pillKey = lanes
+            .map((l) => [
+                l.source,
+                l.running_job && l.running_job.username,
+                (l.pending || []).map((j) => j.username).join(','),
+                l.paused ? '1' : '0',
+                l.sync && l.sync.running ? 's1' : 's0',
+            ].join('~'))
+            .join('|');
         if (pillKey !== state._scrapePillKey) {
             state._scrapePillKey = pillKey;
             if (elements.creatorList) renderCreatorList();
@@ -4649,7 +4804,7 @@ async function refreshGenericSyncForChip() {
  * Without this, the floating chip and creator pills vanish until the user clicks Sync again.
  */
 async function hydrateScrapeUiFromServer() {
-    state.scrapeChipDismissed = false;
+    state.scrapeChipDismissed.clear();
     const data = await refreshScrapeStatusOnce();
     if (!data) return null;
 
@@ -4720,7 +4875,9 @@ async function syncLatestSelectedCreator() {
         }
         // Mark so completion toast fires even for first job this session
         state.scrapeWasActive = true;
-        state.scrapeChipDismissed = false;
+        // Only this lane: enqueueing on X should not un-hide a chip the user
+        // deliberately dismissed on another platform.
+        state.scrapeChipDismissed.delete(data.source || 'instagram');
         toastForEnqueueResult(username, data);
         ensureScrapePolling();
         await refreshScrapeStatusOnce();
@@ -4840,7 +4997,9 @@ async function enqueueCreatorScrape() {
             return;
         }
         state.scrapeWasActive = true;
-        state.scrapeChipDismissed = false;
+        // Only this lane: enqueueing on X should not un-hide a chip the user
+        // deliberately dismissed on another platform.
+        state.scrapeChipDismissed.delete(data.source || 'instagram');
         toastForEnqueueResult(username, data);
         if (elements.scrapeCreatorInput) elements.scrapeCreatorInput.value = '';
         if (elements.syncCreatorInput) elements.syncCreatorInput.value = '';
@@ -4861,15 +5020,17 @@ async function enqueueCreatorScrape() {
     }
 }
 
-async function pauseScrapeQueue() {
+async function pauseScrapeQueue(source) {
     try {
         const res = await fetch('/api/scrape/pause', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ reason: 'Paused by user' }),
+            body: JSON.stringify(
+                source ? { reason: 'Paused by user', source } : { reason: 'Paused by user' }
+            ),
         });
         if (res.ok) {
-            showToast('Scrape queue paused');
+            showToast(source ? `${laneLabel(source)} queue paused` : 'Scrape queues paused');
             pollScrapeStatus();
         } else showToast('Pause failed');
     } catch (e) {
@@ -4877,12 +5038,18 @@ async function pauseScrapeQueue() {
     }
 }
 
-async function resumeScrapeQueue() {
+async function resumeScrapeQueue(source) {
     try {
-        const res = await fetch('/api/scrape/resume', { method: 'POST' });
+        const res = await fetch('/api/scrape/resume', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            // Omitted source means every lane — what the modal button means.
+            body: JSON.stringify(source ? { source } : {}),
+        });
         const data = await res.json().catch(() => ({}));
         if (res.ok) {
-            showToast(data.drain_started ? 'Queue resumed — starting next job' : 'Queue resumed');
+            const who = source ? `${laneLabel(source)} queue` : 'Queues';
+            showToast(data.drain_started ? `${who} resumed — starting next job` : `${who} resumed`);
             pollScrapeStatus();
             pollSyncStatus();
         } else showToast('Resume failed');
@@ -4891,12 +5058,19 @@ async function resumeScrapeQueue() {
     }
 }
 
-async function cancelRunningSyncJob() {
+async function cancelRunningSyncJob(source) {
     try {
-        const res = await fetch('/api/sync/cancel', { method: 'POST' });
+        // Cancel is lane-scoped now: stopping X must not stop a running
+        // Reddit job. No source = the user asked to stop everything.
+        const res = await fetch('/api/sync/cancel', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(source ? { source } : {}),
+        });
         const data = await res.json().catch(() => ({}));
-        if (data.status === 'cancelling') showToast('Cancel requested…');
-        else showToast('No running sync job');
+        const who = source ? ` for ${laneLabel(source)}` : '';
+        if (data.status === 'cancelling') showToast(`Cancel requested${who}…`);
+        else showToast(`No running sync job${who}`);
         pollSyncStatus();
         pollScrapeStatus();
     } catch (e) {

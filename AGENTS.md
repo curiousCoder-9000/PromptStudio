@@ -90,6 +90,8 @@ Load only what the task needs.
 | [docs/backlog_features.md](docs/backlog_features.md) · [docs/backlog_engineering.md](docs/backlog_engineering.md) | F1–F8 · E1–E5, picked up directly |
 | [docs/roadmap.md](docs/roadmap.md) | Phase history; 13–15 planned |
 | [docs/design_generation_loop.md](docs/design_generation_loop.md) | Active spec for Phases 13–14 |
+| [docs/design_source_filter.md](docs/design_source_filter.md) | Source as a view filter — provenance comes from `photos.source` |
+| [docs/design_scrape_lanes.md](docs/design_scrape_lanes.md) | Per-source scrape lanes — concurrency, cancel, pause, pacing |
 | [scripts/README.md](scripts/README.md) · [tests/ui/README.md](tests/ui/README.md) | CLI examples · browser suites |
 
 **Never load:** `docs/archive/` (shipped/superseded design docs, ~117KB — history only),
