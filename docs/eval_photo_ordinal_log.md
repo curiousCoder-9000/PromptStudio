@@ -27,6 +27,78 @@ Do **not** rewrite old sections; correct mistakes with a short “Errata” note
 
 ---
 
+## 2026-08-09 — Re-score of v6 at the product threshold (no new model run)
+
+### Context
+
+- **kind:** photo · **labels:** `labels-photo (1).jsonl` (T0=11, T1=2, T2=41, T3=43, T4=23)
+- **code:** no change. Derived arithmetically from the v6 confusion matrix in the
+  entry below — **no VLM calls.**
+- **why:** review of [plan_photo_ordinal_holdout_v7.md](plan_photo_ordinal_holdout_v7.md)
+  found the plan had no metric for the surface the app actually reads.
+- **validation:** re-deriving `exact`, `within±1`, `glam_acc` and `top_share` from
+  that matrix reproduces the reported 0.600 / 0.925 / 0.600 / 0.658 exactly, so
+  the matrix and everything below are consistent.
+
+### The Sexy filter is a binary decision at tier ≥ 3
+
+`handler.py` passes `glam_min=GLAM_SEXY_MIN` (default **2**) to `query_photos`.
+`glam >= 2` ⇔ `tier >= 3`. `glam_accuracy` never measures this.
+
+| metric @ glam≥2 | v6 |
+|-----------------|---:|
+| keep precision | **1.000** (38/38) |
+| keep recall | **0.576** (38/66) |
+| keep F1 | **0.731** |
+
+**v6 puts nothing wrong in the filter and drops 42% of the wanted photos.**
+
+Per-tier precision (also not currently reported):
+
+| tier | precision | recall |
+|-----:|----------:|-------:|
+| 0 | 3/3 = 1.000 | 3/11 = 0.273 |
+| 2 | 41/79 = **0.519** | 41/41 = 1.000 |
+| 3 | 6/6 = 1.000 | 6/43 = **0.140** |
+| 4 | 22/32 = **0.688** | 22/23 = 0.957 |
+
+### Error mass split by whether it crosses the filter boundary
+
+| error | n | crosses? |
+|-------|--:|----------|
+| **T3→2** | **27** | **yes — 27 wanted photos never shown** |
+| T4→2 | 1 | yes |
+| T3→4 | 10 | no — already in the filter, only over-ranks in `sort=glam` |
+| T0→2 | 8 | no — lands at G1, already below the filter |
+| T1→2 | 2 | no |
+
+**28 of 48 errors change what the product shows; 27 of those 28 are one cell.**
+
+### Decision
+
+- T0 gates and the T3↔4 split are **cosmetic** for the Sexy filter; they affect
+  only `sort=glam` ordering. Demoted from ship gates in the plan.
+- **T3 under-firing is the only product bug.** Prime suspect is not missing schema
+  but two v3-era prompt lines (`"This is the DEFAULT"`, `"If unsure between 2 and
+  3, choose 2"` — `outfit_classifier.py:208,226`) that were tuned to fix a
+  *round-1* `top_score_share` problem.
+- Legacy's keep numbers still need computing from `photo-holdout-legacy.json`, but
+  are bounded: legacy predicts **G3=70** vs only **66** true keeps in the set, so
+  legacy keep precision is **< 1.0 necessarily**. Legacy floods the filter; v6
+  starves it. `glam_accuracy` hides both failure modes.
+- Note `top_score_share` ≤ 0.60 is a weak gate here: a **perfect** classifier on
+  this label distribution scores **0.358**.
+- **Next:** add `keep_precision`/`keep_recall`/`keep_f1` + per-tier precision +
+  `--split dev|test` to `evalset.py`, re-score the existing result JSONs, then run
+  the prompt-only Stage A ablation on the dev half. Plan rev 2 §3.0/§4.0/§4.1.
+
+### Artifacts
+
+- Derived from `_eval/results/photo-holdout-ordinal.json` (no new files)
+- Plan rev 2: `docs/plan_photo_ordinal_holdout_v7.md`
+
+---
+
 ## 2026-08-09 — Holdout analysis vs gold labels `labels-photo (1).jsonl` (no new model run)
 
 ### Context
