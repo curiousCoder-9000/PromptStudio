@@ -403,7 +403,7 @@ class InstagramDownloader:
         mode:
           - bounded: existing rank/scan/top-N path (default; used by following bulk)
           - full: stream entire feed; deep=True disables catch-up (true archive)
-          - latest: stream newest-first with catch-up on (existing folders; no glam rank)
+          - latest: stream newest-first with catch-up on (existing folders; no ranking)
         """
         result = SyncResult(job_type="creator")
         username = username.lstrip("@").strip()

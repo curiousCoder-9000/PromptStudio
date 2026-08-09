@@ -203,7 +203,7 @@ def test_pre_multisource_db_migrates(tmp_path):
           filename TEXT NOT NULL, taken_at TEXT, mtime REAL,
           favorite INTEGER NOT NULL DEFAULT 0, has_prompt INTEGER NOT NULL DEFAULT 0,
           prompt_stale INTEGER NOT NULL DEFAULT 0, prompt_search TEXT,
-          post_id TEXT, shortcode TEXT, glam_score INTEGER NOT NULL DEFAULT -1);
+          post_id TEXT, shortcode TEXT);
         CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE deleted_posts (id INTEGER PRIMARY KEY AUTOINCREMENT,
           creator TEXT NOT NULL, shortcode TEXT, post_id TEXT, rel_path TEXT,
@@ -215,8 +215,8 @@ def test_pre_multisource_db_migrates(tmp_path):
         """
     )
     conn.execute(
-        "INSERT INTO photos(rel_path, creator, filename, post_id, glam_score) "
-        "VALUES('nina/a.jpg', 'nina', 'a.jpg', '111', 2)"
+        "INSERT INTO photos(rel_path, creator, filename, post_id) "
+        "VALUES('nina/a.jpg', 'nina', 'a.jpg', '111')"
     )
     conn.execute(
         "INSERT INTO deleted_posts(creator, shortcode, deleted_at, source) "
@@ -229,9 +229,9 @@ def test_pre_multisource_db_migrates(tmp_path):
     try:
         # Legacy rows are Instagram, and back-filling must not lose data.
         row = migrated._conn.execute(
-            "SELECT source, glam_score FROM photos WHERE rel_path='nina/a.jpg'"
+            "SELECT source FROM photos WHERE rel_path='nina/a.jpg'"
         ).fetchone()
-        assert (row["source"], row["glam_score"]) == (DEFAULT_SOURCE, 2)
+        assert row["source"] == DEFAULT_SOURCE
         assert migrated.is_deleted_post("nina", shortcode="GONE") is True
         assert migrated.is_deleted_post("nina", shortcode="GONE", platform="x") is False
 

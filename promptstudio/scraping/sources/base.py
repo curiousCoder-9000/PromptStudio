@@ -46,7 +46,7 @@ def resolve_folder_name(source: str, handle: str, *, kind: str = "") -> str:
     Instagram keeps the bare handle — the existing archive depends on it. Other
     sources get a `__<source>` suffix so that two different people who happen to
     share a handle on two platforms don't collide into one folder (which would
-    also pollute per-creator glam stats and creator-style rebuilds).
+    also pollute per-creator stats and creator-style rebuilds).
 
     `kind` disambiguates namespaces within one source: Reddit's r/foo and u/foo
     are unrelated, so they become `r_foo__reddit` and `u_foo__reddit`.

@@ -7,9 +7,6 @@ const state = {
     creatorSearchQuery: '',
     unanalyzedOnly: false,
     favoritesOnly: false,
-    sexyOnly: false,
-    rejectOnly: false,
-    unscoredOnly: false,
     mediaType: 'all',
     sortMode: 'name',
     // 'normal' | 'large' — was a bare DOM class, so it couldn't be restored
@@ -38,8 +35,6 @@ const state = {
     batchPollTimer: null,
     // Tracks the running → stopped transition so completion is announced once
     batchWasRunning: false,
-    classifyPollTimer: null,
-    classifyStatus: null,
     healthPollTimer: null,
     photoOffset: 0,
     photoLimit: 60,
@@ -50,7 +45,7 @@ const state = {
     photosRequest: null,
     creatorStyleRequest: null,
     followingRequest: null,
-    // Creator sidebar action panel (Sync / Classify / Style) — independent of filter selection
+    // Creator sidebar action panel (Sync / Style) — independent of filter selection
     creatorPanelOpen: false,
     // Video player
     videoLoadToken: 0,
@@ -131,9 +126,6 @@ const elements = {
     videoDetailFile: document.getElementById('videoDetailFile'),
     videoDetailPills: document.getElementById('videoDetailPills'),
     videoDetailGrid: document.getElementById('videoDetailGrid'),
-    videoGlamBlock: document.getElementById('videoGlamBlock'),
-    videoGlamRow: document.getElementById('videoGlamRow'),
-    videoGlamReason: document.getElementById('videoGlamReason'),
     videoDetailCaption: document.getElementById('videoDetailCaption'),
     videoOpenIgBtn: document.getElementById('videoOpenIgBtn'),
     videoExpandFromPanelBtn: document.getElementById('videoExpandFromPanelBtn'),
@@ -225,7 +217,7 @@ const elements = {
     scrapeJobChipSub: document.getElementById('scrapeJobChipSub'),
     scrapeJobChipCancel: document.getElementById('scrapeJobChipCancel'),
     scrapeJobChipDismiss: document.getElementById('scrapeJobChipDismiss'),
-    // Batch + classify job chips (same shape as the scrape chip)
+    // Batch job chip (same shape as the scrape chip)
     jobChipStack: document.getElementById('jobChipStack'),
     batchJobChip: document.getElementById('batchJobChip'),
     batchJobChipIcon: document.getElementById('batchJobChipIcon'),
@@ -233,18 +225,9 @@ const elements = {
     batchJobChipSub: document.getElementById('batchJobChipSub'),
     batchJobChipFill: document.getElementById('batchJobChipFill'),
     batchJobChipCancel: document.getElementById('batchJobChipCancel'),
-    classifyJobChip: document.getElementById('classifyJobChip'),
-    classifyJobChipIcon: document.getElementById('classifyJobChipIcon'),
-    classifyJobChipTitle: document.getElementById('classifyJobChipTitle'),
-    classifyJobChipSub: document.getElementById('classifyJobChipSub'),
-    classifyJobChipFill: document.getElementById('classifyJobChipFill'),
-    classifyJobChipCancel: document.getElementById('classifyJobChipCancel'),
     batchPromptBtn: document.getElementById('batchPromptBtn'),
     unanalyzedFilterBtn: document.getElementById('unanalyzedFilterBtn'),
     favoritesFilterBtn: document.getElementById('favoritesFilterBtn'),
-    sexyFilterBtn: document.getElementById('sexyFilterBtn'),
-    rejectFilterBtn: document.getElementById('rejectFilterBtn'),
-    unscoredFilterBtn: document.getElementById('unscoredFilterBtn'),
     sortSelect: document.getElementById('sortSelect'),
     mediaTypeSelect: document.getElementById('mediaTypeSelect'),
     favoritePhotoBtn: document.getElementById('favoritePhotoBtn'),
@@ -269,22 +252,12 @@ const elements = {
     creatorStylePanel: document.getElementById('creatorStylePanel'),
     creatorStylePrefix: document.getElementById('creatorStylePrefix'),
     creatorStyleTerms: document.getElementById('creatorStyleTerms'),
-    creatorClassifyMeta: document.getElementById('creatorClassifyMeta'),
-    classifyCreatorBtn: document.getElementById('classifyCreatorBtn'),
-    rescoreStaleBtn: document.getElementById('rescoreStaleBtn'),
-    reviewRejectsBtn: document.getElementById('reviewRejectsBtn'),
-    cancelClassifyBtn: document.getElementById('cancelClassifyBtn'),
     rebuildStyleBtn: document.getElementById('rebuildStyleBtn'),
     bulkBar: document.getElementById('bulkBar'),
     bulkCount: document.getElementById('bulkCount'),
     bulkReanalyzeBtn: document.getElementById('bulkReanalyzeBtn'),
     bulkDeleteBtn: document.getElementById('bulkDeleteBtn'),
     bulkClearBtn: document.getElementById('bulkClearBtn'),
-    reviewRejectsBar: document.getElementById('reviewRejectsBar'),
-    reviewRejectsCount: document.getElementById('reviewRejectsCount'),
-    selectAllRejectsBtn: document.getElementById('selectAllRejectsBtn'),
-    deleteSelectedRejectsBtn: document.getElementById('deleteSelectedRejectsBtn'),
-    exitRejectsBtn: document.getElementById('exitRejectsBtn'),
     deleteConfirmTitle: document.getElementById('deleteConfirmTitle'),
     deleteConfirmBody: document.getElementById('deleteConfirmBody'),
     followingSearchInput: document.getElementById('followingSearchInput'),
@@ -327,7 +300,7 @@ function debounce(fn, wait) {
 // ── View preferences ─────────────────────────────────────────────────
 // How you're looking at the archive should survive a reload; *where* you are
 // (creator, review mode, selection) should not — those are navigation, and
-// silently restoring them is disorienting. Reject review in particular is a
+// silently restoring them is disorienting. A destructive sweep in particular is a
 // destructive mode nobody should land in from a refresh.
 const PREFS_KEY = 'promptstudio.viewPrefs.v1';
 const PREF_FIELDS = [
@@ -335,8 +308,6 @@ const PREF_FIELDS = [
     'mediaType',
     'gridSize',
     'favoritesOnly',
-    'sexyOnly',
-    'unscoredOnly',
     'unanalyzedOnly'
 ];
 
@@ -380,8 +351,6 @@ function applyViewPrefsToControls() {
 
     const chips = [
         [elements.favoritesFilterBtn, state.favoritesOnly],
-        [elements.sexyFilterBtn, state.sexyOnly],
-        [elements.unscoredFilterBtn, state.unscoredOnly],
         [elements.unanalyzedFilterBtn, state.unanalyzedOnly]
     ];
     chips.forEach(([btn, on]) => {
@@ -414,8 +383,7 @@ async function initApp() {
     await fetchCreators();
     await fetchPhotos();
     // Resume job chips if work is mid-flight — jobs live on the server, so a
-    // browser refresh must not orphan a running batch/classify/scrape.
-    pollClassifyStatus();
+    // browser refresh must not orphan a running batch/scrape.
     pollBatchStatus();
     // Restore scrape/sync chip after refresh (queue lives on the server)
     await hydrateScrapeUiFromServer();
@@ -617,28 +585,7 @@ function _fmtDist(dist) {
 function renderInsights(data) {
     if (!elements.insightsBody) return;
     const p = data.prompts || {};
-    const g = data.glam || {};
     const gen = data.generations || {};
-    const pass = g.filter_pass_rates || {};
-
-    const passRows = Object.entries(pass).map(([name, row]) => {
-        const rate = row?.rate;
-        const warn = rate != null && rate > 0.6;
-        return `<div class="insights-pass-row ${warn ? 'is-warn' : ''}">
-            <span class="insights-pass-name">${escapeHtml(name)}</span>
-            <span class="insights-pass-rate">${_fmtRate(rate)}</span>
-            <span class="insights-pass-detail">${(row?.pass ?? 0).toLocaleString()} / ${(row?.of ?? 0).toLocaleString()}</span>
-        </div>`;
-    }).join('') || '<div class="insights-muted">No scored media yet</div>';
-
-    const byVer = g.by_prompt_version || {};
-    const verBlocks = Object.keys(byVer).length
-        ? Object.entries(byVer).map(([ver, dist]) =>
-            `<div class="insights-ver-block">
-                <div class="insights-ver-name">${escapeHtml(ver)}</div>
-                <div class="insights-dist">${_fmtDist(dist)}</div>
-            </div>`).join('')
-        : '<div class="insights-muted">No versioned glam scores yet</div>';
 
     const pipeBlocks = Object.keys(p.by_pipeline_version || {}).length
         ? Object.entries(p.by_pipeline_version).map(([ver, n]) =>
@@ -667,23 +614,6 @@ function renderInsights(data) {
                 </div>
                 <div class="insights-sublabel">By pipeline version</div>
                 <div class="insights-dist">${pipeBlocks}</div>
-            </section>
-
-            <section class="insights-section">
-                <h4><i class="fa-solid fa-fire"></i> Glam scores</h4>
-                <div class="insights-metrics">
-                    <div class="insights-metric">
-                        <span class="insights-metric-value">${(g.scored ?? 0).toLocaleString()}</span>
-                        <span class="insights-metric-label">Scored</span>
-                        <span class="insights-metric-sub">${(g.unscored ?? 0).toLocaleString()} unscored</span>
-                    </div>
-                </div>
-                <div class="insights-sublabel">Distribution (0–3; −1 unscored)</div>
-                <div class="insights-dist">${_fmtDist(g.distribution)}</div>
-                <div class="insights-sublabel">Filter pass rates <span class="insights-hint">(warn if &gt; 60%)</span></div>
-                <div class="insights-pass-list">${passRows}</div>
-                <div class="insights-sublabel">By classifier prompt version</div>
-                ${verBlocks}
             </section>
 
             <section class="insights-section">
@@ -778,15 +708,6 @@ async function fetchPhotos({ append = false } = {}) {
         if (state.favoritesOnly) {
             params.append('favorite', '1');
         }
-        if (state.sexyOnly) {
-            params.append('sexy', '1');
-        }
-        if (state.rejectOnly) {
-            params.append('reject', '1');
-        }
-        if (state.unscoredOnly) {
-            params.append('unscored', '1');
-        }
         params.append('media_type', state.mediaType || 'all');
         params.append('sort', state.sortMode || 'name');
         params.append('offset', String(requestOffset));
@@ -804,7 +725,6 @@ async function fetchPhotos({ append = false } = {}) {
         state.photos = append ? state.photos.concat(page) : page;
         state.photoOffset = state.photos.length;
         renderGallery({ append, fromIndex: prevLen });
-        updateReviewRejectsBar();
     } catch (err) {
         // A superseded request is expected, not a failure — the newer one wins.
         if (err.name === 'AbortError') return;
@@ -896,7 +816,7 @@ async function fetchPromptForPhoto(relPath, forceRefresh = false) {
  * Drop photos from the current view without refetching.
  *
  * Deleting used to call initApp(), which reset photoOffset to 0 and threw away
- * every loaded page — brutal in the reject-review loop. This splices state,
+ * every loaded page. This splices state,
  * removes the cards, and adjusts the counters in place so scroll position and
  * all loaded pages survive.
  *
@@ -937,9 +857,6 @@ function removePhotosFromView(relPaths) {
         if (typeof creator.scored_count === 'number') {
             creator.scored_count = Math.max(0, creator.scored_count - n);
         }
-        if (typeof creator.reject_count === 'number') {
-            creator.reject_count = Math.max(0, creator.reject_count - n);
-        }
     });
     if (removedByCreator.size) renderCreatorList();
 
@@ -955,7 +872,6 @@ function removePhotosFromView(relPaths) {
         (state.photoTotal ? ` / ${state.photoTotal}` : '') + ' photos';
     elements.emptyState.style.display = state.photos.length === 0 ? 'flex' : 'none';
     updateBulkBar();
-    updateReviewRejectsBar();
     return removed;
 }
 
@@ -1184,12 +1100,6 @@ function togglePhotoSelection(relPath, selected) {
 function updateBulkBar() {
     const count = state.selectedPaths.size;
     if (!elements.bulkBar) return;
-    // Prefer the reject-review bar when that filter is active
-    if (state.rejectOnly) {
-        elements.bulkBar.style.display = 'none';
-        updateReviewRejectsBar();
-        return;
-    }
     if (!state.selectMode || count === 0) {
         elements.bulkBar.style.display = 'none';
         return;
@@ -1198,57 +1108,9 @@ function updateBulkBar() {
     elements.bulkCount.textContent = `${count} selected`;
 }
 
-function updateReviewRejectsBar() {
-    if (!elements.reviewRejectsBar) return;
-    if (!state.rejectOnly) {
-        elements.reviewRejectsBar.style.display = 'none';
-        return;
-    }
-    elements.reviewRejectsBar.style.display = 'flex';
-    const total = state.photoTotal || state.photos.length;
-    const sel = state.selectedPaths.size;
-    if (elements.reviewRejectsCount) {
-        elements.reviewRejectsCount.textContent = sel
-            ? `Review rejects · ${total} items · ${sel} selected`
-            : `Review rejects · ${total} items`;
-    }
-}
 
-function enterRejectReviewMode() {
-    state.rejectOnly = true;
-    state.sexyOnly = false;
-    state.unscoredOnly = false;
-    if (elements.rejectFilterBtn) elements.rejectFilterBtn.classList.add('active');
-    if (elements.sexyFilterBtn) elements.sexyFilterBtn.classList.remove('active');
-    if (elements.unscoredFilterBtn) elements.unscoredFilterBtn.classList.remove('active');
-    setSelectMode(true);
-    fetchPhotos();
-}
 
-function exitRejectReviewMode() {
-    state.rejectOnly = false;
-    if (elements.rejectFilterBtn) elements.rejectFilterBtn.classList.remove('active');
-    clearSelection();
-    setSelectMode(false);
-    updateReviewRejectsBar();
-    fetchPhotos();
-}
 
-function selectNonFavoriteRejects() {
-    if (!state.rejectOnly) return;
-    setSelectMode(true);
-    state.photos.forEach((p) => {
-        if (p.favorite) {
-            state.selectedPaths.delete(p.rel_path);
-        } else {
-            state.selectedPaths.add(p.rel_path);
-        }
-    });
-    renderGallery();
-    updateReviewRejectsBar();
-    const n = state.selectedPaths.size;
-    showToast(n ? `Selected ${n} non-favorite rejects` : 'No non-favorite rejects on this page');
-}
 
 function setSelectMode(enabled) {
     state.selectMode = enabled;
@@ -1287,32 +1149,13 @@ function renderCreatorList() {
     });
     elements.creatorList.appendChild(allItem);
 
-    const classifyRunning = state.classifyStatus && state.classifyStatus.running;
-    const classifyCreator = state.classifyStatus && state.classifyStatus.creator;
-
     const filtered = state.creators.filter(c => !q || c.name.toLowerCase().includes(q));
     filtered.forEach(c => {
         const item = document.createElement('div');
         item.className = `creator-item ${state.selectedCreator === c.name ? 'active' : ''}`;
-        const scored = c.scored_count != null ? Number(c.scored_count) : null;
-        const total = Number(c.photo_count) || 0;
-        const rejects = Number(c.reject_count) || 0;
-        const isJob = classifyRunning && classifyCreator === c.name;
-        let scorePill = '';
-        if (isJob) {
-            const st = state.classifyStatus;
-            scorePill = `<span class="creator-score-pill running" title="Classifying…">${Number(st.completed) || 0}/${Number(st.total) || 0}</span>`;
-        } else if (scored != null && total > 0) {
-            const cls = rejects > 0 ? 'creator-score-pill has-rejects' : 'creator-score-pill';
-            const title = rejects
-                ? `${scored}/${total} scored · ${rejects} rejects`
-                : `${scored}/${total} scored`;
-            scorePill = `<span class="${cls}" title="${escapeHtml(title)}">${scored}/${total}</span>`;
-        }
         item.innerHTML = `
             <span class="creator-name">@${escapeHtml(c.name)}${syncBadgeHtml(c)}</span>
             <span style="display:inline-flex;align-items:center;gap:6px;">
-                ${scorePill}
                 <span class="creator-badge">${escapeHtml(c.photo_count)}</span>
             </span>
         `;
@@ -1402,61 +1245,6 @@ function selectedCreatorMeta() {
     return state.creators.find((c) => c.name === state.selectedCreator) || null;
 }
 
-function updateClassifyPanelUi() {
-    const creator = state.selectedCreator;
-    const meta = selectedCreatorMeta();
-    const st = state.classifyStatus;
-    const runningHere = !!(st && st.running && st.creator === creator);
-    const runningElsewhere = !!(st && st.running && st.creator && st.creator !== creator);
-
-    if (elements.creatorClassifyMeta) {
-        if (!creator) {
-            elements.creatorClassifyMeta.textContent = '—';
-        } else if (runningHere) {
-            const pct = st.total ? Math.round((st.completed / st.total) * 100) : 0;
-            elements.creatorClassifyMeta.textContent =
-                `Classifying… ${st.completed}/${st.total} (${pct}%) · keep ${st.kept || 0} · reject ${st.rejected || 0}` +
-                (st.failed ? ` · err ${st.failed}` : '');
-        } else if (runningElsewhere) {
-            elements.creatorClassifyMeta.textContent = `Job running on @${st.creator}…`;
-        } else if (meta) {
-            const scored = meta.scored_count != null ? meta.scored_count : 0;
-            const unscored = meta.unscored_count != null ? meta.unscored_count : 0;
-            const rejects = meta.reject_count != null ? meta.reject_count : 0;
-            elements.creatorClassifyMeta.textContent =
-                `${scored} scored · ${unscored} unscored · ${rejects} rejects`;
-        } else {
-            elements.creatorClassifyMeta.textContent = '—';
-        }
-    }
-
-    if (elements.classifyCreatorBtn) {
-        elements.classifyCreatorBtn.disabled = !creator || runningHere || runningElsewhere || state.ollamaOnline === false;
-        elements.classifyCreatorBtn.innerHTML = runningHere
-            ? '<i class="fa-solid fa-spinner fa-spin"></i> Classifying…'
-            : '<i class="fa-solid fa-fire"></i> Classify unscored';
-    }
-    if (elements.rescoreStaleBtn) {
-        // Hidden entirely at zero: this only appears after a prompt version
-        // bump leaves older verdicts behind, which is rare and needs context.
-        const stale = meta && meta.stale_count != null ? Number(meta.stale_count) || 0 : 0;
-        elements.rescoreStaleBtn.style.display = stale > 0 ? '' : 'none';
-        elements.rescoreStaleBtn.disabled =
-            !creator || runningHere || runningElsewhere || state.ollamaOnline === false;
-        elements.rescoreStaleBtn.innerHTML =
-            `<i class="fa-solid fa-clock-rotate-left"></i> Re-score outdated (${stale})`;
-    }
-    if (elements.reviewRejectsBtn) {
-        const rejects = meta && meta.reject_count != null ? Number(meta.reject_count) || 0 : 0;
-        elements.reviewRejectsBtn.disabled = !creator;
-        elements.reviewRejectsBtn.innerHTML =
-            `<i class="fa-solid fa-filter"></i> Review rejects${rejects ? ` (${rejects})` : ''}`;
-    }
-    if (elements.cancelClassifyBtn) {
-        elements.cancelClassifyBtn.style.display = runningHere ? 'inline-flex' : 'none';
-    }
-    updateSyncLatestButtonUi();
-}
 
 function hideCreatorStylePanel() {
     state.creatorPanelOpen = false;
@@ -1491,7 +1279,6 @@ async function updateCreatorStylePanel() {
         return;
     }
     elements.creatorStylePanel.style.display = 'flex';
-    updateClassifyPanelUi();
     updateSyncLatestButtonUi();
     elements.creatorStylePrefix.textContent = 'Loading…';
     elements.creatorStyleTerms.innerHTML = '';
@@ -1604,10 +1391,6 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
         // Single source of truth for video detection (was a divergent inline list)
         const isVideo = isVideoFilename(p.filename);
         const videoBadge = isVideo ? '<div class="video-badge"><i class="fa-solid fa-play"></i></div>' : '';
-        const glam = typeof p.glam_score === 'number' ? p.glam_score : -1;
-        const glamBadge = glam >= 0
-            ? `<span class="glam-score-badge g${glam}" title="Glam score ${glam}">g${glam}</span>`
-            : '';
         const bottomHint = isVideo
             ? `<div class="photo-card-prompt-hint"><i class="fa-solid fa-clapperboard"></i> Click for reel details</div>`
             : `<div class="photo-card-prompt-hint"><i class="fa-solid fa-wand-magic-sparkles"></i> Click for AI Prompt</div>`;
@@ -1617,7 +1400,6 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
         card.innerHTML = `
             <img src="${escapeHtml(imgSrc)}" alt="${escapeHtml(p.filename)}" loading="lazy" data-full="${escapeHtml(p.url)}">
             ${videoBadge}
-            ${glamBadge}
             <div class="photo-card-overlay">
                 <div class="overlay-top-actions">
                     ${state.selectMode
@@ -1987,7 +1769,7 @@ function openLightbox(index) {
     elements.lightboxModal.style.display = 'flex';
 
     if (isVideo) {
-        // Reels: show metadata / glam panel — not image prompt generator
+        // Reels: show archive metadata — not the image prompt generator
         loadVideoDetailPanel(photo);
         // Skip Comfy generations / prompt auto-load for videos
         if (elements.compareToggleBtn) elements.compareToggleBtn.style.display = 'none';
@@ -2224,15 +2006,9 @@ function formatTakenAt(iso) {
     }
 }
 
-function glamScoreLabel(score) {
-    const s = Number(score);
-    if (!Number.isFinite(s) || s < 0) return { text: 'Unscored', cls: 'glam-unscored' };
-    if (s >= 2) return { text: `Keep · g${s}`, cls: 'glam-keep' };
-    return { text: `Reject · g${s}`, cls: 'glam-reject' };
-}
 
 /**
- * Photos: prompt generator. Videos: reel metadata / glam panel
+ * Photos: prompt generator. Videos: reel metadata
  * (vision image prompts are unreliable on MP4s).
  */
 function setInspectorMode(mode) {
@@ -2246,7 +2022,7 @@ function setInspectorMode(mode) {
             : '<i class="fa-solid fa-wand-magic-sparkles text-gradient"></i> AI Image Prompt Generator';
     }
     if (elements.inspectorModelTag) {
-        elements.inspectorModelTag.textContent = isVideo ? 'Archive + Glam' : 'Ollama Vision';
+        elements.inspectorModelTag.textContent = isVideo ? 'Archive' : 'Ollama Vision';
     }
     if (elements.videoDetailPanel) {
         elements.videoDetailPanel.style.display = isVideo ? 'flex' : 'none';
@@ -2304,11 +2080,6 @@ function metaCard(label, value) {
     </div>`;
 }
 
-function boolPill(label, on) {
-    const cls = on ? 'glam-keep' : 'glam-reject';
-    const mark = on ? 'yes' : 'no';
-    return `<span class="video-pill ${cls}">${escapeHtml(label)}: ${mark}</span>`;
-}
 
 async function loadVideoDetailPanel(photo) {
     if (!elements.videoDetailPanel || !photo) return;
@@ -2330,13 +2101,8 @@ async function loadVideoDetailPanel(photo) {
         elements.videoDetailCaption.classList.add('empty');
     }
     if (elements.videoDetailGrid) {
-        elements.videoDetailGrid.innerHTML =
-            metaCard('Type', 'Reel / video') +
-            metaCard('Glam', typeof photo.glam_score === 'number' && photo.glam_score >= 0
-                ? `g${photo.glam_score}`
-                : '—');
+        elements.videoDetailGrid.innerHTML = metaCard('Type', 'Reel / video');
     }
-    if (elements.videoGlamBlock) elements.videoGlamBlock.style.display = 'none';
     if (elements.videoOpenIgBtn) elements.videoOpenIgBtn.style.display = 'none';
 
     // Live duration when video element has metadata
@@ -2388,13 +2154,10 @@ async function loadVideoDetailPanel(photo) {
             elements.videoDetailThumb.src = data.thumb_url || photo.thumb_url;
         }
 
-        const glamInfo = glamScoreLabel(data.glam_score);
         if (elements.videoDetailPills) {
-            const pills = [
-                `<span class="video-pill ${glamInfo.cls}">${escapeHtml(glamInfo.text)}</span>`,
-            ];
+            const pills = [];
             if (data.favorite || photo.favorite) {
-                pills.push('<span class="video-pill glam-keep">Favorite</span>');
+                pills.push('<span class="video-pill is-favorite">Favorite</span>');
             }
             if (data.shortcode) {
                 pills.push(`<span class="video-pill">${escapeHtml(data.shortcode)}</span>`);
@@ -2414,42 +2177,6 @@ async function loadVideoDetailPanel(photo) {
         ];
         if (elements.videoDetailGrid) {
             elements.videoDetailGrid.innerHTML = gridParts.join('');
-        }
-
-        const glam = data.glam || {};
-        const hasGlamDetail =
-            glam && (glam.brief_reason || glam.confidence != null || glam.has_woman != null);
-        if (elements.videoGlamBlock && elements.videoGlamRow) {
-            if (hasGlamDetail || (typeof data.glam_score === 'number' && data.glam_score >= 0)) {
-                elements.videoGlamBlock.style.display = 'flex';
-                const row = [];
-                if (glam.has_woman != null) row.push(boolPill('Woman', !!glam.has_woman));
-                if (glam.sexy_revealing_outfit != null) {
-                    row.push(boolPill('Sexy outfit', !!glam.sexy_revealing_outfit));
-                }
-                if (glam.good_breasts != null) row.push(boolPill('Figure', !!glam.good_breasts));
-                if (glam.confidence != null) {
-                    row.push(
-                        `<span class="video-pill">conf ${(Number(glam.confidence) * 100).toFixed(0)}%</span>`
-                    );
-                }
-                if (glam.source) {
-                    row.push(`<span class="video-pill">${escapeHtml(String(glam.source).slice(0, 24))}</span>`);
-                }
-                elements.videoGlamRow.innerHTML = row.join('') ||
-                    `<span class="video-pill ${glamInfo.cls}">${escapeHtml(glamInfo.text)}</span>`;
-                if (elements.videoGlamReason) {
-                    elements.videoGlamReason.textContent =
-                        glam.brief_reason ||
-                        (data.glam_score >= 2
-                            ? 'Classified as keep-worthy glam.'
-                            : data.glam_score >= 0
-                                ? 'Classified below keep threshold.'
-                                : '');
-                }
-            } else {
-                elements.videoGlamBlock.style.display = 'none';
-            }
         }
 
         const caption = (data.caption || '').trim();
@@ -2473,10 +2200,6 @@ async function loadVideoDetailPanel(photo) {
             }
         }
 
-        // Keep gallery card glam in sync when detail knows more
-        if (typeof data.glam_score === 'number') {
-            photo.glam_score = data.glam_score;
-        }
     } catch (err) {
         console.error('Video detail load failed', err);
         if (elements.videoDetailCaption) {
@@ -3205,14 +2928,14 @@ function promptBulkDelete() {
         (p) => state.selectedPaths.has(p.rel_path) && p.favorite
     ).length;
     if (elements.deleteConfirmTitle) {
-        const noun = state.rejectOnly ? 'Rejects' : 'Photos';
+        const noun = 'Photos';
         elements.deleteConfirmTitle.textContent = state.trashEnabled
             ? `Move ${paths.length} ${noun} to Trash?`
             : `Delete ${paths.length} ${noun}?`;
     }
     if (elements.deleteConfirmBody) {
         const who = state.selectedCreator ? ` for @${state.selectedCreator}` : '';
-        // Favorites inside a reject sweep are the classic false-positive case — call it out.
+        // Favorites inside a bulk sweep are the classic mistake — call it out.
         const favNote = favCount
             ? ` Includes ${favCount} favorite${favCount === 1 ? '' : 's'}.`
             : '';
@@ -3377,62 +3100,6 @@ function setupEventListeners() {
         });
     }
 
-    if (elements.sexyFilterBtn) {
-        elements.sexyFilterBtn.addEventListener('click', () => {
-            state.sexyOnly = !state.sexyOnly;
-            elements.sexyFilterBtn.classList.toggle('active', state.sexyOnly);
-            if (state.sexyOnly) {
-                state.rejectOnly = false;
-                state.unscoredOnly = false;
-                if (elements.rejectFilterBtn) elements.rejectFilterBtn.classList.remove('active');
-                if (elements.unscoredFilterBtn) elements.unscoredFilterBtn.classList.remove('active');
-                updateReviewRejectsBar();
-                // When turning Sexy on, prefer glam sort if still on default name
-                if (state.sortMode === 'name' && elements.sortSelect) {
-                    state.sortMode = 'glam';
-                    elements.sortSelect.value = 'glam';
-                }
-            }
-            saveViewPrefs();
-            fetchPhotos();
-        });
-    }
-
-    if (elements.rejectFilterBtn) {
-        elements.rejectFilterBtn.addEventListener('click', () => {
-            if (state.rejectOnly) {
-                exitRejectReviewMode();
-            } else {
-                enterRejectReviewMode();
-            }
-        });
-    }
-
-    if (elements.unscoredFilterBtn) {
-        elements.unscoredFilterBtn.addEventListener('click', () => {
-            state.unscoredOnly = !state.unscoredOnly;
-            elements.unscoredFilterBtn.classList.toggle('active', state.unscoredOnly);
-            if (state.unscoredOnly) {
-                state.sexyOnly = false;
-                state.rejectOnly = false;
-                if (elements.sexyFilterBtn) elements.sexyFilterBtn.classList.remove('active');
-                if (elements.rejectFilterBtn) elements.rejectFilterBtn.classList.remove('active');
-                updateReviewRejectsBar();
-            }
-            saveViewPrefs();
-            fetchPhotos();
-        });
-    }
-
-    if (elements.classifyCreatorBtn) {
-        // Wrapped: the click Event must not reach the options argument.
-        elements.classifyCreatorBtn.addEventListener('click', () => startCreatorClassify());
-    }
-    if (elements.rescoreStaleBtn) {
-        elements.rescoreStaleBtn.addEventListener('click', () =>
-            startCreatorClassify({ rescoreStale: true })
-        );
-    }
     if (elements.syncLatestCreatorBtn) {
         elements.syncLatestCreatorBtn.addEventListener('click', syncLatestSelectedCreator);
     }
@@ -3448,37 +3115,6 @@ function setupEventListeners() {
     if (elements.batchJobChipCancel) {
         elements.batchJobChipCancel.addEventListener('click', cancelBatchAnalyze);
     }
-    if (elements.classifyJobChipCancel) {
-        elements.classifyJobChipCancel.addEventListener('click', cancelCreatorClassify);
-    }
-    if (elements.reviewRejectsBtn) {
-        elements.reviewRejectsBtn.addEventListener('click', () => {
-            if (!state.selectedCreator) {
-                showToast('Select a creator first');
-                return;
-            }
-            enterRejectReviewMode();
-        });
-    }
-    if (elements.cancelClassifyBtn) {
-        elements.cancelClassifyBtn.addEventListener('click', cancelCreatorClassify);
-    }
-    if (elements.selectAllRejectsBtn) {
-        elements.selectAllRejectsBtn.addEventListener('click', selectNonFavoriteRejects);
-    }
-    if (elements.deleteSelectedRejectsBtn) {
-        elements.deleteSelectedRejectsBtn.addEventListener('click', () => {
-            if (!state.selectedPaths.size) {
-                showToast('Select rejects to delete first');
-                return;
-            }
-            promptBulkDelete();
-        });
-    }
-    if (elements.exitRejectsBtn) {
-        elements.exitRejectsBtn.addEventListener('click', exitRejectReviewMode);
-    }
-
     if (elements.favoritePhotoBtn) {
         elements.favoritePhotoBtn.addEventListener('click', toggleFavoriteCurrent);
     }
@@ -4077,7 +3713,7 @@ function showToast(messageOrOpts, duration = 3000) {
     }
 
     elements.toastContainer.appendChild(toast);
-    // Keep the stack readable — batch/classify polls can push many toasts
+    // Keep the stack readable — batch polls can push many toasts
     while (elements.toastContainer.children.length > 4) {
         elements.toastContainer.firstElementChild.remove();
     }
@@ -5129,129 +4765,3 @@ async function startBatchAnalyze() {
     }
 }
 
-async function pollClassifyStatus() {
-    try {
-        const res = await fetch('/api/classify/status');
-        const data = await res.json();
-        const wasRunning = !!(state.classifyStatus && state.classifyStatus.running);
-        state.classifyStatus = data;
-        updateClassifyPanelUi();
-
-        if (data.running) {
-            renderJobChip('classify', {
-                active: true,
-                title: data.cancel_requested
-                    ? `Classifying @${data.creator} — stopping`
-                    : `Classifying @${data.creator}`,
-                sub: `${data.completed}/${data.total} (${jobPct(data.completed, data.total)}%)` +
-                    ` · keep ${data.kept || 0} · reject ${data.rejected || 0}` +
-                    (data.failed ? ` · err ${data.failed}` : ''),
-                completed: data.completed,
-                total: data.total,
-                cancellable: true,
-                cancelled: Boolean(data.cancel_requested)
-            });
-            if (!state.classifyPollTimer) {
-                state.classifyPollTimer = setInterval(pollClassifyStatus, 3000);
-            }
-            // Light sidebar refresh while running
-            renderCreatorList();
-        } else {
-            if (state.classifyPollTimer) {
-                clearInterval(state.classifyPollTimer);
-                state.classifyPollTimer = null;
-            }
-            renderJobChip('classify', { active: false });
-            // Only celebrate completion when we observed a running → stopped transition
-            if (wasRunning) {
-                const who = data.creator || 'creator';
-                if (data.cancelled) {
-                    showToast(
-                        `Classify cancelled @${who} — ${data.completed}/${data.total} done · keep ${data.kept || 0} · reject ${data.rejected || 0}`
-                    );
-                } else {
-                    showToast(
-                        `Classify done @${who} — keep ${data.kept || 0} · reject ${data.rejected || 0}` +
-                            (data.failed ? ` · err ${data.failed}` : '')
-                    );
-                }
-                await fetchCreators();
-                updateClassifyPanelUi();
-                // Auto-open rejects review for that creator when any rejects found
-                if ((data.rejected || 0) > 0 && data.creator) {
-                    state.selectedCreator = data.creator;
-                    elements.galleryTitle.textContent = `@${data.creator}`;
-                    enterRejectReviewMode();
-                } else {
-                    await fetchPhotos();
-                }
-            }
-        }
-    } catch (err) {
-        console.error('Classify status error:', err);
-    }
-}
-
-async function startCreatorClassify({ rescoreStale = false } = {}) {
-    if (!state.selectedCreator) {
-        showToast('Select a creator first');
-        return;
-    }
-    if (!requireOllama()) return;
-    try {
-        const res = await fetch('/api/classify/start', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                creator: state.selectedCreator,
-                only_unscored: true,
-                include_videos: true,
-                rescore_stale: rescoreStale,
-            }),
-        });
-        const data = await res.json();
-        if (res.ok && data.status === 'started') {
-            showToast(`Classify started — ${data.pending} media queued for @${data.creator}`);
-            state.classifyStatus = {
-                running: true,
-                creator: data.creator,
-                total: data.pending,
-                completed: 0,
-                kept: 0,
-                rejected: 0,
-                failed: 0,
-            };
-            updateClassifyPanelUi();
-            pollClassifyStatus();
-        } else if (data.status === 'nothing_to_do') {
-            showToast(rescoreStale
-                ? 'Everything already scored with the current prompt'
-                : 'All media already scored for this creator');
-            const meta = selectedCreatorMeta();
-            if (meta && (meta.reject_count || 0) > 0) {
-                enterRejectReviewMode();
-            }
-        } else if (data.status === 'ollama_down') {
-            showToast(data.message || 'Ollama offline');
-        } else {
-            showToast(data.message || 'Classify busy or failed to start');
-        }
-    } catch (err) {
-        showToast('Classify request failed');
-    }
-}
-
-async function cancelCreatorClassify() {
-    try {
-        const res = await fetch('/api/classify/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-        const data = await res.json();
-        if (data.status === 'cancelling') {
-            showToast('Cancelling classify after current item…');
-        } else {
-            showToast('No classify job running');
-        }
-        pollClassifyStatus();
-    } catch (err) {
-        showToast('Cancel failed');
-    }
-}

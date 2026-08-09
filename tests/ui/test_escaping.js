@@ -31,7 +31,7 @@ const Q = JSON.stringify(XSS);
     state.photos = [{
       rel_path: 'evil/' + ${Q}, filename: ${Q}, creator: ${Q},
       url: '/media/x.jpg', thumb_url: '/media/thumb/x.jpg',
-      favorite: false, has_prompt: false, prompt_stale: false, glam_score: -1
+      favorite: false, has_prompt: false, prompt_stale: false
     }];
     state.photoTotal = 1; state.photoHasMore = false;
     renderGallery({});
@@ -54,7 +54,7 @@ const Q = JSON.stringify(XSS);
   r.section('creator sidebar: hostile handle');
   const side = await s.eval(`
     window.__XSS_FIRED = false;
-    state.creators = [{ name: ${Q}, photo_count: 3, scored_count: 1, reject_count: 1, last_synced_at: ${Q} }];
+    state.creators = [{ name: ${Q}, photo_count: 3, last_synced_at: ${Q} }];
     renderCreatorList();
     await new Promise(r => setTimeout(r, 400));
     return { fired: window.__XSS_FIRED === true,

@@ -44,7 +44,7 @@
                 <button id="trashBtn" class="btn btn-secondary" title="Restore or permanently remove deleted media" style="display:none;">
                     <i class="fa-solid fa-trash-can"></i> Trash <span class="nav-count-badge" id="trashCountBadge">0</span>
                 </button>
-                <button id="insightsBtn" class="btn btn-secondary" title="Prompt edit rate, glam distribution, generation counts">
+                <button id="insightsBtn" class="btn btn-secondary" title="Prompt edit rate, generation counts">
                     <i class="fa-solid fa-chart-line"></i> Insights
                 </button>
                 <button id="refreshBtn" class="btn btn-primary">
@@ -105,25 +105,9 @@
                 </div>
                 <div class="creator-style-panel" id="creatorStylePanel" style="display:none;">
                     <div class="sync-status-label">Instagram</div>
-                    <div class="creator-classify-actions">
+                    <div class="creator-actions">
                         <button class="btn btn-primary btn-sm full-width" id="syncLatestCreatorBtn" type="button" title="Walk the full Instagram feed and download every missing post (skips existing and deleted; does not stop after 50)">
                             <i class="fa-solid fa-arrows-rotate"></i> Sync new posts
-                        </button>
-                    </div>
-                    <div class="sync-status-label" style="margin-top:6px;">Classify &amp; clean</div>
-                    <div class="creator-classify-meta" id="creatorClassifyMeta">—</div>
-                    <div class="creator-classify-actions">
-                        <button class="btn btn-primary btn-sm full-width" id="classifyCreatorBtn" type="button" title="Score unscored media with glam vision filter">
-                            <i class="fa-solid fa-fire"></i> Classify unscored
-                        </button>
-                        <button class="btn btn-secondary btn-sm full-width" id="rescoreStaleBtn" type="button" style="display:none;" title="Re-score media judged by an older prompt version">
-                            <i class="fa-solid fa-clock-rotate-left"></i> Re-score outdated
-                        </button>
-                        <button class="btn btn-secondary btn-sm full-width" id="reviewRejectsBtn" type="button" title="Show scored media that failed keep criteria">
-                            <i class="fa-solid fa-filter"></i> Review rejects
-                        </button>
-                        <button class="btn btn-ghost btn-sm full-width" id="cancelClassifyBtn" type="button" style="display:none;" title="Stop classify after current item">
-                            <i class="fa-solid fa-stop"></i> Cancel classify
                         </button>
                     </div>
                     <div class="sync-status-label" style="margin-top:6px;">Creator Style</div>
@@ -149,7 +133,6 @@
                             <option value="name">Name</option>
                             <option value="newest">Newest</option>
                             <option value="oldest">Oldest</option>
-                            <option value="glam">Glam score</option>
                         </select>
                         <select id="mediaTypeSelect" class="sort-select" title="Filter media type">
                             <option value="all">All Media</option>
@@ -158,15 +141,6 @@
                         </select>
                         <button class="filter-chip" id="favoritesFilterBtn" type="button" title="Show favorites only">
                             <i class="fa-solid fa-star"></i> Favorites
-                        </button>
-                        <button class="filter-chip" id="sexyFilterBtn" type="button" title="Show glam/sexy scored media (glam_score ≥ 2)">
-                            <i class="fa-solid fa-fire"></i> Sexy
-                        </button>
-                        <button class="filter-chip" id="rejectFilterBtn" type="button" title="Show scored non-keep media (glam 0–1) for cleanup">
-                            <i class="fa-solid fa-ban"></i> Rejects
-                        </button>
-                        <button class="filter-chip" id="unscoredFilterBtn" type="button" title="Show media not yet glam-scored">
-                            <i class="fa-solid fa-circle-question"></i> Unscored
                         </button>
                         <button class="filter-chip" id="selectModeBtn" type="button" title="Select multiple photos">
                             <i class="fa-solid fa-check-double"></i> Select
@@ -192,20 +166,6 @@
                     <p>Try selecting a different creator or clearing your search query.</p>
                 </div>
             </main>
-        </div>
-    </div>
-
-    <!-- Reject review bar (when Rejects filter is on) -->
-    <div class="bulk-bar review-rejects-bar" id="reviewRejectsBar" style="display:none;">
-        <span class="bulk-count" id="reviewRejectsCount">Review rejects</span>
-        <div class="bulk-actions">
-            <button class="btn btn-secondary" id="selectAllRejectsBtn" type="button" title="Select all non-favorite rejects on this page">
-                <i class="fa-solid fa-check-double"></i> Select non-favorites
-            </button>
-            <button class="btn btn-danger" id="deleteSelectedRejectsBtn" type="button">
-                <i class="fa-solid fa-trash-can"></i> Delete selected
-            </button>
-            <button class="btn btn-ghost" id="exitRejectsBtn" type="button">Done</button>
         </div>
     </div>
 
@@ -287,13 +247,7 @@
                         </div>
 
                         <div class="video-detail-grid" id="videoDetailGrid">
-                            <!-- filled by JS: duration, size, date, glam -->
-                        </div>
-
-                        <div class="video-detail-block" id="videoGlamBlock" style="display:none;">
-                            <div class="sync-status-label">Glam classify</div>
-                            <div class="video-glam-row" id="videoGlamRow"></div>
-                            <p class="video-glam-reason" id="videoGlamReason"></p>
+                            <!-- filled by JS: duration, size, date -->
                         </div>
 
                         <div class="video-detail-block">
@@ -315,7 +269,7 @@
 
                         <p class="video-detail-note">
                             <i class="fa-solid fa-circle-info"></i>
-                            AI image prompts are for still photos. Reels show archive metadata, glam score, and caption instead.
+                            AI image prompts are for still photos. Reels show archive metadata and caption instead.
                         </p>
                     </div>
 
@@ -469,7 +423,7 @@
                 <div class="modal-icon purple"><i class="fa-solid fa-chart-line"></i></div>
                 <div class="sync-modal-titles">
                     <h3>Quality Insights</h3>
-                    <p class="sync-modal-sub">Signals already on disk — no new scoring. Edit rate and filter pass rates would have caught a saturated Sexy filter early.</p>
+                    <p class="sync-modal-sub">Signals already on disk — no new instrumentation. Prompt edit rate and generation counts.</p>
                 </div>
                 <button type="button" class="icon-btn" id="closeInsightsBtn" title="Close" aria-label="Close insights">
                     <i class="fa-solid fa-xmark"></i>
@@ -584,7 +538,7 @@
                             <input type="radio" name="scrapeMode" value="bounded" id="scrapeModeBounded">
                             <span class="segmented-label">
                                 <span class="segmented-title">Top N</span>
-                                <span class="segmented-hint">Glam-ranked sample</span>
+                                <span class="segmented-hint">Ranked sample</span>
                             </span>
                         </label>
                     </div>
@@ -776,20 +730,6 @@
             </div>
         </div>
 
-        <!-- Glam classify -->
-        <div class="scrape-job-chip" id="classifyJobChip" style="display:none;" role="status" aria-live="polite">
-            <div class="scrape-job-chip-main">
-                <i class="fa-solid fa-fire scrape-job-chip-icon spinning" id="classifyJobChipIcon"></i>
-                <div class="scrape-job-chip-text">
-                    <div class="scrape-job-chip-title" id="classifyJobChipTitle">Classifying</div>
-                    <div class="scrape-job-chip-sub" id="classifyJobChipSub"></div>
-                    <div class="job-chip-progress"><div class="job-chip-progress-fill" id="classifyJobChipFill"></div></div>
-                </div>
-            </div>
-            <div class="scrape-job-chip-actions">
-                <button type="button" class="scrape-job-chip-btn" id="classifyJobChipCancel" title="Stop after the current item">Cancel</button>
-            </div>
-        </div>
     </div>
 
     <!-- Notification Toast -->

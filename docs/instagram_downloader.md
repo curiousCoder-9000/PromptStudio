@@ -19,39 +19,33 @@ Session user: `promptstudio.config.SESSION_USER` from `INSTAGRAM_SESSION_USER` i
 CLI: omit flag (default on), or `--no-reels` / `--include-reels`.  
 API/UI: `include_videos` body field + Sync modal checkbox.
 
-### Glam / sexy acquisition playbook
+### Acquisition playbook
 
 ```powershell
 # 1) Refresh following + bios
 py scripts/export_following_list.py
 
-# 2) Vision classify accounts (local archive first)
-py scripts/classify_following.py --limit 30
-
-# 3) Put classify:keep at front of the daily queue
+# 2) Order the daily queue
 py scripts/prioritize_following_queue.py
 # dry-run:  py scripts/prioritize_following_queue.py --dry-run
 
-# 4) Bulk pull (reels on by default; caption-rank inside each feed)
+# 3) Bulk pull (reels on by default; caption-rank inside each feed)
 py scripts/download_following.py --accounts-per-day 15 --max-posts 30
 
 # High-value single creator
 py scripts/download_creator_feed.py HANDLE --max-posts 50
 
-# User-saved glam (always trust saved; no keyword filter)
+# User-saved posts (always trust saved; no keyword filter)
 py scripts/download_instagram_saved.py
-
-# 5) Score local media for gallery Sexy filter (Ollama)
-py scripts/classify_local_photos.py --limit 50
-# Or apply existing report without re-running vision:
-py scripts/backfill_glam_scores.py
 ```
 
 **Feed ranking (PR3):** when `IG_POST_RANK=1` (default), each creator feed scans up to `max_posts * IG_POST_SCAN_FACTOR` (default 3×) posts, scores captions/reels/carousels, then downloads the top `max_posts`.
 
-**Glam scores (PR4):** `glam_score` 0–3 on `archive.db` + sidecars. Gallery **Sexy** chip → `?sexy=1` (`glam_score >= 2`). The DB also keeps the verdict behind the score — `glam_has_woman`, `glam_sexy`, `glam_confidence`, `glam_tier`, `glam_prompt_version`, `glam_error` — so "re-score what the old prompt judged" and "retry what failed" are queries, not archive walks.
-
-**Reels / videos (classify):** the whole clip is sampled (tail included), segmented by shot cut, and composed into a 3×3 **contact sheet** of timestamped frames scored in **one** vision call (`v4-reel-sheet`). The peak panel is re-read at full resolution when the tier sits on the Sexy-filter boundary, the model is unsure, or a high tier came from the final shot — so the median is 1–2 calls (`CLASSIFY_REEL_VISION_MAX`, default 2). A companion cover JPG is used only when frame extraction fails outright; it is never a short-circuit, because covers show the "before" outfit. Gallery video thumbs reuse the classifier's peak-panel timestamp when it has run, else the cover, else the best-ranked frame. Set `CLASSIFY_REEL_SHEET=0` for the legacy per-frame path. See [design_reel_classifier_v2.md](design_reel_classifier_v2.md).
+**Media scoring:** removed. `glam_score` and the whole vision-classify
+subsystem (prompts, `_GLAM_COLUMNS`, the Sexy / Rejects / Unscored chips,
+`sort=glam`, `/api/classify/*`) were deleted; only the video **frame ranker**
+survives, because thumbnails and near-duplicate detection use it
+(`CLASSIFY_REEL_*` in `.env.example`).
 
 Export following list first (includes biographies for keyword filters):
 
@@ -78,7 +72,7 @@ Following sync is designed for **multi-day** crawls, not one overnight dump. Ins
 
 **UI “Sync new posts”** enqueues `mode=full, deep=true` (walk entire feed, download every missing post, no early catch-up stop).
 
-**Server safety (2026-08-08):** `mode=latest` without `catch_up_only=true` is **upgraded to full+deep** in `CreatorScrapeQueue.enqueue` so partial glam archives cannot stop after 50 newest posts (`stop_reason=ceiling`). Modal creator sync and `/api/sync/creator` also route to the scrape queue as full+deep when the queue is enabled.
+**Server safety (2026-08-08):** `mode=latest` without `catch_up_only=true` is **upgraded to full+deep** in `CreatorScrapeQueue.enqueue` so partial archives cannot stop after 50 newest posts (`stop_reason=ceiling`). Modal creator sync and `/api/sync/creator` also route to the scrape queue as full+deep when the queue is enabled.
 
 **Rules of thumb**
 
@@ -108,11 +102,11 @@ Progress across days is stored in `~/Pictures/InstagramSaved/following_queue.jso
 ```
 
 Statuses: `pending` | `done` | `skipped` | `error`.  
-Optional fields: `priority` (int, higher first), `reason` (e.g. `classify:keep`).  
+Optional fields: `priority` (int, higher first), `reason` (e.g. `bio:keyword`).  
 `next_pending` sorts by **priority desc**, then username.  
 `accounts_today` resets when `day_key` rolls to a new calendar day. A second run the same day only consumes the **remaining** daily budget.
 
-Seed priorities from the classify report:
+Seed priorities from bio keywords:
 
 ```powershell
 py scripts/prioritize_following_queue.py
@@ -150,7 +144,7 @@ POST /api/scrape/enqueue
 { "username": "handle", "mode": "latest", "max_posts": 50 }
 ```
 
-- Streams feed newest-first (no glam rank).
+- Streams feed newest-first (no ranking).
 - Downloads only missing/incomplete posts.
 - Stops after catch-up streak of already-local **or tombstoned** posts.
 - UI: select creator → **Sync new posts** in the sidebar.
@@ -195,7 +189,7 @@ Enqueue handles for **one-at-a-time** full (or bounded) scrapes without running 
 | API | `POST /api/scrape/enqueue`, `GET /api/scrape/status`, pause/resume/cancel |
 | Persist | `~/Pictures/InstagramSaved/creator_scrape_queue.json` |
 | Mutex | `SyncManager` — same single-flight as saved/following/creator |
-| Full mode | Streams feed; `deep=true` (default) disables catch-up so glam top-N folders still backfill |
+| Full mode | Streams feed; `deep=true` (default) disables catch-up so top-N folders still backfill |
 | Ceiling | `IG_FULL_SCRAPE_MAX_POSTS` (default 5000 downloaded media units; `0` = unlimited) |
 | Fairness | One-shot `/api/sync/*` returns **409** while queue has pending (unless paused) |
 | Abort | Hard rate-limit/abuse **pauses** the queue; resume when safe |

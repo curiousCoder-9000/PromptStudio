@@ -42,8 +42,8 @@ Since the observability sweep there are three places to check before reading cod
 # Tail the log
 Get-Content $env:USERPROFILE\Pictures\InstagramSaved\promptstudio.log -Tail 50 -Wait
 
-# Last classify run: outcome, failures, score distribution
-py -c "import json,urllib.request as u; print(json.dumps(json.load(u.urlopen('http://localhost:5000/api/journal?kind=classify&limit=1'))['runs'][0], indent=2))"
+# Last sync run: outcome, failures, counts
+py -c "import json,urllib.request as u; print(json.dumps(json.load(u.urlopen('http://localhost:5000/api/journal?kind=sync&limit=1'))['runs'][0], indent=2))"
 
 # Who holds the Ollama / Instagram lease
 py -c "import json,urllib.request as u; print(json.load(u.urlopen('http://localhost:5000/api/health'))['leases'])"
@@ -52,11 +52,6 @@ py -c "import json,urllib.request as u; print(json.load(u.urlopen('http://localh
 A route that raises now returns a JSON **500** and logs the traceback with the
 route — it no longer drops the connection, so "the app went offline" in the
 browser genuinely means the server is down, not that a handler threw.
-
-**Classifier looks wrong?** Check `top_score_share` on the last classify run. If
-one glam value is most of the archive, the prompt has collapsed the output
-space and no amount of frame-selection tuning will help — see
-[design_reel_classifier_v2.md](design_reel_classifier_v2.md) §2.3.
 
 ---
 

@@ -25,7 +25,7 @@ def main():
     parser.add_argument(
         "--full",
         action="store_true",
-        help="Stream full feed (no glam rank / top-N). Default is bounded.",
+        help="Stream full feed (no ranking / top-N). Default is bounded.",
     )
     parser.add_argument(
         "--latest",

@@ -51,7 +51,7 @@ def build_metadata_from_normalized(post, carousel_index: int = 0) -> Dict[str, A
     """Build the same sidecar shape from a `NormalizedPost` (any source).
 
     Deliberately identical in shape to `build_metadata_from_post` so the gallery,
-    prompt engine, and glam classifier read one format regardless of platform.
+    prompt engine read one format regardless of platform.
     `owner_username` stays the archive folder key; the real author (which differs
     for Reddit submissions and X retweets) goes in `author`.
     """

@@ -22,50 +22,14 @@ py scripts/download_following.py --accounts-per-day 15 --max-posts 30 --keywords
 # Or with bio keyword filter
 py scripts/download_following.py --accounts-per-day 15 --max-posts 20 --keywords model,lingerie --min-media 5
 
-# Dry-run: classify following for woman + sexy outfit — no unfollow
-py scripts/classify_following.py --limit 20
-py scripts/classify_following.py --force
-py scripts/classify_following.py --fetch --limit 10
-
-# Put classify:keep accounts first in following_queue.json
+# Reorder following_queue.json
 py scripts/prioritize_following_queue.py
 py scripts/prioritize_following_queue.py --dry-run
 py scripts/prioritize_following_queue.py --requeue-keep
-
-# Score local images+videos for gallery Sexy filter (writes glam_score)
-py scripts/classify_local_photos.py --limit 40
-py scripts/backfill_glam_scores.py   # from existing report, no Ollama
-
-# See the contact sheet a reel classify would send to Ollama — no vision call.
-# Tune CLASSIFY_REEL_* by eye: if the reveal is not in a panel, no prompt or
-# model change can recover it.
-py scripts/preview_reel_sheet.py ~/Pictures/InstagramSaved/someone --limit 5
 ```
 
 Queue + daily budget live in `~/Pictures/InstagramSaved/following_queue.json`. On abort (rate-limit streak / abuse signal) the CLI exits with code `2`.
 
-### Glam classifier evaluation (reels + photos)
-
-Makes "did that change help" answerable. Sampling, labelling and metrics need no
-Ollama; only `run` does. Output lives in `<archive>/_eval/` (gitignored).
-`--kind reel` (default) or `--kind photo` — separate sets, separate labels.
-
-```powershell
-py scripts/eval_reel_classifier.py sample --kind reel --count 120
-py scripts/eval_reel_classifier.py label  --kind reel --import ~/Downloads/labels.jsonl
-py scripts/eval_reel_classifier.py run    --kind reel --name baseline
-py scripts/eval_reel_classifier.py report --kind reel --name v4-sheet --against baseline
-
-# Decide CLASSIFY_PHOTO_ORDINAL with evidence: same labels, both vocabularies,
-# compared on glam_accuracy (the axis they share).
-py scripts/eval_reel_classifier.py run    --kind photo --name legacy
-CLASSIFY_PHOTO_ORDINAL=1 py scripts/eval_reel_classifier.py run --kind photo --name ordinal
-py scripts/eval_reel_classifier.py report --kind photo --name ordinal --against legacy
-```
-
-Design + metric targets: [docs/design_reel_classifier_v2.md](../docs/design_reel_classifier_v2.md) §P0, §5.
-
-Classifier report (resumable): `following_classify_report.json` + `docs/following_classify_report.md`.
 
 ## Archive maintenance
 

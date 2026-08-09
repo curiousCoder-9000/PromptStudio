@@ -1,4 +1,4 @@
-"""Filter Instagram following-list entries and rank posts for glam acquisition."""
+"""Filter Instagram following-list entries and rank posts for download order."""
 
 from typing import Any, Iterable, List, Optional, Sequence
 
@@ -58,7 +58,7 @@ def score_instagram_post(
     caption_keywords: Optional[Sequence[str]] = None,
     feed_index: int = 0,
 ) -> float:
-    """Cheap glam preference score for an Instaloader Post (no network).
+    """Cheap keyword-based preference score for an Instaloader Post (no network).
 
     Higher = prefer download first within a feed scan window.
     """

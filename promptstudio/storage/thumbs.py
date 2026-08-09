@@ -19,17 +19,6 @@ def thumb_disk_path(rel_path: str, thumb_dir: str = THUMB_DIR) -> str:
     return os.path.join(thumb_dir, thumb_rel_path(rel_path))
 
 
-def _classified_peak_time(full_path: str) -> Optional[float]:
-    """Peak-outfit timestamp the reel classifier recorded, if it has run."""
-    try:
-        from promptstudio.storage.metadata import load_post_metadata
-
-        glam = (load_post_metadata(full_path) or {}).get("glam") or {}
-        peak = glam.get("peak_time_sec")
-        return float(peak) if peak is not None and float(peak) > 0 else None
-    except Exception:
-        return None
-
 
 def ensure_thumbnail(
     full_path: str,
@@ -59,21 +48,12 @@ def ensure_thumbnail(
                 write_best_video_frame_jpeg,
             )
 
-            # The classifier already found the most interesting moment — reuse it
-            # so the grid tile shows the reveal rather than the intro title card.
-            # Only when it actually ran: with at_sec=None this falls through to
-            # a full timeline decode, which would make the cheap branches below
-            # unreachable and put a 16-frame decode on every gallery scroll.
-            peak_sec = _classified_peak_time(full_path)
-            if peak_sec is not None and write_best_video_frame_jpeg(
-                full_path,
-                out_path,
-                max_edge=max_size,
-                jpeg_quality=82,
-                at_sec=peak_sec,
-            ):
-                return out_path
-
+            # There used to be a cheap first branch here: seek straight to the
+            # peak timestamp the glam classifier had recorded in the sidecar. It
+            # went out with the classifier — nothing writes `peak_time_sec` any
+            # more, so the branch was permanently dead and only cost a sidecar
+            # read per tile. The cover-still branch below is now the cheap path.
+            #
             # Companion cover still (this video's own, not a carousel sibling)
             cover = find_video_cover_image(full_path)
             if cover and os.path.isfile(cover):
@@ -89,7 +69,7 @@ def ensure_thumbnail(
                 except Exception:
                     pass
 
-            # Unclassified and no cover — rank frames. Last because it is the
+            # No cover — rank frames. Last because it is the
             # only branch that decodes the whole timeline.
             if write_best_video_frame_jpeg(
                 full_path, out_path, max_edge=max_size, jpeg_quality=82

@@ -1,7 +1,7 @@
 """Indexing reads each sidecar once.
 
 Four different fields of `*.meta.json` feed one photos row — taken_at, identity,
-glam, source — and each used to load and parse the file independently. That was
+source — and each used to load and parse the file independently. That was
 4 opens per photo: 18 000 across a 4500-file archive, on every index build and
 again on every per-photo upsert.
 
@@ -36,7 +36,6 @@ def count_reads(monkeypatch):
 SIDECAR = {
     "post_id": "p1",
     "shortcode": "s1",
-    "glam_score": 3,
     "source": "instagram",
     "taken_at": "2026-08-05T09:12:00",
 }
@@ -117,7 +116,6 @@ def test_upsert_skips_the_sidecar_when_every_field_is_supplied(make_photo, count
         taken_at="2026-01-01T00:00:00",
         post_id="x",
         shortcode="y",
-        glam_score=2,
         source="instagram",
     )
     assert count_reads["n"] == 0
@@ -134,19 +132,10 @@ def test_rebuild_still_reads_every_field_from_the_sidecar(make_photo):
     creator, post_id, shortcode = index.get_photo_identity(rel)
     assert (creator, post_id, shortcode) == ("nina", "p1", "s1")
     assert index.get_photo_source(rel) == "instagram"
-    assert index.get_glam_score(rel) == 3
 
     rows, _ = index.query_photos(creator="nina")
     assert next(r for r in rows if r["rel_path"] == rel)["taken_at"] == SIDECAR["taken_at"]
 
-
-def test_nested_glam_block_is_still_understood(make_photo):
-    rel, _ = _photo_with_sidecar(
-        make_photo, name="b.jpg", meta={"glam": {"score": 2}, "source": "x"}
-    )
-    index = ArchiveIndex.get()
-    index.rebuild()
-    assert index.get_glam_score(rel) == 2
 
 
 def test_photo_without_a_sidecar_still_indexes(make_photo):
@@ -155,7 +144,6 @@ def test_photo_without_a_sidecar_still_indexes(make_photo):
     index.rebuild()
     rows, _ = index.query_photos(creator="nina")
     assert rel in [r["rel_path"] for r in rows]
-    assert index.get_glam_score(rel) == -1
 
 
 def test_corrupt_sidecar_does_not_break_indexing(make_photo):

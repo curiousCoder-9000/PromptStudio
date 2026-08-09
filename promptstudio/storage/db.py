@@ -51,7 +51,6 @@ CREATE TABLE IF NOT EXISTS photos (
   prompt_search TEXT,
   post_id TEXT,
   shortcode TEXT,
-  glam_score INTEGER NOT NULL DEFAULT -1,
   source TEXT NOT NULL DEFAULT 'instagram'
 );
 CREATE INDEX IF NOT EXISTS idx_photos_creator ON photos(creator);
@@ -111,26 +110,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS prompts_fts USING fts5(
 _IDENTITY_COLUMNS = (
     ("post_id", "TEXT"),
     ("shortcode", "TEXT"),
-    # glam_score: -1 unscored, 0 modest/no-woman, 1 woman, 2 sexy, 3 sexy+figure
-    ("glam_score", "INTEGER NOT NULL DEFAULT -1"),
     # Back-fills every pre-existing row as Instagram, which is what they are.
     ("source", "TEXT NOT NULL DEFAULT 'instagram'"),
-)
-
-# The verdict behind glam_score. Previously only the collapsed 0-3 int reached
-# SQLite and everything else lived in per-file sidecars, so "re-score what the
-# old prompt judged" or "retry the ones that timed out" meant walking the
-# archive and parsing thousands of JSON files. These make both a WHERE clause.
-_GLAM_COLUMNS = (
-    ("glam_has_woman", "INTEGER NOT NULL DEFAULT 0"),
-    ("glam_sexy", "INTEGER NOT NULL DEFAULT 0"),
-    ("glam_confidence", "REAL"),
-    # 0-4 ordinal from the v4 prompts; -1 for legacy boolean verdicts.
-    ("glam_tier", "INTEGER NOT NULL DEFAULT -1"),
-    ("glam_prompt_version", "TEXT"),
-    # Last failure for this file. NULL once it scores; set means retryable.
-    ("glam_error", "TEXT"),
-    ("glam_scored_at", "TEXT"),
 )
 
 DEFAULT_SOURCE = "instagram"
@@ -258,7 +239,7 @@ class ArchiveIndex:
         """Connection tuning. Best-effort — an old SQLite must not stop startup.
 
         WAL matters most: under the default rollback journal a long write (a
-        rebuild, a batch glam update) blocks readers, which here means the whole
+        rebuild, a large batch update) blocks readers, which here means the whole
         gallery API stalls behind it.
         """
         for pragma in (
@@ -491,12 +472,12 @@ class ArchiveIndex:
         self._meta_set(_PROMPTS_IMPORTED_KEY, "1")
 
     def _migrate_identity_columns(self) -> None:
-        """Add post_id/shortcode/glam_score to existing DBs."""
+        """Add post_id/shortcode/source to existing DBs."""
         cols = {
             row[1]
             for row in self._conn.execute("PRAGMA table_info(photos)").fetchall()
         }
-        for name, col_type in _IDENTITY_COLUMNS + _GLAM_COLUMNS:
+        for name, col_type in _IDENTITY_COLUMNS:
             if name not in cols:
                 self._conn.execute(f"ALTER TABLE photos ADD COLUMN {name} {col_type}")
         self._conn.execute(
@@ -506,16 +487,9 @@ class ArchiveIndex:
             "CREATE INDEX IF NOT EXISTS idx_photos_shortcode ON photos(shortcode)"
         )
         self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_photos_glam ON photos(glam_score)"
-        )
-        self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_photos_source ON photos(source)"
         )
         # Drives "re-score everything the old prompt judged" without a rescan.
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_photos_glam_version "
-            "ON photos(glam_prompt_version)"
-        )
 
     def _migrate_deleted_posts(self) -> None:
         """Add deleted_posts.platform and scope the unique indexes by it.
@@ -572,20 +546,6 @@ class ArchiveIndex:
             return str(side.get("post_id") or ""), str(side.get("shortcode") or "")
         except Exception:
             return "", ""
-
-    @staticmethod
-    def _glam_from_file(full_path: str, meta: Optional[Dict[str, Any]] = None) -> int:
-        """Return glam_score from sidecar (-1 if missing)."""
-        try:
-            side = read_sidecar(full_path, meta)
-            if "glam_score" in side:
-                return int(side.get("glam_score"))
-            glam = side.get("glam")
-            if isinstance(glam, dict) and "score" in glam:
-                return int(glam.get("score"))
-        except Exception:
-            pass
-        return -1
 
     def _file_exists_for_rel(self, rel_path: str) -> bool:
         rel = normalize_rel_path(rel_path)
@@ -656,7 +616,6 @@ class ArchiveIndex:
                     has_p, stale, blob = prompt_flags(entry, engine_id)
                     fav = 1 if rel in favs else 0
                     post_id, shortcode = self._identity_from_file(full, side)
-                    glam = self._glam_from_file(full, side)
                     rows.append(
                         (
                             rel,
@@ -670,7 +629,6 @@ class ArchiveIndex:
                             blob,
                             post_id or None,
                             shortcode or None,
-                            glam,
                             self._source_from_file(full, side),
                         )
                     )
@@ -681,8 +639,8 @@ class ArchiveIndex:
                 "INSERT INTO photos("
                 "rel_path, creator, filename, taken_at, mtime, "
                 "favorite, has_prompt, prompt_stale, prompt_search, "
-                "post_id, shortcode, glam_score, source"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "post_id, shortcode, source"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
             self._meta_set(
@@ -703,7 +661,6 @@ class ArchiveIndex:
         taken_at: Optional[str] = None,
         post_id: Optional[str] = None,
         shortcode: Optional[str] = None,
-        glam_score: Optional[int] = None,
         source: Optional[str] = None,
     ) -> None:
         rel = normalize_rel_path(rel_path)
@@ -721,7 +678,7 @@ class ArchiveIndex:
         # of it. Left as None when every one of them was supplied, so callers
         # that pass everything still touch no extra files.
         side_meta: Optional[Dict[str, Any]] = None
-        if taken_at is None or post_id is None or shortcode is None or glam_score is None:
+        if taken_at is None or post_id is None or shortcode is None:
             side_meta = read_sidecar(full)
 
         if taken_at is None:
@@ -732,15 +689,10 @@ class ArchiveIndex:
                 post_id = meta_pid or None
             if shortcode is None:
                 shortcode = meta_sc or None
-        if glam_score is None:
-            side = self._glam_from_file(full, side_meta)
-            if side >= 0:
-                glam_score = side
-
         with self._lock:
             existing = self._conn.execute(
                 "SELECT favorite, has_prompt, prompt_stale, prompt_search, "
-                "post_id, shortcode, glam_score, source FROM photos WHERE rel_path = ?",
+                "post_id, shortcode, source FROM photos WHERE rel_path = ?",
                 (rel,),
             ).fetchone()
             fav = favorite if favorite is not None else (int(existing["favorite"]) if existing else 0)
@@ -751,14 +703,6 @@ class ArchiveIndex:
                 post_id = existing["post_id"]
             if shortcode is None and existing:
                 shortcode = existing["shortcode"]
-            if glam_score is None:
-                # `.keys()` is required: sqlite3.Row iterates VALUES, so
-                # `"glam_score" in existing` would test the row's values and
-                # silently drop the existing score. Do not "simplify" this.
-                if existing and "glam_score" in existing.keys() and existing["glam_score"] is not None:  # noqa: SIM118
-                    glam_score = int(existing["glam_score"])
-                else:
-                    glam_score = -1
             # Keep the row's existing platform unless told otherwise; only fall
             # back to the sidecar (then instagram) for rows we've never seen.
             if source is None and existing and "source" in existing.keys():  # noqa: SIM118
@@ -770,8 +714,8 @@ class ArchiveIndex:
                 "INSERT INTO photos("
                 "rel_path, creator, filename, taken_at, mtime, "
                 "favorite, has_prompt, prompt_stale, prompt_search, "
-                "post_id, shortcode, glam_score, source"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "post_id, shortcode, source"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(rel_path) DO UPDATE SET "
                 "creator=excluded.creator, filename=excluded.filename, "
                 "taken_at=excluded.taken_at, mtime=excluded.mtime, "
@@ -779,7 +723,7 @@ class ArchiveIndex:
                 "prompt_stale=excluded.prompt_stale, prompt_search=excluded.prompt_search, "
                 "post_id=COALESCE(excluded.post_id, photos.post_id), "
                 "shortcode=COALESCE(excluded.shortcode, photos.shortcode), "
-                "glam_score=excluded.glam_score, source=excluded.source",
+                "source=excluded.source",
                 (
                     rel,
                     creator,
@@ -792,168 +736,10 @@ class ArchiveIndex:
                     blob or "",
                     post_id or None,
                     shortcode or None,
-                    int(glam_score),
                     self._norm_platform(source),
                 ),
             )
             self._conn.commit()
-
-    def get_glam_score(self, rel_path: str) -> int:
-        """Return glam_score for rel_path, or -1 if missing/unscored."""
-        rel = normalize_rel_path(rel_path)
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT glam_score FROM photos WHERE rel_path = ?", (rel,)
-            ).fetchone()
-        if not row:
-            return -1
-        try:
-            return int(row["glam_score"]) if row["glam_score"] is not None else -1
-        except (TypeError, ValueError):
-            return -1
-
-    def set_glam_score(
-        self,
-        rel_path: str,
-        glam_score: int,
-        *,
-        has_woman: int = 0,
-        sexy: int = 0,
-        confidence: Optional[float] = None,
-        tier: int = -1,
-        prompt_version: Optional[str] = None,
-        error: Optional[str] = None,
-    ) -> None:
-        """Record a glam verdict (upsert minimal if the row is not indexed yet).
-
-        `has_woman` and `sexy` used to be accepted and silently dropped — only
-        the collapsed int was written. Everything the classifier decided now
-        lands in columns so it can be queried.
-
-        Pass `error` for a failed classify: the score stays -1 and the row
-        becomes findable via list_glam_errors() instead of being indistinguishable
-        from something never attempted.
-        """
-        rel = normalize_rel_path(rel_path)
-        score = int(glam_score)
-        scored_at = datetime.now(timezone.utc).isoformat()
-        fields = (
-            score,
-            1 if has_woman else 0,
-            1 if sexy else 0,
-            float(confidence) if confidence is not None else None,
-            int(tier),
-            prompt_version or None,
-            error or None,
-            scored_at,
-        )
-        with self._lock:
-            cur = self._conn.execute(
-                "UPDATE photos SET glam_score = ?, glam_has_woman = ?, "
-                "glam_sexy = ?, glam_confidence = ?, glam_tier = ?, "
-                "glam_prompt_version = ?, glam_error = ?, glam_scored_at = ? "
-                "WHERE rel_path = ?",
-                (*fields, rel),
-            )
-            if cur.rowcount:
-                self._conn.commit()
-                return
-        # Row not indexed yet — create it, then attach the verdict.
-        self.upsert_photo(rel, glam_score=score)
-        with self._lock:
-            self._conn.execute(
-                "UPDATE photos SET glam_score = ?, glam_has_woman = ?, "
-                "glam_sexy = ?, glam_confidence = ?, glam_tier = ?, "
-                "glam_prompt_version = ?, glam_error = ?, glam_scored_at = ? "
-                "WHERE rel_path = ?",
-                (*fields, rel),
-            )
-            self._conn.commit()
-
-    def get_glam_verdict(self, rel_path: str) -> Dict[str, Any]:
-        """Everything recorded about this file's last classify attempt."""
-        rel = normalize_rel_path(rel_path)
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT glam_score, glam_has_woman, glam_sexy, glam_confidence, "
-                "glam_tier, glam_prompt_version, glam_error, glam_scored_at "
-                "FROM photos WHERE rel_path = ?",
-                (rel,),
-            ).fetchone()
-        if not row:
-            return {}
-        return {
-            "glam_score": int(row["glam_score"] if row["glam_score"] is not None else -1),
-            "has_woman": bool(row["glam_has_woman"]),
-            "sexy": bool(row["glam_sexy"]),
-            "confidence": row["glam_confidence"],
-            "tier": int(row["glam_tier"] if row["glam_tier"] is not None else -1),
-            "prompt_version": row["glam_prompt_version"],
-            "error": row["glam_error"],
-            "scored_at": row["glam_scored_at"],
-        }
-
-    def list_stale_glam(
-        self,
-        current_versions: Sequence[str],
-        *,
-        creator: Optional[str] = None,
-        limit: Optional[int] = None,
-    ) -> List[str]:
-        """rel_paths scored by a prompt version that is no longer current.
-
-        Improving a prompt used to mean re-running the whole archive with
-        --force, because nothing recorded which version produced a score.
-        """
-        versions = [v for v in current_versions if v]
-        if not versions:
-            return []
-        placeholders = ", ".join("?" for _ in versions)
-        sql = (
-            "SELECT rel_path FROM photos WHERE glam_score >= 0 AND "
-            f"(glam_prompt_version IS NULL OR glam_prompt_version NOT IN ({placeholders}))"
-        )
-        params: List[Any] = list(versions)
-        if creator:
-            sql += " AND creator = ?"
-            params.append(creator)
-        sql += " ORDER BY rel_path"
-        if limit is not None:
-            sql += " LIMIT ?"
-            params.append(int(limit))
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
-        return [r["rel_path"] for r in rows]
-
-    def list_glam_errors(
-        self,
-        *,
-        creator: Optional[str] = None,
-        limit: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
-        """Unscored files that failed with a recorded reason — retry candidates."""
-        sql = (
-            "SELECT rel_path, glam_error, glam_scored_at FROM photos "
-            "WHERE glam_error IS NOT NULL AND glam_error != ''"
-        )
-        params: List[Any] = []
-        if creator:
-            sql += " AND creator = ?"
-            params.append(creator)
-        sql += " ORDER BY glam_scored_at DESC"
-        if limit is not None:
-            sql += " LIMIT ?"
-            params.append(int(limit))
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
-        return [
-            {
-                "rel_path": r["rel_path"],
-                "error": r["glam_error"],
-                "scored_at": r["glam_scored_at"],
-            }
-            for r in rows
-        ]
 
     def delete_photo(self, rel_path: str) -> None:
         rel = normalize_rel_path(rel_path)
@@ -1242,12 +1028,6 @@ class ArchiveIndex:
         creator = row["creator"]
         filename = row["filename"]
         keys = row.keys()
-        glam = -1
-        if "glam_score" in keys and row["glam_score"] is not None:
-            try:
-                glam = int(row["glam_score"])
-            except (TypeError, ValueError):
-                glam = -1
         return {
             "filename": filename,
             "creator": creator,
@@ -1261,38 +1041,18 @@ class ArchiveIndex:
             "prompt_stale": bool(row["prompt_stale"]),
             "post_id": row["post_id"] if "post_id" in keys else None,
             "shortcode": row["shortcode"] if "shortcode" in keys else None,
-            "glam_score": glam,
         }
 
     def list_creators(self) -> List[Dict[str, Any]]:
         from promptstudio.scraping.checkpoints import SyncCheckpoints
-        from promptstudio.scraping.outfit_classifier import active_prompt_versions
 
         sync = SyncCheckpoints().load()
-        # Scored by a prompt version that is no longer current — the "re-score
-        # outdated" count. Empty version list means we cannot tell, so nothing
-        # is reported stale rather than everything.
-        versions = [v for v in active_prompt_versions() if v]
-        if versions:
-            placeholders = ", ".join("?" for _ in versions)
-            stale_sql = (
-                "SUM(CASE WHEN glam_score >= 0 AND (glam_prompt_version IS NULL "
-                f"OR glam_prompt_version NOT IN ({placeholders})) "
-                "THEN 1 ELSE 0 END) AS stale_count, "
-            )
-        else:
-            stale_sql = "0 AS stale_count, "
         with self._lock:
             rows = self._conn.execute(
                 "SELECT creator, "
                 "COUNT(*) AS photo_count, "
-                "SUM(CASE WHEN IFNULL(glam_score, -1) >= 0 THEN 1 ELSE 0 END) AS scored_count, "
-                "SUM(CASE WHEN IFNULL(glam_score, -1) < 0 THEN 1 ELSE 0 END) AS unscored_count, "
-                "SUM(CASE WHEN glam_score BETWEEN 0 AND 1 THEN 1 ELSE 0 END) AS reject_count, "
-                + stale_sql +
                 "MIN(filename) AS cover "
-                "FROM photos GROUP BY creator ORDER BY photo_count DESC",
-                versions,
+                "FROM photos GROUP BY creator ORDER BY photo_count DESC"
             ).fetchall()
         creators = []
         for row in rows:
@@ -1300,18 +1060,10 @@ class ArchiveIndex:
             cover = row["cover"]
             entry = sync.get(name.lower()) or sync.get(name) or {}
             photo_count = int(row["photo_count"] or 0)
-            scored = int(row["scored_count"] or 0)
-            unscored = int(row["unscored_count"] or 0)
-            rejects = int(row["reject_count"] or 0)
-            stale = int(row["stale_count"] or 0)
             creators.append(
                 {
                     "name": name,
                     "photo_count": photo_count,
-                    "scored_count": scored,
-                    "unscored_count": unscored,
-                    "reject_count": rejects,
-                    "stale_count": stale,
                     "cover_url": f"/media/{name}/{urllib.parse.quote(cover)}",
                     "cover_thumb_url": thumb_url(f"{name}/{cover}"),
                     "last_synced_at": entry.get("updated_at") or None,
@@ -1357,10 +1109,6 @@ class ArchiveIndex:
         unanalyzed: bool = False,
         favorite_only: bool = False,
         media_type: Optional[str] = None,
-        glam_min: Optional[int] = None,
-        glam_max: Optional[int] = None,
-        unscored_only: bool = False,
-        reject_only: bool = False,
         sort: str = "name",
         limit: Optional[int] = None,
         offset: int = 0,
@@ -1375,17 +1123,6 @@ class ArchiveIndex:
             where.append("favorite = 1")
         if unanalyzed:
             where.append("has_prompt = 0")
-        # reject_only: scored non-keep ≈ glam 0–1 (excludes unscored -1)
-        if reject_only:
-            where.append("glam_score BETWEEN 0 AND 1")
-        if unscored_only:
-            where.append("IFNULL(glam_score, -1) = -1")
-        if glam_min is not None:
-            where.append("IFNULL(glam_score, -1) >= ?")
-            params.append(int(glam_min))
-        if glam_max is not None:
-            where.append("IFNULL(glam_score, -1) <= ?")
-            params.append(int(glam_max))
         if media_type == "video":
             video_likes = " OR ".join("LOWER(filename) LIKE ?" for _ in VIDEO_EXTENSIONS)
             where.append(f"({video_likes})")
@@ -1428,8 +1165,6 @@ class ArchiveIndex:
             order = "ORDER BY taken_at DESC, filename DESC"
         elif sort == "oldest":
             order = "ORDER BY taken_at ASC, filename ASC"
-        elif sort == "glam":
-            order = "ORDER BY IFNULL(glam_score, -1) DESC, taken_at DESC, filename DESC"
         else:
             order = "ORDER BY creator ASC, filename ASC"
 

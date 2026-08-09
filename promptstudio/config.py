@@ -118,8 +118,6 @@ RATE_LIMIT_BACKOFF_MAX_SEC = int(os.environ.get("IG_RATE_LIMIT_BACKOFF_MAX", "30
 DEFAULT_MAX_POSTS_PER_CREATOR = int(os.environ.get("IG_MAX_POSTS", "50"))
 DEFAULT_MIN_MEDIA_COUNT = int(os.environ.get("IG_MIN_MEDIA_COUNT", "5"))
 INCLUDE_VIDEOS_DEFAULT = _env_bool("IG_INCLUDE_VIDEOS", "1")
-QUEUE_PRIORITY_KEEP = int(os.environ.get("IG_QUEUE_PRIORITY_KEEP", "100"))
-QUEUE_PRIORITY_UNSURE = int(os.environ.get("IG_QUEUE_PRIORITY_UNSURE", "40"))
 QUEUE_PRIORITY_DEFAULT = int(os.environ.get("IG_QUEUE_PRIORITY_DEFAULT", "10"))
 POST_RANK_ENABLED = _env_bool("IG_POST_RANK", "1")
 POST_SCAN_FACTOR = float(os.environ.get("IG_POST_SCAN_FACTOR", "3"))
@@ -169,37 +167,19 @@ DEFAULT_BIO_KEYWORDS = _env_csv(
     "IG_BIO_KEYWORDS",
     "model,influencer,fitness,glamour,actress,swimwear,cosplay,fashion,beauty,photographer",
 )
-GLAM_SEXY_MIN = int(os.environ.get("GLAM_SEXY_MIN", "2"))
-
-# Reel / video glam classify
-CLASSIFY_MAX_EDGE = int(os.environ.get("CLASSIFY_MAX_EDGE", "768"))
-# Contact sheets carry 9 panels, so they need a larger edge than a single frame.
-CLASSIFY_SHEET_MAX_EDGE = int(os.environ.get("CLASSIFY_SHEET_MAX_EDGE", "1368"))
-CLASSIFY_NUM_CTX = int(os.environ.get("CLASSIFY_NUM_CTX", "8192"))
-CLASSIFY_NUM_PREDICT = int(os.environ.get("CLASSIFY_NUM_PREDICT", "400"))
-CLASSIFY_TIMEOUT = float(os.environ.get("CLASSIFY_TIMEOUT", "180"))
-CLASSIFY_RETRIES = int(os.environ.get("CLASSIFY_RETRIES", "2"))
-CLASSIFY_KEEP_ALIVE = os.environ.get("CLASSIFY_KEEP_ALIVE", "30m")
-# JSON-schema constrained decoding (Ollama `format`). Off => legacy regex scrape.
-CLASSIFY_STRUCTURED = _env_bool("CLASSIFY_STRUCTURED", "1")
-# Opt-in: score photos with the v4 ordinal prompt too. Default off so existing
-# photo scores stay comparable — flip only after re-scoring the archive.
-CLASSIFY_PHOTO_ORDINAL = _env_bool("CLASSIFY_PHOTO_ORDINAL", "0")
-
+# Video frame selection — used by `scraping/video_frames.py` for video
+# thumbnails (`storage/thumbs.py`) and near-duplicate detection
+# (`storage/dedupe.py`). These outlived the glam classifier that introduced
+# them; the CLASSIFY_REEL_* names are kept so the frame ranker reads unchanged.
 CLASSIFY_REEL_CANDIDATES = int(os.environ.get("CLASSIFY_REEL_CANDIDATES", "16"))
-CLASSIFY_REEL_VISION_MAX = int(os.environ.get("CLASSIFY_REEL_VISION_MAX", "2"))
 CLASSIFY_REEL_SKIP_HEAD_FRAC = float(os.environ.get("CLASSIFY_REEL_SKIP_HEAD_FRAC", "0.02"))
-# 0.0 on purpose: reels reveal the payoff outfit in the final seconds.
+# 0.0 on purpose: the interesting frame is often in the final seconds.
 CLASSIFY_REEL_SKIP_TAIL_FRAC = float(os.environ.get("CLASSIFY_REEL_SKIP_TAIL_FRAC", "0.0"))
 CLASSIFY_REEL_MIN_BRIGHT = float(os.environ.get("CLASSIFY_REEL_MIN_BRIGHT", "22"))
 CLASSIFY_REEL_MIN_SHARP = float(os.environ.get("CLASSIFY_REEL_MIN_SHARP", "35"))
 # "Sharp enough" reference — frames at/above this stop earning extra rank, so an
-# adequately sharp reveal is not beaten by a razor-sharp static intro.
+# adequately sharp frame is not beaten by a razor-sharp static intro.
 CLASSIFY_REEL_SHARP_REF = float(os.environ.get("CLASSIFY_REEL_SHARP_REF", "140"))
-CLASSIFY_REEL_UNCERTAIN_LO = float(os.environ.get("CLASSIFY_REEL_UNCERTAIN_LO", "0.45"))
-CLASSIFY_REEL_UNCERTAIN_HI = float(os.environ.get("CLASSIFY_REEL_UNCERTAIN_HI", "0.65"))
-# Whole-reel contact sheet: one vision call sees the entire timeline.
-CLASSIFY_REEL_SHEET = _env_bool("CLASSIFY_REEL_SHEET", "1")
 CLASSIFY_REEL_SHEET_PANELS = int(os.environ.get("CLASSIFY_REEL_SHEET_PANELS", "9"))
 CLASSIFY_REEL_SHEET_PANEL_W = int(os.environ.get("CLASSIFY_REEL_SHEET_PANEL_W", "256"))
 # Skin-tone fraction weight in the frame ranker. 0 disables the term.

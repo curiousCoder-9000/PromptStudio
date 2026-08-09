@@ -10,15 +10,15 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/stats` | Photos, creators, `prompts_ready` |
-| `GET` | `/api/insights` | Quality dashboard — prompt edit/regenerate rates, glam distribution, generation counts |
+| `GET` | `/api/insights` | Quality dashboard — prompt edit/regenerate rates, generation counts |
 | `GET` | `/api/health` | Ollama + Comfy reachability + models + job leases |
 | `GET` | `/api/journal` | Run history for a background job kind |
 | `GET` | `/api/creators` | Creator folders with counts + cover + sync meta |
 | `GET` | `/api/creator/style` | Learned style prefix for a creator |
 | `POST` | `/api/creator/style/rebuild` | Rebuild style from cached prompts |
 | `GET` | `/api/following` | Accounts from local `following_list.json` |
-| `GET` | `/api/photos` | Paginated (`offset`, `limit`, `creator`, `search`, `unanalyzed`, `favorite`, `sexy`, `glam_min`, `media_type`, `sort`) |
-| `GET` | `/api/media/detail` | Reel/photo inspector (`path`): caption, glam verdict, IG link — not vision prompts |
+| `GET` | `/api/photos` | Paginated (`offset`, `limit`, `creator`, `search`, `unanalyzed`, `favorite`, `media_type`, `sort`) |
+| `GET` | `/api/media/detail` | Reel/photo inspector (`path`): caption, IG link — not vision prompts |
 | `GET` | `/api/prompt` | Vision prompt bundle (`path`, optional `refresh`) — includes `history` |
 | `PUT` | `/api/prompt` | Save edited positive/negative prompts + tags |
 | `POST` | `/api/prompt/restore` | Restore a prior prompt from history |
@@ -27,9 +27,6 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/prompt/batch` | Background batch analyze (`creator`, `force`, `limit`, `paths`) |
 | `GET` | `/api/prompt/batch/status` | Batch job progress (cheap — snapshot, no archive scan) |
 | `POST` | `/api/prompt/batch/cancel` | Cooperative cancel after the current photo |
-| `POST` | `/api/classify/start` | Background glam classify for one creator (`creator`, `only_unscored`, `force`, `include_videos`, `limit`, `rescore_stale`) |
-| `GET` | `/api/classify/status` | Classify job progress (`kept` / `rejected` / `failed`, `pending`, `stale`, `score_hist`) |
-| `POST` | `/api/classify/cancel` | Cooperative cancel after current item |
 | `DELETE` | `/api/photo` | Soft delete → `_trash/` (`permanent=1` to unlink) |
 | `GET` | `/api/trash` | List trashed entries (`limit`, `offset`) + size/retention |
 | `POST` | `/api/trash/restore` | Restore by `id` or `ids` |
@@ -72,7 +69,7 @@ every call — and `/api/stats` runs on every app init.
 ### `GET /api/insights`
 
 Phase 13 B1 quality dashboard. Read-only aggregates over data already on disk
-(prompt `manual_edit` / `history`, `photos.glam_score`, `generations_index.json`).
+(prompt `manual_edit` / `history`, `generations_index.json`).
 No new scoring jobs.
 
 ```json
@@ -85,16 +82,6 @@ No new scoring jobs.
     "regenerate_rate": 0.1214,
     "avg_history_depth": 0.18,
     "by_pipeline_version": { "v2-structured": 420 }
-  },
-  "glam": {
-    "scored": 900,
-    "unscored": 200,
-    "distribution": { "-1": 200, "0": 40, "1": 80, "2": 300, "3": 480 },
-    "by_prompt_version": { "v4-reel-sheet": { "2": 200, "3": 400 } },
-    "filter_pass_rates": {
-      "sexy_ge_2": { "pass": 780, "of": 900, "rate": 0.8667 },
-      "glam_eq_3": { "pass": 480, "of": 900, "rate": 0.5333 }
-    }
   },
   "generations": {
     "sources_with_gens": 12,
@@ -136,7 +123,7 @@ Probes Ollama at `http://localhost:11434/api/tags` (1.5s timeout).
   "model": "qwen2.5vl:7b",
   "model_ready": true,
   "models": ["qwen2.5vl:7b", "moondream:latest"],
-  "leases": { "ollama": "classify", "instagram": null, "comfy": null }
+  "leases": { "ollama": "batch_prompt", "instagram": null, "comfy": null }
 }
 ```
 
@@ -144,21 +131,21 @@ When Ollama is down: `{ "ollama": false, ... }`. Also includes `comfy` / `url` f
 
 `leases` names the job holding each exclusive resource, or `null` if free — the
 first thing to check when a job reports `busy` and nothing looks like it is
-running. Owners: `classify`, `batch_prompt`, `sync`.
+running. Owners: `batch_prompt`, `sync`.
 
 ### `GET /api/journal?kind=<kind>&limit=20`
 
 Run history for a background job. Without `kind`, lists the kinds present on
-disk. Kinds: `classify`, `batch_prompt`, `sync`.
+disk. Kinds: `batch_prompt`, `sync`.
 
 ```json
 {
-  "kind": "classify",
+  "kind": "sync",
   "limit": 20,
   "runs": [
     {
-      "run_id": "classify_20260809T041626Z_a1b2",
-      "kind": "classify",
+      "run_id": "sync_20260809T041626Z_a1b2",
+      "kind": "sync",
       "creator": "someone",
       "total": 42,
       "started_at": "2026-08-09T04:16:26+00:00",
@@ -168,9 +155,6 @@ disk. Kinds: `classify`, `batch_prompt`, `sync`.
       "items": 42,
       "failures": 2,
       "item_count": 42,
-      "score_hist": { "-1": 2, "0": 1, "1": 4, "2": 9, "3": 26 },
-      "top_score_share": 0.65,
-      "unscored_rate": 0.0476,
       "events": [{ "ts": "…", "name": "rate_limit", "backoff_sec": 60 }]
     }
   ]
@@ -182,9 +166,7 @@ Newest run first; an in-flight run has `finished_at: null`. Per-item records are
 objects in a response. Read the raw lines at
 `<archive>/_journal/<kind>.jsonl` when per-item detail is needed.
 
-`outcome` is `ok` | `error` | `cancelled`. `top_score_share` is the distribution
-guard: a classifier emitting one value for most of the archive carries almost no
-information, which is how an 85%-glam-3 prompt shipped unnoticed.
+`outcome` is `ok` | `error` | `cancelled`.
 
 ### `POST /api/prompt/mode-e`
 
@@ -262,11 +244,7 @@ Reads local `following_list.json` (no live Instagram call).
 
 ### `GET /api/photos`
 
-Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `sexy` (`1`/`true` → `glam_score >= GLAM_SEXY_MIN` default 2), `reject` (`1`/`true` → scored non-keep, `glam_score` 0–1), `unscored` (`1`/`true` → `glam_score = -1`), `glam_min` / `glam_max` (int), `media_type` (`photo` | `video` | omit/`all`), `sort` (`name` | `newest` | `oldest` | `glam`), `offset` (default 0), `limit` (default/max from config, typically 300).
-
-Each photo may include `glam_score` (`-1` unscored, `0` none, `1` woman, `2` sexy, `3` sexy+figure).
-
-`GET /api/creators` also returns `scored_count`, `unscored_count`, `reject_count` for sidebar badges.
+Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `sort` (`name` | `newest` | `oldest`), `offset` (default 0), `limit` (default/max from config, typically 300).
 
 ```json
 {
@@ -370,7 +348,7 @@ Updates cache, sets `parameters.manual_edit: true`, rebuilds `exports`, returns 
 
 `include_videos` defaults to config `INCLUDE_VIDEOS_DEFAULT` / `IG_INCLUDE_VIDEOS` (true unless set off).
 
-`mode`: `bounded` (default, glam rank/top-N) or `full` (stream entire feed).  
+`mode`: `bounded` (default, keyword rank/top-N) or `full` (stream entire feed).  
 `deep` (full only): `true` = catch-up off (true archive); `false` = catch-up on.
 
 **409** if creator scrape queue has pending jobs and is not paused (fairness).
@@ -443,7 +421,7 @@ Available scrape sources, for populating a picker.
 | mode | Behavior |
 |------|----------|
 | `full` | Stream entire feed; `deep=true` = catch-up **off** (true archive) |
-| `latest` | Catch-up only for existing folders; never glam-rank; respects tombstones |
+| `latest` | Catch-up only for existing folders; never keyword-rank; respects tombstones |
 | `bounded` | Glam rank + top-N (following bulk style) |
 
 **Deletes:** `DELETE /api/photo` records a tombstone (`deleted_posts` in `archive.db`) so future sync never re-downloads that shortcode/post_id. Restoring from the Trash clears that tombstone again.

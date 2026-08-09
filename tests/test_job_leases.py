@@ -139,19 +139,19 @@ def test_repeated_acquire_release_cycles_leave_nothing_held(leases):
 # ── wiring into the real managers ────────────────────────────────────
 
 
-def test_classify_and_batch_share_the_ollama_lease():
+def test_batch_takes_the_ollama_lease():
     from promptstudio.prompts import batch as batch_mod
-    from promptstudio.scraping import classify_job
 
-    assert classify_job.LEASE_OWNER != batch_mod.LEASE_OWNER
     from promptstudio.jobs import LEASES
 
     LEASES.reset()
     try:
-        assert LEASES.acquire([OLLAMA], classify_job.LEASE_OWNER) is None
-        assert LEASES.acquire([OLLAMA], batch_mod.LEASE_OWNER) == OLLAMA
+        assert LEASES.acquire([OLLAMA], batch_mod.LEASE_OWNER) is None
+        # A second holder is refused and told who has it.
+        assert LEASES.acquire([OLLAMA], "someone_else") == OLLAMA
     finally:
         LEASES.reset()
+
 
 
 def test_batch_refuses_and_explains_when_ollama_is_held(make_photo):
@@ -160,11 +160,11 @@ def test_batch_refuses_and_explains_when_ollama_is_held(make_photo):
 
     make_photo(creator="nina", name="a.jpg")
     LEASES.reset()
-    LEASES.acquire([OLLAMA], "classify")
+    LEASES.acquire([OLLAMA], "some_other_job")
     try:
         mgr = BatchPromptManager()
         assert mgr.start_batch(creator="nina") is False
-        assert "classify" in mgr.last_refusal
+        assert "some_other_job" in mgr.last_refusal
     finally:
         LEASES.reset()
 

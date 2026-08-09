@@ -4,7 +4,7 @@ Local **AI Vision Prompt Studio** for personal photo archives (especially Instag
 
 Analyzes images under a local archive folder with **Ollama** multimodal vision, builds photorealistic prompts for Stable Diffusion / Flux / Midjourney / ComfyUI, and manages scrape → gallery → generate in one dark glass UI.
 
-> **Privacy first.** This project is designed so **secrets, sessions, personal following lists, classify reports, and media never belong in git**. Configure everything via `.env`.
+> **Privacy first.** This project is designed so **secrets, sessions, personal following lists, and media never belong in git**. Configure everything via `.env`.
 
 ## Features
 
@@ -83,7 +83,7 @@ Do **not** commit:
 - `.env` — credentials and personal paths
 - Instaloader `session-*` files
 - **Any `cookies.txt`** used for X / Reddit — these are session credentials
-- `following_list.json` and classify reports
+- `following_list.json`
 - Your media archive (`PROMPTSTUDIO_ARCHIVE`)
 - Generated docs dumps (`docs/following_list.md`, etc.)
 
@@ -91,7 +91,6 @@ Export helpers write local files only:
 
 ```powershell
 py scripts/export_following_list.py
-py scripts/classify_following.py
 ```
 
 Use `following_list.example.json` as a shape reference.

@@ -171,7 +171,7 @@ delete, move them. Now compared on path boundaries; `tests/test_paths.py` covers
 |-------------|--------|
 | Cancel for `BatchPromptManager` + `POST /api/prompt/batch/cancel` | Done |
 | `#jobChipStack` — one chip per job kind, progress bar + cancel | Done |
-| Batch + classify progress toasts dropped to start/finish only | Done |
+| Batch progress toasts dropped to start/finish only | Done |
 | `/api/prompt/batch/status` no longer calls `list_uncached()` per poll | Done |
 | Batch chip resumes after a browser refresh (jobs live server-side) | Done |
 
@@ -262,7 +262,7 @@ Theme A items are specified in
 | **Atomic JSON writes everywhere** — `storage/atomic.py`, applied to all ten writers | S1 | **Done** |
 | **Top-level error boundary** — unhandled route errors return JSON 500 instead of dropping the connection | S2 | **Done** |
 | **`logging` + rotating file handler** — 34 `print()` converted; `except: pass` sweep still open | S3 | **Done** |
-| `export --derived` / import — prompts, glam scores, favorites, styles, labels, generation index | E1 | Todo |
+| `export --derived` / import — prompts, favorites, styles, generation index | E1 | Todo |
 | Rate generations (keep / discard / ⭐) — `PUT /api/generation/rate` | A3 | Todo |
 | Outputs gallery — `GET /api/generations/list`, filter by creator/date/checkpoint/rating, full provenance | A1 | Todo |
 
@@ -337,14 +337,11 @@ Phase 6 note ("CLIP? Not needed…") — that call was right for the Comfy loop 
 wrong for everything else, because the cost side changed: sqlite-vec drops into
 the `archive.db` that already exists, no server.
 
-The VLM is **demoted, not removed** — it keeps `brief_reason` and the ~10–20% of
-items near the decision boundary. Rationale in
-[research_glam_classifier.md](research_glam_classifier.md) §3.5.
+**Superseded (2026-08-09):** the glam classifier and its whole scoring stack
+were removed rather than demoted. Any future media scoring starts from a clean
+sheet; the eval harness, prompt versions and label sets went with it.
 
-B3 gates B2 (labels are the training set) and is also
-`design_reel_classifier_v2.md` P0 — one labeling harness, both consumers.
-E2 depends on S3 landing in Phase 13. C5 rides free on a vision call already
-being made.
+E2 depends on S3 landing in Phase 13.
 
 ---
 
@@ -395,7 +392,7 @@ promptstudio/
 ├── config.py
 ├── storage/     archive db favorites metadata thumbs
 ├── scraping/    session downloader filters queue checkpoints
-│                organizer sync_manager outfit_classifier
+│                organizer sync_manager video_frames
 ├── prompts/     cache engine styles batch comfy_mode
 ├── comfy/       client + workflows/modelToimage_pro.api.json
 └── server/      handler multipart

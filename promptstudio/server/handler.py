@@ -13,7 +13,6 @@ from promptstudio.config import (
     CREATOR_SCRAPE_QUEUE_ENABLED,
     DEFAULT_MAX_POSTS_PER_CREATOR,
     FOLLOWING_LIST_FILE,
-    GLAM_SEXY_MIN,
     HOST,
     INCLUDE_VIDEOS_DEFAULT,
     MAX_PHOTOS_API_PAGE,
@@ -29,7 +28,6 @@ from promptstudio.prompts.batch import BatchPromptManager
 from promptstudio.prompts.cache import PromptCache
 from promptstudio.prompts.engine import ENGINE_ID, build_export_variants, get_prompt_for_image
 from promptstudio.prompts.styles import CreatorStyleStore
-from promptstudio.scraping.classify_job import ClassifyJobManager
 from promptstudio.scraping.creator_queue import CreatorScrapeQueue
 from promptstudio.scraping.downloader import InstagramDownloader
 from promptstudio.scraping.sources.base import VALID_MODES, ScrapeOptions
@@ -48,7 +46,6 @@ _prompt_cache = PromptCache()
 _favorites = FavoritesStore()
 _sync = SyncManager.get()
 _batch = BatchPromptManager.get()
-_classify = ClassifyJobManager.get()
 _styles = CreatorStyleStore()
 _trash = TrashStore()
 _comfy = ComfyJobManager.get()
@@ -755,7 +752,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 if not username:
                     self.send_error(400, "username required")
                     return
-                # Prefer serial scrape queue: full feed + deep gap-fill (not glam top-50).
+                # Prefer serial scrape queue: full feed + deep gap-fill (not a top-N slice).
                 # One-shot bounded path remains only when queue disabled or client forces oneshot.
                 force_oneshot = data.get("oneshot", False)
                 if isinstance(force_oneshot, str):
@@ -924,7 +921,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     paths = [str(p).strip() for p in paths_raw if str(p).strip()]
                     if not paths:
                         paths = None
-                # No is_running() pre-checks against _batch/_classify: both take
+                # No is_running() pre-check against _batch: it takes
                 # the same Ollama lease, and start_batch decides under it.
                 pending = _batch.list_uncached(creator=creator, force=force, paths=paths)
                 if limit:
@@ -960,56 +957,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({"status": "cancelling"})
             else:
                 self._send_json({"status": "idle", "message": "No batch job running"})
-            return
-
-        if path == "/api/classify/start":
-            try:
-                data = self._read_json_body()
-                creator = (data.get("creator") or "").strip().lstrip("@")
-                if not creator:
-                    self.send_error(400, "creator required")
-                    return
-                force = bool(data.get("force", False))
-                only_unscored = data.get("only_unscored", True)
-                if isinstance(only_unscored, str):
-                    only_unscored = only_unscored.lower() in ("1", "true", "yes")
-                only_unscored = bool(only_unscored)
-                include_videos = data.get("include_videos", INCLUDE_VIDEOS_DEFAULT)
-                if isinstance(include_videos, str):
-                    include_videos = include_videos.lower() in ("1", "true", "yes")
-                include_videos = bool(include_videos)
-                rescore_stale = _as_bool(data.get("rescore_stale"))
-                limit = data.get("limit")
-                limit = int(limit) if limit is not None else None
-                result = _classify.start(
-                    creator,
-                    force=force,
-                    include_videos=include_videos,
-                    limit=limit,
-                    only_unscored=only_unscored,
-                    rescore_stale=rescore_stale,
-                )
-                status = result.get("status")
-                code = 200
-                if status == "busy":
-                    code = 409
-                elif status == "ollama_down":
-                    code = 503
-                elif status == "bad_creator":
-                    code = 400
-                self._send_json(result, code)
-            except (ValueError, json.JSONDecodeError):
-                self.send_error(400, "Invalid JSON body")
-            return
-
-        if path == "/api/classify/cancel":
-            ok = _classify.cancel()
-            self._send_json(
-                {
-                    "status": "cancelling" if ok else "idle",
-                    "running": _classify.is_running(),
-                }
-            )
             return
 
         if path == "/api/creator/style/rebuild":
@@ -1299,7 +1246,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
 
         if path == "/api/media/detail":
-            # Reel/photo inspector: caption, glam, Instagram link (not vision prompts)
+            # Reel/photo inspector: caption, Instagram link (not vision prompts)
             rel_path = (query.get("path", [""])[0] or "").strip().replace("\\", "/")
             if not rel_path:
                 self.send_error(400, "path required")
@@ -1321,21 +1268,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 file_size = os.path.getsize(full_path)
             except OSError:
                 file_size = 0
-            glam_score = meta.get("glam_score")
-            if glam_score is None:
-                try:
-                    from promptstudio.storage.db import ArchiveIndex
-
-                    glam_score = ArchiveIndex.get().get_glam_score(rel_path)
-                except Exception:
-                    glam_score = -1
-            try:
-                glam_score = int(glam_score)
-            except (TypeError, ValueError):
-                glam_score = -1
-            glam_block = meta.get("glam") if isinstance(meta.get("glam"), dict) else {}
-            if not glam_block and isinstance(meta.get("glam_classify"), dict):
-                glam_block = meta.get("glam_classify") or {}
             fav = False
             try:
                 fav = bool(_favorites.is_favorite(rel_path))
@@ -1357,7 +1289,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     "url": f"/media/{urllib.parse.quote(rel_path)}",
                     "thumb_url": thumb_url(rel_path),
                     "file_size": file_size,
-                    "glam_score": glam_score,
                     "favorite": fav,
                     "caption": meta.get("caption") or "",
                     "shortcode": shortcode,
@@ -1367,7 +1298,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     "downloaded_at": meta.get("downloaded_at") or "",
                     "carousel_index": meta.get("carousel_index", 0),
                     "source": meta.get("source") or "",
-                    "glam": glam_block or None,
                 }
             )
             return
@@ -1476,33 +1406,11 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             unanalyzed = unanalyzed_raw in ("1", "true", "yes")
             favorite_raw = (query.get("favorite", ["false"])[0] or "").lower()
             favorite_only = favorite_raw in ("1", "true", "yes")
-            sexy_raw = (query.get("sexy", ["false"])[0] or "").lower()
-            sexy_only = sexy_raw in ("1", "true", "yes")
-            reject_raw = (query.get("reject", ["false"])[0] or "").lower()
-            reject_only = reject_raw in ("1", "true", "yes")
-            unscored_raw = (query.get("unscored", ["false"])[0] or "").lower()
-            unscored_only = unscored_raw in ("1", "true", "yes")
-            glam_min = None
-            glam_max = None
-            if sexy_only:
-                glam_min = GLAM_SEXY_MIN
-            glam_raw = query.get("glam_min", [None])[0]
-            if glam_raw is not None and str(glam_raw).strip() != "":
-                try:
-                    glam_min = int(glam_raw)
-                except ValueError:
-                    pass
-            glam_max_raw = query.get("glam_max", [None])[0]
-            if glam_max_raw is not None and str(glam_max_raw).strip() != "":
-                try:
-                    glam_max = int(glam_max_raw)
-                except ValueError:
-                    pass
             media_type = (query.get("media_type", ["all"])[0] or "all").lower()
             if media_type not in ("video", "photo"):
                 media_type = None
             sort = (query.get("sort", ["name"])[0] or "name").lower()
-            if sort not in ("name", "newest", "oldest", "glam"):
+            if sort not in ("name", "newest", "oldest"):
                 sort = "name"
             try:
                 offset = int(query.get("offset", ["0"])[0] or 0)
@@ -1521,10 +1429,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 unanalyzed=unanalyzed,
                 favorite_only=favorite_only,
                 media_type=media_type,
-                glam_min=glam_min,
-                glam_max=glam_max,
-                unscored_only=unscored_only,
-                reject_only=reject_only,
                 sort=sort,
                 limit=limit,
                 offset=offset,
@@ -1604,7 +1508,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path == "/api/insights":
-            # B1 quality dashboard — edit rate, glam distribution, gen counts.
+            # B1 quality dashboard — prompt edit rate and generation counts.
             # Read-only aggregates over data already on disk; no new writes.
             from promptstudio.insights import compute_insights
 
@@ -1649,48 +1553,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             # list_uncached(), a full archive query + prompt-cache load, on
             # every 4s poll for the whole run.
             self._send_json(_batch.get_status())
-            return
-
-        if path == "/api/classify/status":
-            status = _classify.get_status()
-            creator = status.get("creator")
-            if creator and not status.get("running"):
-                # Include remaining unscored for resume UX
-                try:
-                    status["pending"] = len(
-                        _classify.list_pending(
-                            creator,
-                            force=False,
-                            include_videos=bool(status.get("include_videos", True)),
-                        )
-                    )
-                except Exception:
-                    status["pending"] = 0
-                # Files scored by a superseded prompt. Without this the client
-                # has no way to know rescore_stale would do anything.
-                try:
-                    from promptstudio.scraping.outfit_classifier import (
-                        active_prompt_versions,
-                    )
-                    from promptstudio.storage.db import ArchiveIndex
-
-                    status["stale"] = len(
-                        ArchiveIndex.get().list_stale_glam(
-                            active_prompt_versions(), creator=creator
-                        )
-                    )
-                except Exception:
-                    status["stale"] = 0
-            elif status.get("running"):
-                total = int(status.get("total") or 0)
-                done = int(status.get("completed") or 0)
-                status["pending"] = max(0, total - done)
-            else:
-                status["pending"] = 0
-            # Keep the response shape stable — clients should not have to
-            # distinguish "no stale files" from "we didn't look".
-            status.setdefault("stale", 0)
-            self._send_json(status)
             return
 
         if path == "/api/comfy/status":

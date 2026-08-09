@@ -59,10 +59,6 @@ class ArchiveStore:
         unanalyzed: bool = False,
         favorite_only: bool = False,
         media_type: Optional[str] = None,
-        glam_min: Optional[int] = None,
-        glam_max: Optional[int] = None,
-        unscored_only: bool = False,
-        reject_only: bool = False,
         sort: str = "name",
     ) -> List[Dict[str, Any]]:
         photos, _ = self._index.query_photos(
@@ -71,10 +67,6 @@ class ArchiveStore:
             unanalyzed=unanalyzed,
             favorite_only=favorite_only,
             media_type=media_type,
-            glam_min=glam_min,
-            glam_max=glam_max,
-            unscored_only=unscored_only,
-            reject_only=reject_only,
             sort=sort,
             limit=limit,
             offset=offset,
@@ -91,10 +83,6 @@ class ArchiveStore:
         unanalyzed: bool = False,
         favorite_only: bool = False,
         media_type: Optional[str] = None,
-        glam_min: Optional[int] = None,
-        glam_max: Optional[int] = None,
-        unscored_only: bool = False,
-        reject_only: bool = False,
         sort: str = "name",
     ) -> Tuple[List[Dict[str, Any]], int]:
         return self._index.query_photos(
@@ -103,10 +91,6 @@ class ArchiveStore:
             unanalyzed=unanalyzed,
             favorite_only=favorite_only,
             media_type=media_type,
-            glam_min=glam_min,
-            glam_max=glam_max,
-            unscored_only=unscored_only,
-            reject_only=reject_only,
             sort=sort,
             limit=limit,
             offset=offset,

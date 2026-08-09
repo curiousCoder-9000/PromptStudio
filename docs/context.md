@@ -3,7 +3,7 @@
 **Read this first.** Dense map so agents avoid scanning the whole tree.  
 Detail on demand: [api.md](api.md) · [instagram_downloader.md](instagram_downloader.md) · [troubleshooting.md](troubleshooting.md) · [roadmap.md](roadmap.md)
 
-**Do not load as agent context:** `docs/following_list.md`, `docs/following_classify_report.md` (generated data dumps).
+**Do not load as agent context:** `docs/following_list.md` (generated data dump).
 
 ---
 
@@ -83,7 +83,6 @@ promptstudio/
     checkpoints.py       # sync_state.json telemetry
     sync_manager.py      # single background sync job; dispatches by source
     organizer.py         # root organize + dedupe
-    outfit_classifier.py # vision classify keep/unfollow
     sources/             # multi-source seam (see docs/multi_source_scraping.md)
       base.py            # NormalizedPost, SourceTarget, MediaSource, folder naming
       __init__.py        # lazy registry: instagram | x | reddit
@@ -114,7 +113,7 @@ tests/
 - **Escape before `innerHTML`.** Handles, captions, bios, filenames, and Ollama tags are all third-party text — run them through `escapeHtml()` (or use `textContent`). Numeric JSON fields get `Number(...)`.
 - **User-typed input is debounced** (`debounce()`; `SEARCH_DEBOUNCE_MS` = 250) and **in-flight fetches are abortable** — `state.photosRequest` / `creatorStyleRequest` / `followingRequest` hold the current `AbortController`. Treat `err.name === 'AbortError'` as success-by-supersession, and only clear loading state if `state.xRequest === controller`.
 - Video type detection goes through `isVideoFilename()` — do not inline extension lists.
-- **Long jobs report progress in a chip, never a repeating toast.** `#jobChipStack` holds one chip per job kind (scrape / batch / classify); drive it with `renderJobChip(kind, {...})` and toast only on start and finish.
+- **Long jobs report progress in a chip, never a repeating toast.** `#jobChipStack` holds one chip per job kind (scrape / batch); drive it with `renderJobChip(kind, {...})` and toast only on start and finish.
 - **View prefs persist, navigation does not.** `PREF_FIELDS` + `saveViewPrefs()` keep sort/media/grid/filters in `localStorage`; selected creator, selection, and reject-review mode are deliberately *not* restored (landing in a destructive mode from a refresh is hostile). Call `saveViewPrefs()` in any new view-control handler.
 
 ---
@@ -134,18 +133,18 @@ tests/
 | `sync_status.json` | Last sync job status |
 | `generations_index.json` | Comfy outputs index |
 | `promptstudio.log` | Rotating app log (`PROMPTSTUDIO_LOG_FILE=` to disable) |
-| `_journal/<kind>.jsonl` | Append-only run history: `classify`, `batch_prompt`, `sync` |
+| `_journal/<kind>.jsonl` | Append-only run history: `batch_prompt`, `sync` |
 | `_thumbs/` | JPEG thumbs |
 | `_generations/` | Comfy outputs |
-| `_classify/` | Classifier staging (excluded from gallery) |
 | `_trash/<entry_id>/` | Soft-deleted media + sidecar + `entry.json` manifest |
 | `_no_person_detected/` | Legacy exclude (do not resurrect filter UX) |
 
-**Repo-root (not archive):** `following_list.json` (+ `.target`/`.lock`/`.freeze` during export), classify reports `following_classify_report.json`, `local_photo_classify_*.json`.
+**Repo-root (not archive):** `following_list.json` (+ `.target`/`.lock`/`.freeze` during export).
 
 **Session:** `INSTALOADER_SESSION_DIR` for user `INSTAGRAM_SESSION_USER` (required in `.env` for scrape).
 
 **Excluded folder names:** `_no_person_detected`, `_thumbs`, `_generations`, `_classify`, `_trash`, `_journal`.
+(`_classify/` is still excluded so any staging left over from the removed classifier stays out of the gallery.)
 
 ---
 
@@ -166,7 +165,6 @@ tests/
 | `IG_QUEUE_PRIORITY_KEEP` | `100` | Classify-keep queue priority |
 | `IG_POST_RANK` | `1` | Rank feed posts by caption/reel signals |
 | `IG_POST_SCAN_FACTOR` | `3` | Scan window = max_posts × factor |
-| `GLAM_SEXY_MIN` | `2` | Gallery `sexy=1` minimum glam_score |
 | `CLASSIFY_*` | see `.env.example` | Reel contact sheet, frame ranking, retries, prompt vocabulary |
 | `PROMPTSTUDIO_TRASH` | `1` | Soft delete to `_trash/` (`0` = immediate unlink) |
 | `PROMPTSTUDIO_TRASH_DAYS` | `30` | Retention window for `purge expired` |
@@ -231,15 +229,11 @@ CORS: `*`. Methods: GET, POST, PUT, DELETE, OPTIONS. Server is **threaded**.
 | Creator feed | `scripts/download_creator_feed.py HANDLE` | `POST /api/sync/creator` |
 | Following bulk | `scripts/download_following.py` | `POST /api/sync/following` |
 | Export following | `scripts/export_following_list.py` | — |
-| Classify following | `scripts/classify_following.py` | — (local vision, dry-run) |
-| Prioritize queue | `scripts/prioritize_following_queue.py` | — (classify keep first) |
-| Score local glam | `scripts/classify_local_photos.py` | gallery Sexy filter |
-| Backfill glam DB | `scripts/backfill_glam_scores.py` | from classify report, no Ollama |
+| Prioritize queue | `scripts/prioritize_following_queue.py` | — |
 
 **Videos/reels:** default ON (`IG_INCLUDE_VIDEOS`, `include_videos` on API/UI). Use `--no-reels` to skip.  
 **Queue priority:** `following_queue.json` `priority` + `reason`; `next_pending` highest first.  
-**Post rank:** `IG_POST_RANK` + `IG_CAPTION_KEYWORDS` — prefer sexy captions/reels inside a feed.  
-**Glam filter:** `GET /api/photos?sexy=1` or `glam_min=2`; sort `glam`.
+**Post rank:** `IG_POST_RANK` + `IG_CAPTION_KEYWORDS` — prefer matching captions/reels inside a feed.
 
 Idempotent: skip by `post_id`/`shortcode` in DB + meta. Catch-up stop after `IG_CATCH_UP_STREAK` consecutive hits. Following uses daily queue + random pauses; abort after rate-limit streak or abuse phrases. Details → [instagram_downloader.md](instagram_downloader.md).
 

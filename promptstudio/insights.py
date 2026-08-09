@@ -3,19 +3,17 @@
 No new instrumentation. Reads:
 
 - prompt bundles (`manual_edit`, `history`, pipeline version) — edit/regenerate rates
-- `photos.glam_score` + `glam_prompt_version` — score distribution & filter pass rates
 - `generations_index.json` — generations-per-source (until A0 moves this into SQLite)
 
-These are the free metrics the product review called out: edit rate would have
-caught a saturated Sexy filter on day one if anything had read it.
+The media score distribution used to be reported here too; it went out with
+the classifier.
 """
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
-from promptstudio.config import GLAM_SEXY_MIN
 from promptstudio.logging_setup import get_logger
 from promptstudio.prompts.cache import PromptCache
 
@@ -70,63 +68,6 @@ def _prompt_insights(cache: Optional[dict] = None) -> Dict[str, Any]:
     }
 
 
-def _glam_insights() -> Dict[str, Any]:
-    from promptstudio.storage.db import ArchiveIndex
-
-    index = ArchiveIndex.get()
-    index.ensure_ready()
-    dist: Counter = Counter()
-    by_version: Dict[str, Counter] = defaultdict(Counter)
-    scored = 0
-    unscored = 0
-
-    with index._lock:
-        rows = index._conn.execute(
-            "SELECT glam_score, glam_prompt_version FROM photos"
-        ).fetchall()
-
-    for row in rows:
-        raw = row["glam_score"]
-        score = -1 if raw is None else int(raw)
-        dist[str(score)] += 1
-        if score < 0:
-            unscored += 1
-            continue
-        scored += 1
-        ver = row["glam_prompt_version"] or "(unknown)"
-        by_version[str(ver)][str(score)] += 1
-
-    # Pass rates for the filters the UI actually exposes.
-    sexy_min = int(GLAM_SEXY_MIN)
-    sexy_pass = sum(c for k, c in dist.items() if k.lstrip("-").isdigit() and int(k) >= sexy_min)
-    # glam 3 only — the "figure" top bucket
-    top_pass = dist.get("3", 0)
-
-    by_version_out = {
-        ver: dict(sorted(hist.items(), key=lambda kv: int(kv[0])))
-        for ver, hist in sorted(by_version.items())
-    }
-
-    return {
-        "scored": scored,
-        "unscored": unscored,
-        "distribution": dict(sorted(dist.items(), key=lambda kv: int(kv[0]))),
-        "by_prompt_version": by_version_out,
-        "filter_pass_rates": {
-            f"sexy_ge_{sexy_min}": {
-                "pass": sexy_pass,
-                "of": scored,
-                "rate": _rate(sexy_pass, scored),
-            },
-            "glam_eq_3": {
-                "pass": top_pass,
-                "of": scored,
-                "rate": _rate(top_pass, scored),
-            },
-        },
-    }
-
-
 def _generation_insights() -> Dict[str, Any]:
     from promptstudio.comfy.client import GenerationsIndex
 
@@ -161,11 +102,6 @@ def compute_insights() -> Dict[str, Any]:
         log.exception("prompt insights failed: %s", e)
         prompts = {"total": 0, "error": str(e)}
     try:
-        glam = _glam_insights()
-    except Exception as e:
-        log.exception("glam insights failed: %s", e)
-        glam = {"scored": 0, "unscored": 0, "error": str(e)}
-    try:
         generations = _generation_insights()
     except Exception as e:
         log.exception("generation insights failed: %s", e)
@@ -173,6 +109,5 @@ def compute_insights() -> Dict[str, Any]:
 
     return {
         "prompts": prompts,
-        "glam": glam,
         "generations": generations,
     }

@@ -5,7 +5,7 @@
  * run), so the assertions are: a chip appears with a progress bar and a cancel
  * button, and repeated polls do *not* stack up toasts.
  *
- * Batch/classify need Ollama, which isn't available here, so job state is driven
+ * Batch needs Ollama, which isn't available here, so job state is driven
  * by stubbing the status endpoints — the chip rendering and the preference
  * plumbing are what's under test, not the vision pipeline.
  */
@@ -95,28 +95,6 @@ const { Session, Report, sleep } = require('./cdp');
   r.check('exactly one completion toast', finished.toasts === 1, `${finished.toasts}`);
   r.check('cancelled wording used', /cancelled/i.test(finished.text), finished.text);
 
-  r.section('classify chip');
-  const classify = await s.eval(`
-    const real = window.__originalFetch || window.fetch;
-    window.fetch = async (u, o) => u.toString().includes('/api/classify/status')
-      ? new Response(JSON.stringify({ running: true, creator: 'test_creator', total: 40,
-          completed: 10, kept: 6, rejected: 3, failed: 1, cancel_requested: false }),
-          { headers: { 'Content-Type': 'application/json' } })
-      : real(u, o);
-    await pollClassifyStatus();
-    await new Promise(r => setTimeout(r, 200));
-    const chip = document.getElementById('classifyJobChip');
-    return { visible: getComputedStyle(chip).display !== 'none',
-             title: document.getElementById('classifyJobChipTitle').textContent,
-             sub: document.getElementById('classifyJobChipSub').textContent,
-             fill: document.getElementById('classifyJobChipFill').style.width };
-  `);
-  console.log('   ', JSON.stringify(classify));
-  r.check('classify chip visible', classify.visible === true);
-  r.check('names the creator', /@test_creator/.test(classify.title), classify.title);
-  r.check('shows keep/reject counts', /keep 6 · reject 3/.test(classify.sub), classify.sub);
-  r.check('progress bar set', classify.fill === '25%', classify.fill);
-
   r.section('chips stack rather than overlap');
   const stack = await s.eval(`
     const stack = document.getElementById('jobChipStack');
@@ -159,7 +137,7 @@ const { Session, Report, sleep } = require('./cdp');
       gridState: state.gridSize,
       gridClass: document.getElementById('galleryGrid').classList.contains('large'),
       gridBtnActive: document.getElementById('gridLarge').classList.contains('active'),
-      rejectOnly: state.rejectOnly, selectMode: state.selectMode,
+      selectMode: state.selectMode,
     };
   `);
   console.log('   ', JSON.stringify(restored));
@@ -168,7 +146,6 @@ const { Session, Report, sleep } = require('./cdp');
   r.check('favorites filter restored + chip active', restored.favState === true && restored.favChipActive === true);
   r.check('grid size restored (was unrecoverable before)',
     restored.gridState === 'large' && restored.gridClass === true && restored.gridBtnActive === true);
-  r.check('destructive reject-review mode NOT restored', restored.rejectOnly === false);
   r.check('select mode NOT restored', restored.selectMode === false);
 
   r.section('restored prefs are in the very first request');

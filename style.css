@@ -559,6 +559,12 @@ body {
     min-height: 0;
 }
 
+.creator-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
 .creator-style-panel {
     display: flex;
     flex-direction: column;
@@ -566,66 +572,6 @@ body {
     padding-top: 10px;
     border-top: 1px solid var(--border-glass);
     text-align: left;
-}
-
-.creator-classify-meta {
-    font-size: 0.75rem;
-    color: var(--text-secondary);
-    line-height: 1.35;
-}
-
-.creator-classify-actions {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-
-.creator-score-pill {
-    font-size: 0.65rem;
-    font-weight: 600;
-    padding: 1px 6px;
-    border-radius: 8px;
-    background: rgba(15, 23, 42, 0.7);
-    border: 1px solid rgba(148, 163, 184, 0.25);
-    color: var(--text-secondary);
-    white-space: nowrap;
-}
-
-.creator-score-pill.has-rejects {
-    border-color: rgba(236, 72, 153, 0.45);
-    color: #f9a8d4;
-}
-
-.creator-score-pill.running {
-    border-color: rgba(251, 191, 36, 0.55);
-    color: #fcd34d;
-}
-
-.glam-score-badge {
-    position: absolute;
-    bottom: 8px;
-    right: 8px;
-    z-index: 2;
-    font-size: 0.68rem;
-    font-weight: 700;
-    padding: 2px 6px;
-    border-radius: 6px;
-    background: rgba(15, 23, 42, 0.85);
-    border: 1px solid rgba(148, 163, 184, 0.35);
-    color: #e2e8f0;
-    pointer-events: none;
-}
-
-.glam-score-badge.g0,
-.glam-score-badge.g1 {
-    border-color: rgba(236, 72, 153, 0.5);
-    color: #f9a8d4;
-}
-
-.glam-score-badge.g2,
-.glam-score-badge.g3 {
-    border-color: rgba(34, 197, 94, 0.45);
-    color: #86efac;
 }
 
 .btn-ghost {
@@ -637,11 +583,6 @@ body {
 .btn-ghost:hover {
     background: rgba(51, 65, 85, 0.45);
     color: var(--text-primary);
-}
-
-.review-rejects-bar {
-    border-color: rgba(236, 72, 153, 0.45);
-    box-shadow: 0 0 0 1px rgba(236, 72, 153, 0.12), var(--shadow-lg);
 }
 
 .creator-style-prefix {
@@ -1557,23 +1498,6 @@ body {
     color: var(--text-secondary);
 }
 
-.video-pill.glam-keep {
-    border-color: rgba(34, 197, 94, 0.5);
-    color: #86efac;
-    background: rgba(34, 197, 94, 0.12);
-}
-
-.video-pill.glam-reject {
-    border-color: rgba(236, 72, 153, 0.45);
-    color: #f9a8d4;
-    background: rgba(236, 72, 153, 0.1);
-}
-
-.video-pill.glam-unscored {
-    border-color: rgba(148, 163, 184, 0.35);
-    color: #94a3b8;
-}
-
 .video-detail-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -1610,19 +1534,6 @@ body {
     display: flex;
     flex-direction: column;
     gap: 8px;
-}
-
-.video-glam-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
-
-.video-glam-reason {
-    margin: 0;
-    font-size: 0.82rem;
-    color: var(--text-secondary);
-    line-height: 1.4;
 }
 
 .video-caption {

@@ -38,5 +38,5 @@ Health: `GET /api/health` → `ollama`, `model` (`qwen2.5vl:7b` default), `model
 
 ## Skip loading
 
-- `docs/following_list.md`, `docs/following_classify_report.md` — generated tables, not design docs.
+- `docs/following_list.md` — a generated table, not a design doc.
 - Full `style.css` / `app.js` unless UI task.

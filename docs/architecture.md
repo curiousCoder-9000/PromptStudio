@@ -57,15 +57,15 @@ Instaloader session → download to <creator>/
 
 Background: one `SyncManager` job at a time (saved / creator / following /
 **creator_queue** drain); `CreatorScrapeQueue` persists multi-handle FIFO and
-never starts a second IG session. One `BatchPromptManager` / `ComfyJobManager` /
-`ClassifyJobManager` similarly.
+never starts a second IG session. One `BatchPromptManager` / `ComfyJobManager`
+similarly.
 
 Cross-job exclusion is a **lease**, not pairwise `is_running()` checks
 (`promptstudio/jobs.py`). Three exclusive resources:
 
 | Resource | Held by |
 |----------|---------|
-| `ollama` | `BatchPromptManager` ↔ `ClassifyJobManager` |
+| `ollama` | `BatchPromptManager` |
 | `instagram` | `SyncManager` (covers the creator-queue drain) |
 | `comfy` | `ComfyJobManager` — declared, *not* exclusive with `ollama` |
 
@@ -74,7 +74,7 @@ everything it needs or nothing. Two requests arriving together can no longer
 both observe "free". Current holders: `GET /api/health` → `leases`.
 
 Every run is journalled to `<archive>/_journal/<kind>.jsonl` (append-only,
-rotated) — `GET /api/journal?kind=classify`. Live job status is overwritten by
+rotated) — `GET /api/journal?kind=sync`. Live job status is overwritten by
 the next run, so history has to live somewhere else.
 
 ## Module responsibilities
@@ -90,7 +90,7 @@ the next run, so history has to live somewhere else.
 | `storage.journal` | Append-only JSONL run history per job kind |
 | `storage.dedupe` | Perceptual hashing + near-duplicate grouping |
 | `prompts` | Vision, cache, batch, styles, Mode E |
-| `scraping` | IG session, download, filters, queue, organize, classify |
+| `scraping` | IG session, download, filters, queue, organize |
 | `comfy` | Queue jobs, upload ref image, poll history, save gens |
 
 ## Scale notes

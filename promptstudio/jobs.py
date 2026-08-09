@@ -3,7 +3,7 @@
 Background jobs contend for three things that cannot be shared: the Ollama
 vision model, the Instagram session, and ComfyUI. That contention used to be
 encoded as pairwise `is_running()` checks scattered across modules —
-`classify_job` reaching into `BatchPromptManager`, `handler` re-checking both at
+`BatchPromptManager` and `handler` re-checking each other at
 eight call sites. Two problems with that:
 
 * **It is O(n) per new job type.** Every new manager means editing every other

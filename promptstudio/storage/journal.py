@@ -13,11 +13,11 @@ skip malformed lines rather than failing. That is why this deliberately does
 an append-only log, and O_APPEND writes below the pipe-buffer size do not
 interleave between threads.
 
-    journal = RunJournal.for_kind("classify")
+    journal = RunJournal.for_kind("sync")
     with journal.run(creator="someone", total=42) as run:
-        run.item(rel_path="a.mp4", ok=True, glam=3, ms=1180)
+        run.item(rel_path="a.mp4", ok=True, ms=1180)
         run.event("rate_limit", consecutive=2, backoff_sec=60)
-        run.summary(score_hist={"3": 40, "0": 2})
+        run.summary(downloaded=40, skipped=2)
 """
 
 from __future__ import annotations
