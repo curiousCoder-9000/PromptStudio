@@ -68,9 +68,9 @@ log = get_logger(__name__)
 
 CLASSIFY_PROMPT_VERSION = "v2-skin-exposure"
 CLASSIFY_REEL_PROMPT_VERSION = "v3-reel-frames"
-# v2: sharper 3↔4 boundary. Photo eval on a frozen 120-set showed v1 never
-# predicted tier 4 (17/17 true-4 → 3) and piled ~81% of glam into bucket 2.
-CLASSIFY_FRAME_V4_VERSION = "v4-ordinal-frame-v2"
+# v2: restore tier 4 (bikini/lingerie). v3: stop dumping normal fashion into 3
+# (photo eval: v2 still sent 29/36 true-tier-2 → 3).
+CLASSIFY_FRAME_V4_VERSION = "v4-ordinal-frame-v3"
 CLASSIFY_SHEET_VERSION = "v4-reel-sheet"
 
 # exposure_tier (0-4) -> glam_score (0-3). Tier 3 is the Sexy-filter boundary.
@@ -165,8 +165,9 @@ CLASSIFY_REEL_PROMPT = (
 )
 
 # Single-frame ordinal prompt: cascade confirmation, and photos when opted in.
-# Tuned against photo eval (120 labelled): v1 never emitted tier 4 and pushed
-# true-tier-2 into 3. Decision order below is deliberate — check 4 before 3.
+# Tuned on a frozen 120-photo eval set:
+#   v1 never emitted tier 4; v2 fixed 4 but over-fired 3 on normal fashion.
+# Decision order is deliberate — check 4 before 3; default clothed fashion is 2.
 CLASSIFY_FRAME_V4_PROMPT = (
     "Rate the outfit in this still image for a personal fashion KEEP filter. "
     "Return ONLY valid JSON.\n"
@@ -174,28 +175,33 @@ CLASSIFY_FRAME_V4_PROMPT = (
     "false for title cards, logos, text-only frames, scenery, food, cartoons, or men only.\n"
     '  "exposure_tier": integer 0-4. Decide in this order (stop at first match):\n'
     "    (1) If no woman as main subject → 0.\n"
-    "    (2) If garment is swimwear, bikini, lingerie, sheer/mesh over skin, or near-nude → 4.\n"
-    "    (3) Else if midriff bare, deep cleavage, bare back, mini with upper thigh, or "
-    "bodycon clearly selling the figure → 3.\n"
-    "    (4) Else if some skin (arms/shoulders/collarbone) or stylish fitted daywear "
-    "without the reveals in (3) → 2.\n"
-    "    (5) Else fully covered everyday clothes → 1.\n"
+    "    (2) If garment is swimwear, bikini, lingerie, sheer/mesh over bare skin, or "
+    "near-nude → 4.\n"
+    "    (3) Else if AT LEAST ONE clear reveal is visible — bare midriff (stomach skin "
+    "between top and bottoms), deep cleavage (not just a modest V-neck), fully bare back, "
+    "mini hem at upper thigh, large torso cut-outs — → 3.\n"
+    "    (4) Else if she is clothed in normal or stylish fashion (dress, jeans, top, "
+    "blouse, coat, jumpsuit, etc.) → 2. This is the DEFAULT for Instagram fashion photos.\n"
+    "    (5) Else fully covered modest everyday clothes with almost no skin → 1.\n"
     "Tier definitions:\n"
     + _TIER_ANCHORS
     + "Hard rules (override vibes):\n"
     "  - Bikini / swimsuit / lingerie / sheer lingerie-look = ALWAYS 4. Never call these 3.\n"
-    "  - Glamorous red carpet or tight dress with cleavage/high slit = 3, not 4 "
-    "(unless fabric is sheer or it is actual lingerie).\n"
-    "  - Crop top + jeans with bare stomach = 3, not 2.\n"
-    "  - Bare shoulders or sleeveless top with covered midriff and normal neckline = 2, not 3.\n"
+    "  - Most dresses, jumpsuits, jeans+top, blouses, sweaters = 2 even if glamorous, "
+    "tight, or low-shoulder. Glamour alone is not tier 3.\n"
+    "  - Bare arms, bare shoulders, collarbone, sleeveless, off-shoulder with covered "
+    "midriff and normal neckline = 2, not 3.\n"
+    "  - Only escalate 2→3 when a listed reveal in step (3) is clearly visible. "
+    "If unsure between 2 and 3, choose 2.\n"
+    "  - Crop top that clearly shows the stomach = 3. A short top that still covers "
+    "the waistband = 2.\n"
     "  - Do NOT skip tier 4. The scale has five steps; using only 0–3 is wrong.\n"
     '  "figure_visible": boolean — bust or body shape is clearly discernible\n'
     '  "confidence": number 0.0-1.0 — lower when cropped, dark, or garment class is unclear\n'
     '  "brief_reason": short phrase naming the garment class (e.g. "bikini set", '
     '"crop top + jeans", "crewneck sweater")\n'
     "Judge only clothing and body. Ignore captions, stickers, watermarks and UI chrome. "
-    "Between 2 and 3, require a listed reveal for 3. Between 3 and 4, require an "
-    "undress-class garment for 4."
+    "Between 3 and 4, require an undress-class garment for 4."
 )
 
 
