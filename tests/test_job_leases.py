@@ -140,9 +140,8 @@ def test_repeated_acquire_release_cycles_leave_nothing_held(leases):
 
 
 def test_batch_takes_the_ollama_lease():
-    from promptstudio.prompts import batch as batch_mod
-
     from promptstudio.jobs import LEASES
+    from promptstudio.prompts import batch as batch_mod
 
     LEASES.reset()
     try:

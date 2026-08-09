@@ -115,7 +115,7 @@ def test_posted_sort_orders_by_mtime_post_time():
 
 def test_posted_sort_falls_back_when_mtime_missing():
     index = ArchiveIndex.get()
-    full = _make_photo("sort_e", "no_mtime.jpg", mtime=time.time() - 50)
+    _make_photo("sort_e", "no_mtime.jpg", mtime=time.time() - 50)
     index.upsert_photo("sort_e/no_mtime.jpg")
     with index._lock:
         index._conn.execute(

@@ -32,6 +32,7 @@ from promptstudio.config import (
 from promptstudio.scraping.filters import filter_following_entries, normalize_keywords
 from promptstudio.scraping.queue import FollowingQueue
 
+
 def _load_json(path: str):
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)

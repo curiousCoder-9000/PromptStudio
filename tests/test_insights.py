@@ -5,7 +5,6 @@ from promptstudio.config import GENERATIONS_INDEX_FILE
 from promptstudio.insights import compute_insights
 from promptstudio.prompts.cache import PromptCache
 from promptstudio.prompts.engine import ENGINE_ID
-from promptstudio.storage.db import ArchiveIndex
 
 
 def _prompt(manual=False, history=None, pipeline="v2-structured"):
