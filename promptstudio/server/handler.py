@@ -1431,7 +1431,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             if media_type not in ("video", "photo"):
                 media_type = None
             sort = (query.get("sort", ["name"])[0] or "name").lower()
-            if sort not in ("name", "newest", "oldest"):
+            if sort not in ("name", "newest", "oldest", "posted", "posted_oldest"):
                 sort = "name"
             try:
                 offset = int(query.get("offset", ["0"])[0] or 0)

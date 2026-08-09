@@ -7,6 +7,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -45,6 +46,7 @@ CREATE TABLE IF NOT EXISTS photos (
   filename TEXT NOT NULL,
   taken_at TEXT,
   mtime REAL,
+  added_at REAL,
   favorite INTEGER NOT NULL DEFAULT 0,
   has_prompt INTEGER NOT NULL DEFAULT 0,
   prompt_stale INTEGER NOT NULL DEFAULT 0,
@@ -57,6 +59,9 @@ CREATE INDEX IF NOT EXISTS idx_photos_creator ON photos(creator);
 CREATE INDEX IF NOT EXISTS idx_photos_taken ON photos(taken_at);
 CREATE INDEX IF NOT EXISTS idx_photos_fav ON photos(favorite);
 CREATE INDEX IF NOT EXISTS idx_photos_prompt ON photos(has_prompt);
+-- idx_photos_added is created in _migrate_identity_columns after the
+-- added_at column is ensured (CREATE TABLE IF NOT EXISTS is a no-op on
+-- older DBs that predate the column).
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT
@@ -112,6 +117,10 @@ _IDENTITY_COLUMNS = (
     ("shortcode", "TEXT"),
     # Back-fills every pre-existing row as Instagram, which is what they are.
     ("source", "TEXT NOT NULL DEFAULT 'instagram'"),
+    # Wall-clock (or filesystem birth) when the file entered this archive.
+    # Downloaders often set mtime to the Instagram post date, so mtime cannot
+    # drive "newest downloaded first".
+    ("added_at", "REAL"),
 )
 
 DEFAULT_SOURCE = "instagram"
@@ -185,6 +194,27 @@ def taken_at_for_image(
         return ""
 
 
+def file_added_at(full_path: str) -> float:
+    """When the file appeared on this machine (download/create), not post date.
+
+    Instaloader/gallery-dl commonly stamp ``mtime`` to the remote post time.
+    On Windows ``st_ctime`` is creation time; on some platforms ``st_birthtime``
+    exists. Prefer those over mtime so "newest" means newly archived.
+    """
+    if not full_path:
+        return 0.0
+    try:
+        st = os.stat(full_path)
+    except OSError:
+        return 0.0
+    birth = getattr(st, "st_birthtime", None)
+    if birth:
+        return float(birth)
+    if os.name == "nt":
+        return float(st.st_ctime)
+    return float(st.st_mtime)
+
+
 def prompt_search_blob(entry: Optional[Dict[str, Any]]) -> str:
     if not entry:
         return ""
@@ -233,6 +263,7 @@ class ArchiveIndex:
             self._init_fts()
             self._migrate_identity_columns()
             self._migrate_deleted_posts()
+            self._migrate_added_at()
             self._conn.commit()
 
     def _apply_pragmas(self) -> None:
@@ -472,7 +503,7 @@ class ArchiveIndex:
         self._meta_set(_PROMPTS_IMPORTED_KEY, "1")
 
     def _migrate_identity_columns(self) -> None:
-        """Add post_id/shortcode/source to existing DBs."""
+        """Add post_id/shortcode/source/added_at to existing DBs."""
         cols = {
             row[1]
             for row in self._conn.execute("PRAGMA table_info(photos)").fetchall()
@@ -489,7 +520,39 @@ class ArchiveIndex:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_photos_source ON photos(source)"
         )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photos_added ON photos(added_at)"
+        )
         # Drives "re-score everything the old prompt judged" without a rescan.
+
+    def _migrate_added_at(self) -> None:
+        """Backfill added_at once from filesystem birth/ctime.
+
+        Downloaders rewrite mtime to the post timestamp, so using mtime for the
+        backfill would leave "newest" looking like a post-date sort. Birth/ctime
+        is when the file landed on disk (download time on Windows).
+        """
+        if self._meta_get("added_at_backfilled") == "1":
+            return
+        rows = self._conn.execute(
+            "SELECT rel_path FROM photos "
+            "WHERE added_at IS NULL OR added_at = 0"
+        ).fetchall()
+        for row in rows:
+            rel = row["rel_path"]
+            full = os.path.join(self.base_dir, *rel.split("/"))
+            added = file_added_at(full)
+            if not added:
+                # Last resort: keep a stable number so ORDER BY is defined.
+                try:
+                    added = float(os.path.getmtime(full))
+                except OSError:
+                    added = 0.0
+            self._conn.execute(
+                "UPDATE photos SET added_at = ? WHERE rel_path = ?",
+                (added, rel),
+            )
+        self._meta_set("added_at_backfilled", "1")
 
     def _migrate_deleted_posts(self) -> None:
         """Add deleted_posts.platform and scope the unique indexes by it.
@@ -588,6 +651,17 @@ class ArchiveIndex:
         favs = FavoritesStore().load()
         engine_id = ENGINE_ID
 
+        # Preserve when each path was first archived across rebuilds so
+        # "newest" does not reshuffle the whole library after a rescan.
+        with self._lock:
+            prior_added = {
+                row["rel_path"]: row["added_at"]
+                for row in self._conn.execute(
+                    "SELECT rel_path, added_at FROM photos "
+                    "WHERE added_at IS NOT NULL AND added_at > 0"
+                ).fetchall()
+            }
+
         rows: List[Tuple] = []
         if os.path.isdir(self.base_dir):
             for creator in sorted(os.listdir(self.base_dir)):
@@ -616,6 +690,7 @@ class ArchiveIndex:
                     has_p, stale, blob = prompt_flags(entry, engine_id)
                     fav = 1 if rel in favs else 0
                     post_id, shortcode = self._identity_from_file(full, side)
+                    added = prior_added.get(rel) or file_added_at(full) or mtime
                     rows.append(
                         (
                             rel,
@@ -623,6 +698,7 @@ class ArchiveIndex:
                             filename,
                             taken,
                             mtime,
+                            added,
                             fav,
                             has_p,
                             stale,
@@ -637,10 +713,10 @@ class ArchiveIndex:
             self._conn.execute("DELETE FROM photos")
             self._conn.executemany(
                 "INSERT INTO photos("
-                "rel_path, creator, filename, taken_at, mtime, "
+                "rel_path, creator, filename, taken_at, mtime, added_at, "
                 "favorite, has_prompt, prompt_stale, prompt_search, "
                 "post_id, shortcode, source"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
             self._meta_set(
@@ -692,7 +768,7 @@ class ArchiveIndex:
         with self._lock:
             existing = self._conn.execute(
                 "SELECT favorite, has_prompt, prompt_stale, prompt_search, "
-                "post_id, shortcode, source FROM photos WHERE rel_path = ?",
+                "post_id, shortcode, source, added_at FROM photos WHERE rel_path = ?",
                 (rel,),
             ).fetchone()
             fav = favorite if favorite is not None else (int(existing["favorite"]) if existing else 0)
@@ -710,15 +786,23 @@ class ArchiveIndex:
             if not source:
                 # side_meta may be None here; read_sidecar loads on demand.
                 source = self._source_from_file(full, side_meta)
+            # New downloads get "now" so they sort to the top of newest. Existing
+            # rows keep their first-seen time so favorite toggles / prompt
+            # updates do not reshuffle the gallery.
+            if existing is not None and existing["added_at"]:
+                added_at = float(existing["added_at"])
+            else:
+                added_at = time.time()
             self._conn.execute(
                 "INSERT INTO photos("
-                "rel_path, creator, filename, taken_at, mtime, "
+                "rel_path, creator, filename, taken_at, mtime, added_at, "
                 "favorite, has_prompt, prompt_stale, prompt_search, "
                 "post_id, shortcode, source"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(rel_path) DO UPDATE SET "
                 "creator=excluded.creator, filename=excluded.filename, "
                 "taken_at=excluded.taken_at, mtime=excluded.mtime, "
+                "added_at=COALESCE(photos.added_at, excluded.added_at), "
                 "favorite=excluded.favorite, has_prompt=excluded.has_prompt, "
                 "prompt_stale=excluded.prompt_stale, prompt_search=excluded.prompt_search, "
                 "post_id=COALESCE(excluded.post_id, photos.post_id), "
@@ -730,6 +814,7 @@ class ArchiveIndex:
                     filename,
                     taken_at,
                     mtime,
+                    added_at,
                     fav,
                     hp,
                     st,
@@ -1161,10 +1246,26 @@ class ArchiveIndex:
 
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
         sort = (sort or "name").lower()
+        # newest/oldest = archive ingest time (download). Downloaders stamp
+        # mtime to the remote post date, so mtime alone cannot mean "just got".
+        # posted = Instagram/post chronology via mtime, falling back to added_at
+        # (file birth/ctime at index time) when mtime is missing or zero.
         if sort == "newest":
-            order = "ORDER BY mtime DESC, filename ASC"
+            order = "ORDER BY IFNULL(added_at, mtime) DESC, filename ASC"
         elif sort == "oldest":
-            order = "ORDER BY mtime ASC, filename ASC"
+            order = "ORDER BY IFNULL(added_at, mtime) ASC, filename ASC"
+        elif sort == "posted":
+            order = (
+                "ORDER BY CASE "
+                "WHEN mtime IS NOT NULL AND mtime > 0 THEN mtime "
+                "ELSE IFNULL(added_at, 0) END DESC, filename ASC"
+            )
+        elif sort == "posted_oldest":
+            order = (
+                "ORDER BY CASE "
+                "WHEN mtime IS NOT NULL AND mtime > 0 THEN mtime "
+                "ELSE IFNULL(added_at, 0) END ASC, filename ASC"
+            )
         else:
             order = "ORDER BY creator ASC, filename ASC"
 

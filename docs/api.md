@@ -244,7 +244,10 @@ Reads local `following_list.json` (no live Instagram call).
 
 ### `GET /api/photos`
 
-Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `sort` (`name` | `newest` | `oldest`), `offset` (default 0), `limit` (default/max from config, typically 300).
+Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `sort` (`name` | `newest` | `oldest` | `posted` | `posted_oldest`), `offset` (default 0), `limit` (default/max from config, typically 300).
+
+- `newest` / `oldest` — archive ingest time (`added_at`; when the file was downloaded/indexed).
+- `posted` / `posted_oldest` — remote post time (`mtime`, which downloaders stamp to the post date); falls back to `added_at` when `mtime` is missing or zero.
 
 ```json
 {
