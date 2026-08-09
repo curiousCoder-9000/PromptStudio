@@ -82,8 +82,6 @@ _AUTH_PHRASES = (
     "requires authentication",
 )
 _RATE_PHRASES = (
-    "429",
-    " 429 ",
     "too many requests",
     "rate limit",
     "rate-limit",
