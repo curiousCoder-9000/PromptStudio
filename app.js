@@ -5308,13 +5308,17 @@ async function pollSyncStatus() {
                 elements.syncProgressFill.style.background = 'var(--accent-red)';
             } else if (data.result) {
                 const r = data.result;
+                const isNewResult = state.lastSyncFinishedAt !== data.finished_at;
+
                 if (r.aborted) {
                     elements.syncStatusText.textContent =
                         `Aborted — ${r.abort_reason || 'stopped for safety'} ` +
                         `(${r.downloaded || 0} new, ${r.accounts_processed || 0} accounts)`;
                     elements.syncProgressFill.style.width = '100%';
                     elements.syncProgressFill.style.background = 'var(--accent-red)';
-                    showToast(r.abort_reason || 'Following sync aborted', 4000);
+                    if (isNewResult) {
+                        showToast(r.abort_reason || 'Following sync aborted', 4000);
+                    }
                 } else {
                     const qs = r.queue_summary;
                     const queueBit = qs
@@ -5328,7 +5332,11 @@ async function pollSyncStatus() {
                         queueBit + stopBit;
                     elements.syncProgressFill.style.width = '100%';
                 }
-                await initApp();
+                
+                if (isNewResult) {
+                    state.lastSyncFinishedAt = data.finished_at;
+                    await initApp();
+                }
             } else {
                 elements.syncStatusText.textContent = 'Idle';
                 elements.syncProgressFill.style.width = '0%';
