@@ -675,3 +675,51 @@ def test_retries_are_bounded_and_surface_the_error(monkeypatch, tmp_path):
     data = oc._ollama_vision_json(str(photo), prompt="x")
     assert attempts["n"] == oc.CLASSIFY_RETRIES + 1
     assert "ollama down" in data["_error"]
+
+
+# ── v7a: the 2/3 tiebreak points up ──────────────────────────────────
+#
+# Stage A of docs/plan_photo_ordinal_holdout_v7.md is entirely prompt text, so
+# the prompt text is what there is to test. The specific risk is someone
+# reinstating v3's downward tiebreak, which cost 27 of 43 true tier-3s on the
+# round-2 holdout — 27 photos the Sexy filter silently never showed.
+
+
+def test_the_two_three_tiebreak_leans_up():
+    prompt = oc.CLASSIFY_FRAME_V4_PROMPT
+    assert "If unsure between 2 and 3, choose 3." in prompt
+    assert "choose 2" not in prompt, "v3's downward tiebreak must stay gone"
+
+
+def test_tier_two_is_no_longer_advertised_as_the_default():
+    assert "DEFAULT" not in oc.CLASSIFY_FRAME_V4_PROMPT
+
+
+def test_short_shorts_are_a_named_reveal():
+    """Present in the gold tier-3 set, absent from the v6 reveal list."""
+    prompt = oc.CLASSIFY_FRAME_V4_PROMPT
+    assert "short shorts" in prompt
+    assert "shortalls" in prompt
+
+
+def test_the_gym_carve_out_survives_the_upward_lean():
+    """41/41 true tier-2s were correct at v6; leaning up endangers exactly these."""
+    prompt = oc.CLASSIFY_FRAME_V4_PROMPT
+    assert "FULL-LENGTH leggings" in prompt
+    assert "no other reveal = 2" in prompt
+
+
+def test_the_version_records_the_ablation():
+    assert oc.CLASSIFY_FRAME_V4_VERSION == "v4-ordinal-frame-v7a"
+
+
+def test_the_reel_sheet_vocabulary_is_untouched():
+    """Reels are a non-goal this pass and have their own eval; do not drag them in.
+
+    The shared `_TIER_ANCHORS` block is what both prompts read, so the v7a rules
+    must live only in the single-frame prompt.
+    """
+    sheet = oc.reel_sheet_prompt(9)
+    assert "choose 3" not in sheet, "the sheet keeps its own 'choose the LOWER tier'"
+    assert "choose the LOWER tier" in sheet
+    assert "short shorts" not in oc._TIER_ANCHORS

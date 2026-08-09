@@ -38,16 +38,24 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from promptstudio.config import CLASSIFY_PHOTO_ORDINAL, MODEL_NAME, SAVED_DIR
+from promptstudio.config import (
+    CLASSIFY_PHOTO_ORDINAL,
+    GLAM_SEXY_MIN,
+    MODEL_NAME,
+    SAVED_DIR,
+)
 from promptstudio.evalset import (
     EVAL_DIR,
     KINDS,
     SHEETS_DIR,
+    SPLITS,
     EvalItem,
+    assign_splits,
     choose_sample,
     compute_metrics,
     eval_status,
     file_url,
+    filter_split,
     labels_file,
     list_results,
     load_labels,
@@ -60,6 +68,7 @@ from promptstudio.evalset import (
     save_labels,
     save_results,
     score_item,
+    split_histogram,
     stratify,
 )
 from promptstudio.storage.db import ArchiveIndex
@@ -100,6 +109,9 @@ def cmd_status(args) -> None:
         print(f"  labelled: {st['labelled']}/{st['sample_size']}  remaining {st['remaining']}")
         if st["true_tiers"]:
             print("  true tiers: " + ", ".join(f"{k}={v}" for k, v in st["true_tiers"].items()))
+        for half, hist in (st["splits"] or {}).items():
+            counts = ", ".join(f"T{t}={n}" for t, n in hist.items())
+            print(f"  {half:<10} n={sum(hist.values()):<4} {counts}")
         page = st["label_page"]
         if os.path.isfile(page):
             print(f"  label UI: {file_url(page)}")
@@ -229,16 +241,64 @@ def cmd_label(args) -> None:
         _open_page(page)
 
 
+def cmd_split(args) -> None:
+    """Assign a dev/test half to every labelled item. Idempotent by default."""
+    kind = args.kind
+    path = labels_file(kind)
+    items = load_labels(path)
+    labelled = [i for i in items if i.is_labelled()]
+    if not labelled:
+        print(f"Nothing labelled for {kind} yet — run `sample --kind {kind}` first.")
+        sys.exit(1)
+
+    if args.reassign:
+        already = sum(1 for i in labelled if i.split)
+        if already:
+            print(
+                f"--reassign re-draws all {already} existing assignments. Any `test`\n"
+                "number you have already looked at becomes a dev number, because you\n"
+                "tuned against items that are about to move into test."
+            )
+            if input("Type 'reassign' to confirm: ").strip() != "reassign":
+                print("Aborted; nothing written.")
+                return
+
+    changed = assign_splits(
+        items, seed=args.seed, test_frac=args.test_frac, reassign=args.reassign
+    )
+    save_labels(items, path)
+    print(f"{changed} item(s) assigned (seed {args.seed}, test_frac {args.test_frac})")
+    for half, hist in split_histogram(items).items():
+        counts = ", ".join(f"T{t}={n}" for t, n in hist.items())
+        print(f"  {half:<10} n={sum(hist.values()):<4} {counts}")
+    print(
+        "\nTune on dev only:\n"
+        f"  py scripts/eval_reel_classifier.py run --kind {kind} --name <cand> --split dev\n"
+        "Score test ONCE, on the candidate you intend to ship. If you look at test\n"
+        "and then tune, it is a dev set now and you need a fresh sample."
+    )
+
+
 def cmd_run(args) -> None:
     from promptstudio.config import CLASSIFY_PHOTO_ORDINAL as env_ordinal
     from promptstudio.scraping.outfit_classifier import ollama_reachable
 
     kind = args.kind
-    labelled = [i for i in load_labels(labels_file(kind)) if i.is_labelled()]
-    if not labelled:
+    all_labelled = [i for i in load_labels(labels_file(kind)) if i.is_labelled()]
+    labelled = filter_split(all_labelled, args.split)
+    if not all_labelled:
         print(f"Nothing labelled for {kind} yet.")
         print(f"  py scripts/eval_reel_classifier.py sample --kind {kind} --open")
         sys.exit(1)
+    if not labelled:
+        print(
+            f"No labelled {kind}s in split '{args.split}' "
+            f"({len(all_labelled)} labelled overall)."
+        )
+        print(f"  py scripts/eval_reel_classifier.py split --kind {kind}")
+        sys.exit(1)
+    if args.split in SPLITS:
+        print(f"split: {args.split} ({len(labelled)}/{len(all_labelled)} labelled items)")
     if not ollama_reachable():
         print(f"Ollama not reachable (need {MODEL_NAME}).")
         sys.exit(1)
@@ -279,11 +339,14 @@ def cmd_run(args) -> None:
             "kind": kind,
             "photo_ordinal": ordinal_flag if kind == "photo" else None,
             "vocab": vocab,
+            # Recorded so a dev-only run can never be mistaken for a full-set
+            # number six weeks later when only the metrics survive.
+            "split": args.split or "all",
         },
         kind=kind,
     )
     print(f"Wrote {path}")
-    _print_report(args.name, kind=kind)
+    _print_report(args.name, kind=kind, split=args.split)
 
 
 def _fmt(name, value, unit=""):
@@ -292,11 +355,20 @@ def _fmt(name, value, unit=""):
     return f"{value}{unit}{mark}"
 
 
-def _print_report(name: str, against: str = "", kind: str = "reel") -> None:
-    labels = load_labels(labels_file(kind))
+def _print_report(name: str, against: str = "", kind: str = "reel", split: str = "") -> None:
+    all_labels = load_labels(labels_file(kind))
+    labels = filter_split(all_labels, split)
     results, meta = load_results(name, kind)
     if not results:
         print(f"No {kind} results '{name}'. Have: {', '.join(list_results(kind)) or 'none'}")
+        return
+    # Without this, an unassigned split reports every metric as 0.0 FAIL, which
+    # reads as "the classifier collapsed" rather than "you filtered to nothing".
+    if not labels and any(i.is_labelled() for i in all_labels):
+        print(
+            f"No labelled {kind}s in split '{split}'. Assign halves first:\n"
+            f"  py scripts/eval_reel_classifier.py split --kind {kind}"
+        )
         return
     m = compute_metrics(labels, results)
 
@@ -312,9 +384,25 @@ def _print_report(name: str, against: str = "", kind: str = "reel") -> None:
     print(f"model {meta.get('model', '?')} · prompts {', '.join(meta.get('prompt_versions') or []) or '?'}")
     if meta.get("vocab"):
         print(f"vocab {meta.get('vocab')}")
+    ran_on = meta.get("split") or "all"
+    scored_on = split or "all"
+    print(f"scored on: {scored_on}   (run recorded split: {ran_on})")
+    if scored_on != ran_on and ran_on != "all":
+        print(
+            f"  ! this run only scored the '{ran_on}' half — metrics on "
+            f"'{scored_on}' cover just the overlap"
+        )
     print(f"{m.scored} scored of {m.labelled} labelled\n")
 
-    rows = [("glam_accuracy", m.glam_accuracy, "  (0-3 axis, both vocabularies)")]
+    # The product decision first: the Sexy filter asks exactly one binary
+    # question, `glam_score >= GLAM_SEXY_MIN`, and these are it. glam_accuracy
+    # is 4-way exact match, which no surface in the app asks for.
+    rows = [
+        ("keep_f1", m.keep_f1, f"  <- HEADLINE (filter @ glam>={GLAM_SEXY_MIN})"),
+        ("keep_recall", m.keep_recall, f"  ({m.keep_true} true keeps in set)"),
+        ("keep_precision", m.keep_precision, f"  ({m.keep_pred} predicted keeps)"),
+        ("glam_accuracy", m.glam_accuracy, "  (0-3 exact; secondary sanity check)"),
+    ]
     # Reveal only means something for video; a photo run would show a
     # meaningless 0.0 FAIL.
     if m.reveal_n:
@@ -325,7 +413,7 @@ def _print_report(name: str, against: str = "", kind: str = "reel") -> None:
             ("within_one", m.within_one, ""),
         ]
     rows += [
-        ("top_score_share", m.top_score_share, ""),
+        ("top_score_share", m.top_score_share, "  (weak: a perfect run is ~0.36)"),
         ("unscored_rate", m.unscored_rate, ""),
         ("median_vision_calls", m.median_vision_calls, ""),
     ]
@@ -354,18 +442,52 @@ def _print_report(name: str, against: str = "", kind: str = "reel") -> None:
     if m.confusion:
         print(f"  true->predicted ({m.confusion_axis}): {m.confusion}")
 
+    if m.per_tier:
+        axis = m.confusion_axis
+        # Only diff against the baseline when both ran on the same axis. A
+        # legacy-boolean baseline buckets by glam, so "tier 3 precision was X"
+        # would be quoting the glam-3 number — the same apples-to-oranges trap
+        # the tier metrics above already guard against.
+        comparable = base is not None and base.confusion_axis == axis
+        print(f"\n  per-{axis}:  {'':<4}{'prec':>7}{'recall':>8}{'n_true':>8}{'n_pred':>8}")
+        if base is not None and not comparable:
+            print(f"    (baseline scored on the {base.confusion_axis} axis — not comparable)")
+        for cls, s in m.per_tier.items():
+            base_s = (base.per_tier.get(cls) if comparable else None) or {}
+            was = f"   (prec was {base_s['precision']})" if base_s else ""
+            print(
+                f"    {axis[0].upper()}{cls:<8}{s['precision']:>7}{s['recall']:>8}"
+                f"{int(s['n_true']):>8}{int(s['n_pred']):>8}{was}"
+            )
+
     failures = [k for k, v, _ in rows if meets_target(k, v) is False]
     print("\n" + ("All targets met." if not failures else "Missing targets: " + ", ".join(failures)))
 
     if kind == "photo" and against:
+        # plan_photo_ordinal_holdout_v7.md §4.1. The old rule (glam_accuracy >=
+        # legacy AND top_score_share drops) is satisfiable by a classifier that
+        # is worse at the only question the product asks, so it no longer
+        # decides. Both are printed; only the first one is the gate.
         print(
-            "\nDecision rule: flip CLASSIFY_PHOTO_ORDINAL=1 only if ordinal "
-            "glam_accuracy >= legacy AND top_score_share drops."
+            f"\nShip rule: keep_f1 improves over the baseline AND keep_precision "
+            f">= 0.90 AND\n  true-tier-2 recall >= 0.85 (see per-tier above) — "
+            f"confirmed on the held-out half."
+        )
+        if base is not None:
+            better = m.keep_f1 > base.keep_f1
+            print(
+                f"  keep_f1 {m.keep_f1} vs {base.keep_f1} "
+                f"({'improves' if better else 'does NOT improve'})"
+                f" · keep_precision {m.keep_precision}"
+            )
+        print(
+            "  (legacy rule, for continuity only: glam_accuracy >= baseline "
+            "AND top_score_share drops)"
         )
 
 
 def cmd_report(args) -> None:
-    _print_report(args.name, args.against, kind=args.kind)
+    _print_report(args.name, args.against, kind=args.kind, split=args.split)
 
 
 def cmd_view(args) -> None:
@@ -424,8 +546,30 @@ def main() -> None:
     add_kind(lab)
     lab.set_defaults(func=cmd_label)
 
+    def add_split(parser):
+        parser.add_argument(
+            "--split",
+            choices=(*SPLITS, "all"),
+            default="all",
+            help="score one half only (default: all). Tune on dev; touch test once.",
+        )
+
+    sp = sub.add_parser("split", help="assign a dev/test half to each labelled item")
+    sp.add_argument("--seed", type=int, default=20260811, help="same seed = same split")
+    sp.add_argument(
+        "--test-frac", dest="test_frac", type=float, default=0.5,
+        help="fraction held out (default 0.5)",
+    )
+    sp.add_argument(
+        "--reassign", action="store_true",
+        help="re-draw existing assignments (invalidates any test number you have seen)",
+    )
+    add_kind(sp, default="photo")
+    sp.set_defaults(func=cmd_split)
+
     r = sub.add_parser("run", help="score the labelled set (needs Ollama)")
     r.add_argument("--name", default="run", help="name this run, e.g. baseline")
+    add_split(r)
     r.add_argument(
         "--ordinal", action="store_true",
         help="photos only: force v4 exposure_tier vocabulary",
@@ -440,6 +584,7 @@ def main() -> None:
     rep = sub.add_parser("report", help="metrics for a run")
     rep.add_argument("--name", default="run")
     rep.add_argument("--against", default="", help="baseline run to diff against")
+    add_split(rep)
     add_kind(rep)
     rep.set_defaults(func=cmd_report)
 

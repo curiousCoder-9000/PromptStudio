@@ -27,6 +27,73 @@ Do **not** rewrite old sections; correct mistakes with a short “Errata” note
 
 ---
 
+## 2026-08-09 — Harness: keep@filter metrics + dev/test split · Stage A prompt (v7a)
+
+### Context
+
+- **code:** `promptstudio/evalset.py`, `scripts/eval_reel_classifier.py`,
+  `promptstudio/scraping/outfit_classifier.py`
+- **decision taken:** **recall-first** (see plan §7). v6 held keep precision 1.000
+  at recall 0.576; scrolling past a few normal-fashion photos beats never seeing
+  28 wanted ones. Targets set accordingly: recall ≥ 0.85 with precision as a
+  **floor** of 0.90, not a maximum.
+- **tests:** 616 pass. **No eval run yet** — this machine has no archive, no
+  labels and no Ollama; both must run on the Windows box.
+
+### Harness
+
+- `keep_precision` / `keep_recall` / `keep_f1` at `GLAM_SEXY_MIN`, now the first
+  three lines of the report, `keep_f1` flagged HEADLINE. Defined for both
+  vocabularies.
+- Per-class precision **and** recall table. Suppressed when the baseline ran on a
+  different axis.
+- `split` subcommand; `--split dev|test|all` on `run` / `report`. Stratified,
+  seeded, persisted on the label, idempotent; an import cannot move an item
+  between halves.
+- `TARGETS` += `keep_f1` ≥ 0.80, `keep_recall` ≥ 0.85, `keep_precision` ≥ 0.90.
+  `top_score_share` retained but annotated weak (perfect run = 0.358 here).
+- Arithmetic verified against the v6 matrix below — reproduces 0.600 / 0.925 /
+  0.600 / 0.658 exactly, and is pinned by a test so this diary and the code
+  cannot drift.
+
+### Stage A — `v4-ordinal-frame-v6` → `v4-ordinal-frame-v7a`
+
+Prompt-only. Undoes v3's downward 2/3 tiebreak, which was tuned for a *round-1*
+`top_score_share` problem and cost 27 of 43 true tier-3s on round-2:
+
+1. dropped "This is the DEFAULT for Instagram fashion photos"
+2. "if unsure between 2 and 3, choose **2**" → "choose **3**"; "only escalate
+   when" → "escalate whenever"
+3. short shorts / hot pants / tight shortalls added to the step-(3) reveal list
+4. **new guard:** "sports bra with FULL-LENGTH leggings and no other reveal = 2",
+   protecting the 41/41 true-T2s that step 2 puts at risk
+5. `_TIER_ANCHORS` untouched, so the reel contact-sheet vocabulary is unchanged
+
+**Blast radius:** `CLASSIFY_FRAME_V4_PROMPT` also serves the reel confirm cascade
+and sheet-fallback frame, so reels shift slightly on those two paths. Accepted;
+reels need their own run before any reel claim.
+
+### Decision
+
+- Harness and Stage A are committed but **unmeasured**. No claim is made about
+  v7a's quality until it runs.
+- **Next, on the archive machine:**
+  1. `label --kind photo --import "…\labels-photo (1).jsonl"`
+  2. `split --kind photo` → expect ~59 dev / 61 test
+  3. `report --kind photo --name holdout-ordinal --against holdout-legacy` —
+     re-scores the JSONs already on disk with the new metrics, **zero VLM calls**,
+     and gives the real legacy keep numbers that §2.5 could only bound
+  4. `run --kind photo --name v7a-dev --ordinal --split dev` (~60 calls)
+  5. `report --kind photo --name v7a-dev --against holdout-ordinal --split dev`
+  6. Append the result here. **Watch true-tier-2 recall** — it is the cost side of
+     the same knob and the most likely way v7a loses more than it gains.
+
+### Artifacts
+
+- No new eval artifacts (nothing has been run)
+
+---
+
 ## 2026-08-09 — Re-score of v6 at the product threshold (no new model run)
 
 ### Context

@@ -38,7 +38,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
-from promptstudio.config import SAVED_DIR
+from promptstudio.config import GLAM_SEXY_MIN, SAVED_DIR
 from promptstudio.logging_setup import get_logger
 from promptstudio.storage.atomic import atomic_write_json, atomic_write_text
 
@@ -86,6 +86,15 @@ class EvalItem:
     stratum: str = ""
     # Pipeline's opinion at sampling time, for the "before" column.
     prior_glam: int = -1
+    # dev | test | "" — which half of the set this item belongs to.
+    #
+    # Persisted with the label rather than recomputed, and never reassigned once
+    # set. A hash-of-path split would be simpler but would silently move items
+    # between halves whenever a label is edited, and editing labels is normal
+    # here: the round-2 gold file is a re-export after 17 tier edits. An item
+    # drifting from dev into test after being tuned against is exactly the
+    # contamination the split exists to prevent.
+    split: str = ""
 
     # ── human labels ──
     true_exposure: Optional[int] = None  # 0-4
@@ -165,6 +174,10 @@ def merge_labels(
             current.note = fresh.note or current.note
         if fresh.sheet:
             current.sheet = fresh.sheet
+        # An existing split always wins: a re-import must not be able to move an
+        # item from dev to test. Adopted only to fill a blank.
+        if fresh.split and not current.split:
+            current.split = fresh.split
     return sorted(by_path.values(), key=lambda i: i.rel_path)
 
 
@@ -244,6 +257,82 @@ def choose_sample(
     return picked
 
 
+# ── dev / test split ─────────────────────────────────────────────────
+
+SPLITS = ("dev", "test")
+
+
+def assign_splits(
+    items: Sequence[EvalItem],
+    *,
+    seed: int = 20260811,
+    test_frac: float = 0.5,
+    reassign: bool = False,
+) -> int:
+    """Give every labelled item a `dev` or `test` half. Returns how many changed.
+
+    Why this exists: round-1 tuned four prompt versions against the set it then
+    declared victory on ("ship rule PASS on this set"), and v6 did not hold up on
+    a fresh seed. Tuning and judging on the same 120 photos cannot detect that.
+
+    Stratified by `true_exposure`, because the tiers under test are the rare ones
+    — T4 is n=23 and T0 is n=11 in the round-2 gold file, so an unstratified coin
+    flip can hand one half most of a class and make the comparison meaningless.
+
+    Idempotent by default: an item that already has a split keeps it, so this can
+    be re-run after importing more labels and only the new items get assigned.
+    `reassign=True` re-draws everything and invalidates any prior test result.
+    """
+    if not 0.0 < test_frac < 1.0:
+        raise ValueError(f"test_frac must be between 0 and 1, got {test_frac}")
+
+    targets = [i for i in items if i.is_labelled() and (reassign or not i.split)]
+    if not targets:
+        return 0
+
+    by_tier: Dict[int, List[EvalItem]] = {}
+    for item in targets:
+        by_tier.setdefault(int(item.true_exposure or 0), []).append(item)
+
+    rng = random.Random(seed)
+    changed = 0
+    for tier in sorted(by_tier):
+        bucket = sorted(by_tier[tier], key=lambda i: i.rel_path)
+        rng.shuffle(bucket)
+        # round() not int(): with a 2-item tier (T1 in the gold file is n=2),
+        # truncation would send both to dev and leave test with none of that
+        # class at all.
+        n_test = round(len(bucket) * test_frac)
+        for n, item in enumerate(bucket):
+            fresh = "test" if n < n_test else "dev"
+            if item.split != fresh:
+                changed += 1
+            item.split = fresh
+    return changed
+
+
+def filter_split(items: Sequence[EvalItem], split: str = "") -> List[EvalItem]:
+    """Narrow a label set to one half. Empty/"all" means no filtering."""
+    if not split or split == "all":
+        return list(items)
+    if split not in SPLITS:
+        raise ValueError(f"split must be one of {SPLITS + ('all',)}, got {split!r}")
+    return [i for i in items if i.split == split]
+
+
+def split_histogram(items: Sequence[EvalItem]) -> Dict[str, Dict[int, int]]:
+    """Per-half tier counts — the thing to eyeball before trusting a split."""
+    out: Dict[str, Dict[int, int]] = {}
+    for item in items:
+        if not item.is_labelled():
+            continue
+        half = item.split or "unassigned"
+        out.setdefault(half, {})
+        tier = int(item.true_exposure or 0)
+        out[half][tier] = out[half].get(tier, 0) + 1
+    return {k: dict(sorted(v.items())) for k, v in sorted(out.items())}
+
+
 # ── metrics ──────────────────────────────────────────────────────────
 
 
@@ -279,8 +368,24 @@ class Metrics:
     reveal_recall: float = 0.0
     reveal_n: int = 0
     top_score_share: float = 0.0
+    # ── the product decision ──
+    # The gallery Sexy filter is `glam_score >= GLAM_SEXY_MIN`, one binary
+    # question. `glam_accuracy` is 4-way exact match and nothing in the app asks
+    # it: it charges full price for a tier-4 read of a tier-3 photo (both pass
+    # the filter identically) and none for a tier-0 read of a tier-1 (both fail
+    # it identically). These three are what the filter actually expresses, and
+    # they are defined for *both* vocabularies because both produce a glam score.
+    keep_precision: float = 0.0
+    keep_recall: float = 0.0
+    keep_f1: float = 0.0
+    keep_true: int = 0  # labelled keeps in the set — the recall denominator
+    keep_pred: int = 0  # predicted keeps — the precision denominator
     confusion_axis: str = "glam"
     score_hist: Dict[str, int] = field(default_factory=dict)
+    # tier -> {"precision", "recall", "n_true", "n_pred"}. Recall alone hid two
+    # things worth seeing on v6: tier 2 was 41/41 recall but 41/79 precision (it
+    # was the dumping ground), and tier 4 was 22/23 recall at 22/32 precision.
+    per_tier: Dict[str, Dict[str, float]] = field(default_factory=dict)
     unscored_rate: float = 0.0
     median_vision_calls: float = 0.0
     median_ms: float = 0.0
@@ -291,11 +396,23 @@ class Metrics:
         return asdict(self)
 
 
-# Design doc §5. Kept here so `report` and the doc cannot drift apart.
+# Design doc §5 and plan_photo_ordinal_holdout_v7.md §4.1. Kept here so `report`
+# and the docs cannot drift apart.
 TARGETS = {
     "reveal_recall": (">=", 0.85),
     "exact_accuracy": (">=", 0.75),
     "within_one": (">=", 0.95),
+    # Recall-first, chosen deliberately: v6 scored keep precision 1.000 at recall
+    # 0.576, i.e. it never showed a wrong photo and never showed 42% of the
+    # wanted ones. Scrolling past the occasional normal-fashion photo is cheaper
+    # than never seeing 28 you asked for, so recall carries the higher bar and
+    # precision gets a floor rather than a maximum.
+    "keep_f1": (">=", 0.80),
+    "keep_recall": (">=", 0.85),
+    "keep_precision": (">=", 0.90),
+    # Weak by construction — keep it as a distribution smell test, not a quality
+    # bar. A *perfect* classifier on the round-2 gold distribution scores 0.358,
+    # so passing says little; a value near 1.0 still reliably means collapse.
     "top_score_share": ("<=", 0.60),
     "unscored_rate": ("<=", 0.02),
     "median_vision_calls": ("<=", 2.0),
@@ -356,11 +473,46 @@ def compute_metrics(
             hit = sum(1 for i, r in reveals if r.predicted_tier >= i.true_exposure)
             m.reveal_recall = round(hit / len(reveals), 4)
 
+        # The product decision: does this land in the Sexy filter or not?
+        tp = sum(
+            1 for i, r in ok_pairs
+            if r.glam_score >= GLAM_SEXY_MIN and i.true_glam() >= GLAM_SEXY_MIN
+        )
+        m.keep_pred = sum(1 for _, r in ok_pairs if r.glam_score >= GLAM_SEXY_MIN)
+        m.keep_true = sum(1 for i, _ in ok_pairs if i.true_glam() >= GLAM_SEXY_MIN)
+        # Precision over an empty prediction set is undefined, not zero. A run
+        # that predicts no keeps at all deserves recall 0.0 — it missed
+        # everything — but reporting precision 0.0 would read as "everything it
+        # kept was wrong" when it kept nothing.
+        m.keep_precision = round(tp / m.keep_pred, 4) if m.keep_pred else 0.0
+        m.keep_recall = round(tp / m.keep_true, 4) if m.keep_true else 0.0
+        denom = m.keep_pred + m.keep_true
+        m.keep_f1 = round(2 * tp / denom, 4) if denom else 0.0
+
         hist: Dict[str, int] = {}
         for _, r in ok_pairs:
             hist[str(r.glam_score)] = hist.get(str(r.glam_score), 0) + 1
         m.score_hist = dict(sorted(hist.items()))
         m.top_score_share = round(max(hist.values()) / len(ok_pairs), 4)
+
+        # Per-tier precision as well as recall, on whichever axis the run
+        # supports — tier when it produced one, glam otherwise, matching the
+        # confusion matrix below so the two can be read together.
+        if tier_pairs:
+            axis = [(int(i.true_exposure or 0), r.predicted_tier) for i, r in tier_pairs]
+        else:
+            axis = [(i.true_glam(), r.glam_score) for i, r in ok_pairs]
+        classes = sorted({t for t, _ in axis} | {p for _, p in axis})
+        for cls in classes:
+            n_true = sum(1 for t, _ in axis if t == cls)
+            n_pred = sum(1 for _, p in axis if p == cls)
+            hit = sum(1 for t, p in axis if t == cls and p == cls)
+            m.per_tier[str(cls)] = {
+                "precision": round(hit / n_pred, 4) if n_pred else 0.0,
+                "recall": round(hit / n_true, 4) if n_true else 0.0,
+                "n_true": n_true,
+                "n_pred": n_pred,
+            }
 
         # Tier when the run produced one — 0-4 is finer grained and directly
         # actionable for prompt tuning. Glam otherwise, so a legacy run still
@@ -485,6 +637,7 @@ def eval_status(kind: str = "reel") -> Dict[str, Any]:
         "labelled": len(labelled),
         "remaining": max(0, len(items) - len(labelled)),
         "true_tiers": dict(sorted(tier_hist.items(), key=lambda kv: int(kv[0]))),
+        "splits": split_histogram(items),
         "label_page": os.path.join(EVAL_DIR, f"label-{kind}.html"),
         "results": list_results(kind),
     }

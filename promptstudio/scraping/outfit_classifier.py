@@ -73,7 +73,13 @@ CLASSIFY_REEL_PROMPT_VERSION = "v3-reel-frames"
 # v4: any man present → tier 0 (discard couples/groups with men, not only men-only).
 # v5: unusable quality (blur / heavy distortion / pixelation) → tier 0.
 # v6: poster-like / flyer / graphic promo layouts → tier 0.
-CLASSIFY_FRAME_V4_VERSION = "v4-ordinal-frame-v6"
+# v7a: undo v3's downward tiebreak at the 2/3 boundary. v3 added "this is the
+#   DEFAULT" and "if unsure between 2 and 3, choose 2" to fix a *round-1*
+#   top_score_share problem; on the round-2 holdout they cost 27 of 43 true
+#   tier-3s, which is 27 photos the Sexy filter never shows. The filter's whole
+#   error budget was recall (precision 1.000, recall 0.576), so the tiebreak now
+#   points up. See docs/plan_photo_ordinal_holdout_v7.md §3.0.
+CLASSIFY_FRAME_V4_VERSION = "v4-ordinal-frame-v7a"
 CLASSIFY_SHEET_VERSION = "v4-reel-sheet"
 
 # exposure_tier (0-4) -> glam_score (0-3). Tier 3 is the Sexy-filter boundary.
@@ -180,8 +186,14 @@ CLASSIFY_REEL_PROMPT = (
 
 # Single-frame ordinal prompt: cascade confirmation, and photos when opted in.
 # Tuned on a frozen 120-photo eval set:
-#   v1 never emitted tier 4; v2 fixed 4 but over-fired 3 on normal fashion.
-# Decision order is deliberate — check 4 before 3; default clothed fashion is 2.
+#   v1 never emitted tier 4; v2 fixed 4 but over-fired 3 on normal fashion;
+#   v3 answered that with a downward 2/3 tiebreak, which then under-fired 3 badly
+#   on a second sample (6/43) — v7a points that tiebreak back up.
+# Decision order is deliberate — check 4 before 3. The 2↔3 cut leans UP: the
+# product surface is a `glam >= 2` filter, so a missed 3 is an invisible photo
+# while a spurious 3 is only a slightly noisier feed. The one explicit exception
+# is a sports bra with full-length leggings, which the labels call 2 and which
+# is the single largest thing an upward lean can break (41/41 correct at v6).
 CLASSIFY_FRAME_V4_PROMPT = (
     "Rate the outfit in this still image for a personal fashion KEEP filter. "
     "Return ONLY valid JSON.\n"
@@ -204,9 +216,10 @@ CLASSIFY_FRAME_V4_PROMPT = (
     "near-nude → 4.\n"
     "    (3) Else if AT LEAST ONE clear reveal is visible — bare midriff (stomach skin "
     "between top and bottoms), deep cleavage (not just a modest V-neck), fully bare back, "
-    "mini hem at upper thigh, large torso cut-outs — → 3.\n"
+    "mini hem at upper thigh, large torso cut-outs, short shorts or hot pants at upper "
+    "thigh, tight ass-hugging shorts/shortalls — → 3.\n"
     "    (4) Else if she is clothed in normal or stylish fashion (dress, jeans, top, "
-    "blouse, coat, jumpsuit, etc.) → 2. This is the DEFAULT for Instagram fashion photos.\n"
+    "blouse, coat, jumpsuit, etc.) → 2.\n"
     "    (5) Else fully covered modest everyday clothes with almost no skin → 1.\n"
     "Tier definitions:\n"
     + _TIER_ANCHORS
@@ -222,10 +235,12 @@ CLASSIFY_FRAME_V4_PROMPT = (
     "tight, or low-shoulder. Glamour alone is not tier 3.\n"
     "  - Bare arms, bare shoulders, collarbone, sleeveless, off-shoulder with covered "
     "midriff and normal neckline = 2, not 3.\n"
-    "  - Only escalate 2→3 when a listed reveal in step (3) is clearly visible. "
-    "If unsure between 2 and 3, choose 2.\n"
+    "  - Escalate 2→3 whenever a listed reveal in step (3) is visible. "
+    "If unsure between 2 and 3, choose 3.\n"
     "  - Crop top that clearly shows the stomach = 3. A short top that still covers "
     "the waistband = 2.\n"
+    "  - Short shorts / hot pants / tight shortalls showing upper thigh = 3, even with "
+    "an ordinary top. A sports bra with FULL-LENGTH leggings and no other reveal = 2.\n"
     "  - Do NOT skip tier 4. The scale has five steps; using only 0–3 is wrong.\n"
     '  "figure_visible": boolean — bust or body shape is clearly discernible\n'
     '  "confidence": number 0.0-1.0 — lower when cropped, dark, or garment class is unclear\n'

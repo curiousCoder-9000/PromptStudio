@@ -16,15 +16,18 @@ from promptstudio.evalset import (
     TARGETS,
     EvalItem,
     EvalResult,
+    assign_splits,
     choose_sample,
     compute_metrics,
     eval_status,
     file_url,
+    filter_split,
     load_labels,
     meets_target,
     merge_labels,
     render_label_page,
     save_labels,
+    split_histogram,
     stratify,
 )
 
@@ -311,6 +314,7 @@ def test_unknown_metric_has_no_target():
 def test_every_target_is_reported():
     """A target nothing prints is a target nobody checks."""
     reported = {
+        "keep_f1", "keep_recall", "keep_precision",
         "reveal_recall", "exact_accuracy", "within_one",
         "top_score_share", "unscored_rate", "median_vision_calls",
     }
@@ -472,3 +476,220 @@ def test_label_page_keeps_reveal_for_reels(tmp_path):
     out = str(tmp_path / "r.html")
     render_label_page([EvalItem(rel_path="c/a.mp4", sheet="s.jpg")], out, kind="reel")
     assert '"reel"' in open(out, encoding="utf-8").read()
+
+
+# ── the product decision: keep@glam>=2 ───────────────────────────────
+#
+# The Sexy filter is one binary question. These are the only metrics that
+# express it, so their arithmetic has to be exactly right.
+
+
+def test_keep_metrics_are_perfect_when_the_filter_agrees():
+    m = _metrics(_pair("a", 4, 4), _pair("b", 3, 3), _pair("c", 2, 2), _pair("d", 0, 0))
+    assert m.keep_true == 2, "tiers 3 and 4 are the keeps"
+    assert m.keep_pred == 2
+    assert (m.keep_precision, m.keep_recall, m.keep_f1) == (1.0, 1.0, 1.0)
+
+
+def test_tier_3_and_4_are_interchangeable_to_the_filter():
+    """Both map to glam >= 2, so swapping them costs exact accuracy, not keeps."""
+    m = _metrics(_pair("a", 3, 4), _pair("b", 4, 3))
+    assert m.exact_accuracy == 0.0, "wrong tier"
+    assert m.keep_f1 == 1.0, "but the filter shows exactly the right two photos"
+
+
+def test_tier_0_and_1_are_interchangeable_to_the_filter():
+    m = _metrics(_pair("a", 0, 1), _pair("b", 1, 0))
+    assert m.exact_accuracy == 0.0
+    assert m.keep_true == 0 and m.keep_pred == 0
+    assert m.keep_f1 == 0.0, "no keeps either way — nothing to be right about"
+
+
+def test_under_firing_costs_recall_not_precision():
+    """v6's failure shape: everything it keeps is right, it just keeps too little."""
+    m = _metrics(_pair("a", 3, 2), _pair("b", 3, 2), _pair("c", 3, 3), _pair("d", 2, 2))
+    assert m.keep_precision == 1.0
+    assert m.keep_recall == pytest.approx(1 / 3, abs=1e-3)
+
+
+def test_over_firing_costs_precision_not_recall():
+    """Legacy's failure shape: it floods the filter."""
+    m = _metrics(_pair("a", 2, 3), _pair("b", 2, 3), _pair("c", 3, 3))
+    assert m.keep_recall == 1.0
+    assert m.keep_precision == pytest.approx(1 / 3, abs=1e-3)
+
+
+def test_precision_is_zero_not_undefined_when_nothing_is_kept():
+    """Reporting precision 0.0 here must not be read as 'all keeps were wrong'."""
+    m = _metrics(_pair("a", 3, 2), _pair("b", 4, 2))
+    assert m.keep_pred == 0
+    assert m.keep_precision == 0.0
+    assert m.keep_recall == 0.0, "it missed every keep, which recall does say"
+
+
+def test_keep_metrics_work_for_a_legacy_run_with_no_tier():
+    """The point of a glam-axis metric: it survives the tierless vocabulary."""
+    m = _metrics(_legacy("a", 4, 3), _legacy("b", 2, 1), _legacy("c", 3, 2))
+    assert m.tier_scored == 0
+    assert m.keep_f1 == 1.0, "glam 3 and 2 are keeps; glam 1 is not"
+
+
+def test_keep_metrics_reproduce_the_recorded_v6_holdout():
+    """Pins the arithmetic to the real case in docs/eval_photo_ordinal_log.md.
+
+    If this drifts, either the metric changed or the doc is now lying.
+    """
+    conf = {0: {0: 3, 2: 8}, 1: {2: 2}, 2: {2: 41},
+            3: {2: 27, 3: 6, 4: 10}, 4: {4: 22, 2: 1}}
+    pairs, n = [], 0
+    for true_tier, row in conf.items():
+        for pred_tier, count in row.items():
+            for _ in range(count):
+                pairs.append(_pair(f"p{n}", true_tier, pred_tier))
+                n += 1
+    m = _metrics(*pairs)
+    assert m.scored == 120
+    # The numbers the log records, recomputed here from the same matrix.
+    assert m.exact_accuracy == pytest.approx(0.600, abs=1e-3)
+    assert m.within_one == pytest.approx(0.925, abs=1e-3)
+    assert m.glam_accuracy == pytest.approx(0.600, abs=1e-3)
+    assert m.top_score_share == pytest.approx(0.658, abs=1e-3)
+    # ...and the product read that glam_accuracy was hiding.
+    assert m.keep_true == 66 and m.keep_pred == 38
+    assert m.keep_precision == pytest.approx(1.000, abs=1e-3)
+    assert m.keep_recall == pytest.approx(0.576, abs=1e-3)
+    assert m.keep_f1 == pytest.approx(0.731, abs=1e-3)
+    # Tier 2 was the dumping ground and tier 4 over-fired; recall alone hid both.
+    assert m.per_tier["2"]["recall"] == 1.0
+    assert m.per_tier["2"]["precision"] == pytest.approx(41 / 79, abs=1e-3)
+    assert m.per_tier["4"]["recall"] == pytest.approx(22 / 23, abs=1e-3)
+    assert m.per_tier["4"]["precision"] == pytest.approx(22 / 32, abs=1e-3)
+
+
+def test_recall_first_targets_are_the_committed_ones():
+    """The gate is recall-first by decision, not by accident."""
+    assert TARGETS["keep_recall"] == (">=", 0.85)
+    assert TARGETS["keep_precision"] == (">=", 0.90)
+    assert TARGETS["keep_f1"] == (">=", 0.80)
+    assert meets_target("keep_recall", 0.576) is False, "v6 must fail the new gate"
+    assert meets_target("keep_precision", 1.0) is True
+
+
+def test_per_tier_falls_back_to_the_glam_axis():
+    m = _metrics(_legacy("a", 4, 3), _legacy("b", 2, 1))
+    assert m.confusion_axis == "glam"
+    assert set(m.per_tier) == {"1", "3"}, "glam classes, not tiers"
+
+
+# ── dev / test split ─────────────────────────────────────────────────
+
+
+def _labelled(n, tier):
+    return [EvalItem(rel_path=f"c/t{tier}-{i}.jpg", true_exposure=tier) for i in range(n)]
+
+
+def test_split_is_stratified_per_tier():
+    items = _labelled(20, 3) + _labelled(10, 4)
+    assign_splits(items, seed=1)
+    hist = split_histogram(items)
+    assert hist["dev"] == {3: 10, 4: 5}
+    assert hist["test"] == {3: 10, 4: 5}
+
+
+def test_a_two_item_tier_still_reaches_both_halves():
+    """T1 is n=2 in the gold file; truncation would give test none of it."""
+    items = _labelled(2, 1)
+    assign_splits(items, seed=1)
+    assert {i.split for i in items} == {"dev", "test"}
+
+
+def test_same_seed_gives_the_same_split():
+    a, b = _labelled(20, 3), _labelled(20, 3)
+    assign_splits(a, seed=7)
+    assign_splits(b, seed=7)
+    assert [i.split for i in a] == [i.split for i in b]
+
+
+def test_split_ignores_unlabelled_items():
+    items = _labelled(4, 3) + [EvalItem(rel_path="c/none.jpg")]
+    assign_splits(items, seed=1)
+    assert items[-1].split == "", "nothing to stratify an unlabelled item by"
+
+
+def test_split_is_idempotent():
+    """Re-running after importing more labels must not reshuffle the old ones."""
+    items = _labelled(20, 3)
+    assign_splits(items, seed=1)
+    before = [i.split for i in items]
+    assert assign_splits(items, seed=999) == 0, "no item should change"
+    assert [i.split for i in items] == before
+
+
+def test_new_labels_join_without_disturbing_existing_assignments():
+    items = _labelled(10, 3)
+    assign_splits(items, seed=1)
+    before = {i.rel_path: i.split for i in items}
+    items += _labelled(10, 4)
+    assert assign_splits(items, seed=1) == 10, "only the new tier-4s"
+    assert all(i.split == before[i.rel_path] for i in items if i.rel_path in before)
+
+
+def test_reassign_redraws_everything():
+    items = _labelled(20, 3)
+    assign_splits(items, seed=1)
+    changed = assign_splits(items, seed=2, reassign=True)
+    assert changed > 0, "a different seed must actually move items"
+
+
+def test_an_import_cannot_move_an_item_between_halves():
+    """Contamination guard: `test` membership is not re-negotiable on import."""
+    existing = [EvalItem(rel_path="c/a.jpg", true_exposure=3, split="test")]
+    incoming = [EvalItem(rel_path="c/a.jpg", true_exposure=4, split="dev")]
+    merged = merge_labels(existing, incoming)
+    assert merged[0].true_exposure == 4, "the label itself still updates"
+    assert merged[0].split == "test", "but the half must not change"
+
+
+def test_an_import_can_fill_a_blank_split():
+    existing = [EvalItem(rel_path="c/a.jpg", true_exposure=3)]
+    incoming = [EvalItem(rel_path="c/a.jpg", true_exposure=3, split="dev")]
+    assert merge_labels(existing, incoming)[0].split == "dev"
+
+
+def test_split_survives_a_save_load_cycle(tmp_path):
+    path = str(tmp_path / "labels.jsonl")
+    items = _labelled(4, 3)
+    assign_splits(items, seed=1)
+    save_labels(items, path)
+    assert [i.split for i in load_labels(path)] == [i.split for i in items]
+
+
+def test_filter_split_narrows_to_one_half():
+    items = _labelled(10, 3)
+    assign_splits(items, seed=1)
+    assert len(filter_split(items, "dev")) == 5
+    assert len(filter_split(items, "test")) == 5
+    assert len(filter_split(items, "all")) == 10
+    assert len(filter_split(items, "")) == 10
+
+
+def test_filter_split_rejects_a_typo():
+    with pytest.raises(ValueError):
+        filter_split(_labelled(2, 3), "dveelop")
+
+
+def test_test_frac_must_be_a_fraction():
+    with pytest.raises(ValueError):
+        assign_splits(_labelled(2, 3), test_frac=1.0)
+
+
+def test_metrics_on_a_split_only_count_that_half():
+    items = _labelled(10, 3)
+    assign_splits(items, seed=1)
+    results = [
+        EvalResult(rel_path=i.rel_path, ok=True, predicted_tier=3, glam_score=2)
+        for i in items
+    ]
+    m = compute_metrics(filter_split(items, "dev"), results)
+    assert m.scored == 5, "results for the other half must not leak in"
+    assert m.keep_recall == 1.0

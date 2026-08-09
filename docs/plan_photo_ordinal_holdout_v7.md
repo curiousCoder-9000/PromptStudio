@@ -201,20 +201,38 @@ gold T3 examples are crop + short shorts, sheer mesh crop, tight shortalls,
 bikini top + denim. Those *are* listed. The model is being told to resolve them
 downward.
 
-**Stage A = `v4-ordinal-frame-v7a`, prompt-only, no schema change:**
+**Stage A = `v4-ordinal-frame-v7a`, prompt-only, no schema change. IMPLEMENTED:**
 
-1. Delete "This is the DEFAULT for Instagram fashion photos."
-2. Replace "If unsure between 2 and 3, choose 2" with "If unsure between 2 and 3,
-   choose **3**" — the boundary is now asymmetric in the right direction, because
-   §2.5 shows the filter's cost is entirely recall, and T3→4 confusion is free.
-3. Add short-shorts / tight ass-hugging shortalls to the step-(3) list explicitly
-   (present in gold T3, absent from the reveal list).
-4. Keep everything else byte-identical.
+1. ✅ Deleted "This is the DEFAULT for Instagram fashion photos."
+2. ✅ "If unsure between 2 and 3, choose 2" → "choose **3**", and "Only escalate
+   2→3 when…" → "Escalate 2→3 whenever…". The boundary is now asymmetric in the
+   right direction, because §2.5 shows the filter's cost is entirely recall and
+   T3→4 confusion is free.
+3. ✅ Added short shorts / hot pants / tight ass-hugging shortalls to the step-(3)
+   reveal list (present in gold T3, absent from the v6 list).
+4. ✅ **Added beyond the original Stage A scope:** an explicit carve-out —
+   *"A sports bra with FULL-LENGTH leggings and no other reveal = 2."*
+   Not in the rev-2 draft, added during implementation because the §3.2 ⚠ row and
+   the §5 risk table both name this as the top regression risk: `midriff_bare`
+   fires on a sports bra, the 41 true-T2s are currently 41/41, and step 3 above
+   removes the guard that was holding them. Your own §1 note ("*Pink sports bra +
+   full leggings (midriff OK)*") is the label authority for it. Covered by
+   `test_the_gym_carve_out_survives_the_upward_lean`.
+5. ✅ Everything else byte-identical. **`_TIER_ANCHORS` deliberately untouched** —
+   it is shared with the reel contact-sheet prompt, and reels are a §6 non-goal
+   with their own eval. Pinned by `test_the_reel_sheet_vocabulary_is_untouched`.
 
-Cost: one edit, one `run --kind photo`, ~120 VLM calls. If Stage A recovers keep
-recall to ≥0.85 while holding precision ≥0.90, **most of §3.1–3.2 is unnecessary**
-and should not be built. Ship Stage A, then treat T0 and T3↔4 as separate,
-smaller, non-blocking work.
+**Known blast radius:** `CLASSIFY_FRAME_V4_PROMPT` is also read by
+`_classify_frame_ordinal`, which serves the reel *confirm* cascade and the
+sheet-fallback frame. So v7a does slightly change reel behaviour on those two
+paths even though the sheet prompt itself is untouched. Accepted: the 2↔3 fix is
+directionally right for reels too, and the reel path has its own eval to confirm
+it. Do not ship a reel change on photo evidence.
+
+Cost: one edit, one `run --kind photo --split dev`, ~60 VLM calls. If Stage A
+recovers keep recall to ≥0.85 while holding precision ≥0.90, **most of §3.1–3.2 is
+unnecessary** and should not be built. Ship Stage A, then treat T0 and T3↔4 as
+separate, smaller, non-blocking work.
 
 Only if Stage A stalls does the schema rewrite earn its complexity. Rev 1 jumped
 straight to an 11-field rewrite on a 7B model without testing the two-line
@@ -436,17 +454,34 @@ Round-1 (seed 20260809) is burned as a tuning set. If round-2 (seed 20260810) is
 also burned, **there is no clean set left** and every subsequent number is a
 training-set number.
 
-**Do this before any code:**
+**IMPLEMENTED** as `split` + `--split dev|test|all`:
 
-1. Deterministically split the 120 gold labels **60 dev / 60 test**, stratified by
-   true tier (T3 and T4 are the classes under test; T1 n=2 goes 1/1 or all to dev).
-   Fixed seed, written to disk, committed to the eval dir — not re-drawn per run.
-2. **All** prompt/policy iteration reads dev only. Stage A, Stage B, threshold
+```
+py scripts/eval_reel_classifier.py split --kind photo     # once, then never again
+py scripts/eval_reel_classifier.py run  --kind photo --name v7a-dev --ordinal --split dev
+py scripts/eval_reel_classifier.py report --kind photo --name v7a-dev \
+      --against holdout-ordinal --split dev
+```
+
+1. ✅ Stratified by true tier, seeded (`20260811`), persisted on the label as
+   `EvalItem.split`. On the gold histogram this lands **59 dev / 61 test** rather
+   than exactly 60/60 — four tiers have odd counts, so a stratified split cannot
+   be exactly even. Per-tier balance is what matters and that is held (T3 21/22,
+   T4 11/12, T0 5/6, T1 1/1, T2 21/20).
+2. ✅ **Idempotent** — re-running after importing more labels assigns only the new
+   items and never reshuffles existing ones. `--reassign` re-draws everything and
+   prompts for typed confirmation, because it silently converts any test number
+   you have already seen into a dev number.
+3. ✅ **The split is persisted, not derived.** A hash-of-path split would be
+   simpler but would move items between halves whenever a label is edited — and
+   the gold file is itself a re-export after 17 tier edits. An item drifting into
+   test after being tuned against is exactly the contamination this prevents.
+   `merge_labels` therefore refuses to let an import change an existing split
+   (`test_an_import_cannot_move_an_item_between_halves`).
+4. **All** prompt/policy iteration reads dev only. Stage A, Stage B, threshold
    tuning, the `BLUR_MIN` sweep — dev.
-3. Test is scored **once**, on the candidate you intend to ship. If you look at
-   test and then tune, it is dev now and you need a new test set.
-4. Needs a small harness change: `run` / `report` take `--split dev|test|all`.
-   ~20 lines in `evalset.py` alongside the §2.5 metrics.
+5. Test is scored **once**, on the candidate you intend to ship. If you look at
+   test and then tune, it is dev now and you need a new sample.
 
 At n=60 per half, a keep-recall difference below roughly ±0.12 is not
 distinguishable from noise (binomial, ~33 true keeps per half). Do not ship on a
@@ -459,16 +494,26 @@ before believing either.
    `label --kind photo --import "…\labels-photo (1).jsonl"`  
    Archive previous holdout metrics as baseline notes.
 
-2. **Harness first** (`promptstudio/evalset.py`) — before touching the classifier  
-   - `keep_precision` / `keep_recall` / `keep_f1` at `GLAM_SEXY_MIN` in `Metrics`
-     + `compute_metrics` + `_print_report` (§2.5)  
-   - per-tier precision as well as recall in the report (v6's T4 precision 0.69
-     and T2 precision 0.52 are both invisible today)  
-   - `--split dev|test|all` (§4.0)  
-   - Re-score the **existing** `photo-holdout-*.json` with it. No VLM calls: this
-     gives real legacy-vs-v6 keep numbers and a correct starting line for free.
+2. ✅ **Harness** (`promptstudio/evalset.py`, `scripts/eval_reel_classifier.py`)  
+   - `keep_precision` / `keep_recall` / `keep_f1` at `GLAM_SEXY_MIN`, printed as
+     the report's first three lines with `keep_f1` marked HEADLINE. Defined for
+     **both** vocabularies, so legacy-vs-ordinal is comparable on them  
+   - per-class precision *and* recall table, on the tier axis when the run has
+     one and the glam axis otherwise. Suppressed against a baseline on a different
+     axis — quoting a glam-3 precision as "tier 3 precision was…" is the same trap
+     the tier metrics already guard  
+   - `split` subcommand + `--split dev|test|all` on `run` / `report`; the chosen
+     split is recorded in the results meta so a dev-only run can never be
+     mistaken later for a full-set number  
+   - `TARGETS` gained the three keep gates; `top_score_share` kept but annotated
+     as weak (a perfect run scores 0.358 on this distribution)  
+   - Verified against the recorded v6 matrix: reproduces 0.600 / 0.925 / 0.600 /
+     0.658 exactly, and pins them in
+     `test_keep_metrics_reproduce_the_recorded_v6_holdout` so a future metric
+     change cannot quietly contradict the diary
 
-3. **Stage A** (§3.0) — prompt-only, `v4-ordinal-frame-v7a`, dev split only.  
+3. ✅ **Stage A** (§3.0) — prompt-only, `v4-ordinal-frame-v7a`. **Not yet run:**
+   needs the Windows box (archive + labels + Ollama). Run on dev only.
    Stop here if it clears the gate below.
 
 4. **Stage B** (§3.1–3.2a) only if Stage A stalls  
