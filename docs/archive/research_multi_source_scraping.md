@@ -12,7 +12,7 @@
 
 ## Overview
 
-PromptStudio scrapes Instagram only, via `instaloader` ([`promptstudio/scraping/downloader.py`](../promptstudio/scraping/downloader.py)). This document researches **which additional platforms are viable**, **which tool to use**, and **what has to change in this codebase** to support them without forking the existing Instagram path.
+PromptStudio scrapes Instagram only, via `instaloader` ([`promptstudio/scraping/downloader.py`](../../promptstudio/scraping/downloader.py)). This document researches **which additional platforms are viable**, **which tool to use**, and **what has to change in this codebase** to support them without forking the existing Instagram path.
 
 **Headline recommendation:** adopt **`gallery-dl`** as a single generic adapter (one dependency → ~200 sites, including Pinterest, X/Twitter, Reddit, TikTok, Bluesky, Tumblr, Flickr, VSCO), driven **as a subprocess** behind a new `MediaSource` abstraction. Keep `instaloader` for Instagram. Add **`yt-dlp`** later, and only for short-form video, where it is used **in-process** because it — unlike gallery-dl — documents a Python API.
 
@@ -24,17 +24,17 @@ The blocking work is *not* the scraper. It is three schema/identity assumptions 
 
 | Piece | Instagram coupling |
 |-------|--------------------|
-| [`scraping/downloader.py`](../promptstudio/scraping/downloader.py) `InstagramDownloader` | Duck-types the instaloader `Post` object in ~8 places: `mediaid`, `shortcode`, `owner_username`, `date_utc`, `caption`, `is_video`, `mediacount`. Downloads via `self._L.download_post(post, target=creator)` (`downloader.py:331`) |
-| [`scraping/session.py`](../promptstudio/scraping/session.py) | `instaloader.Instaloader` construction + `session-<user>` file loading. Fully IG-specific |
-| [`scraping/filters.py`](../promptstudio/scraping/filters.py) `score_instagram_post` | Ranking on IG signals (likes/comments/caption/feed index) |
-| [`scraping/sync_manager.py`](../promptstudio/scraping/sync_manager.py) `SyncManager` | Generic mechanism, IG-specific in practice: one global job at a time, `job_type` string, cooperative cancel |
-| [`scraping/creator_queue.py`](../promptstudio/scraping/creator_queue.py) | Per-creator FIFO scrape jobs. No `source` field |
-| [`storage/metadata.py`](../promptstudio/storage/metadata.py) `build_metadata_from_post` | Hardcodes `"source": "instagram"` (`metadata.py:45`) and `post_url` as `instagram.com/p/<shortcode>` |
-| [`storage/db.py`](../promptstudio/storage/db.py) `photos` table | **No `source` column.** Identity is `(post_id, shortcode)` — both IG concepts |
-| [`storage/db.py`](../promptstudio/storage/db.py) `deleted_posts` | Tombstones keyed `(creator, shortcode, post_id)` |
+| [`scraping/downloader.py`](../../promptstudio/scraping/downloader.py) `InstagramDownloader` | Duck-types the instaloader `Post` object in ~8 places: `mediaid`, `shortcode`, `owner_username`, `date_utc`, `caption`, `is_video`, `mediacount`. Downloads via `self._L.download_post(post, target=creator)` (`downloader.py:331`) |
+| [`scraping/session.py`](../../promptstudio/scraping/session.py) | `instaloader.Instaloader` construction + `session-<user>` file loading. Fully IG-specific |
+| [`scraping/filters.py`](../../promptstudio/scraping/filters.py) `score_instagram_post` | Ranking on IG signals (likes/comments/caption/feed index) |
+| [`scraping/sync_manager.py`](../../promptstudio/scraping/sync_manager.py) `SyncManager` | Generic mechanism, IG-specific in practice: one global job at a time, `job_type` string, cooperative cancel |
+| [`scraping/creator_queue.py`](../../promptstudio/scraping/creator_queue.py) | Per-creator FIFO scrape jobs. No `source` field |
+| [`storage/metadata.py`](../../promptstudio/storage/metadata.py) `build_metadata_from_post` | Hardcodes `"source": "instagram"` (`metadata.py:45`) and `post_url` as `instagram.com/p/<shortcode>` |
+| [`storage/db.py`](../../promptstudio/storage/db.py) `photos` table | **No `source` column.** Identity is `(post_id, shortcode)` — both IG concepts |
+| [`storage/db.py`](../../promptstudio/storage/db.py) `deleted_posts` | Tombstones keyed `(creator, shortcode, post_id)` |
 | Archive layout | `SAVED_DIR/<creator>/<file>` — **exactly one level deep**, enforced by `creator, _, filename = rel.partition("/")` (`db.py:346`) |
 
-**Good news already in place:** the sidecar schema *already* carries a `source` discriminator, and [`scraping/video_frames.py`](../promptstudio/scraping/video_frames.py) already samples and ranks frames from video (built for Reels). Video-first platforms therefore feed an existing pipeline rather than needing a new one.
+**Good news already in place:** the sidecar schema *already* carries a `source` discriminator, and [`scraping/video_frames.py`](../../promptstudio/scraping/video_frames.py) already samples and ranks frames from video (built for Reels). Video-first platforms therefore feed an existing pipeline rather than needing a new one.
 
 ---
 

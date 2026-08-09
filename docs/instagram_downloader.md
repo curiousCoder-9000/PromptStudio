@@ -202,7 +202,7 @@ py scripts/download_creator_feed.py HANDLE --full
 py scripts/download_creator_feed.py HANDLE --full --no-deep   # catch-up resume walk
 ```
 
-Design: [design_creator_scrape_queue.md](design_creator_scrape_queue.md).
+Design: [archive/design_creator_scrape_queue.md](archive/design_creator_scrape_queue.md).
 
 ## Web UI
 

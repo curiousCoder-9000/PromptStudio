@@ -30,9 +30,9 @@ For an **existing** creator folder:
 
 Evidence:
 
-- [`docs/instagram_downloader.md`](instagram_downloader.md): *“Deleted locally → Index row cleared → re-download if still in feed”* — opposite of product intent.
-- [`ArchiveIndex.delete_photo`](../promptstudio/storage/db.py) only `DELETE FROM photos` — no identity retention.
-- [`_post_archive_state`](../promptstudio/scraping/downloader.py) only inspects on-disk/index completeness.
+- [`docs/instagram_downloader.md`](../instagram_downloader.md): *“Deleted locally → Index row cleared → re-download if still in feed”* — opposite of product intent.
+- [`ArchiveIndex.delete_photo`](../../promptstudio/storage/db.py) only `DELETE FROM photos` — no identity retention.
+- [`_post_archive_state`](../../promptstudio/scraping/downloader.py) only inspects on-disk/index completeness.
 
 ---
 
@@ -302,7 +302,7 @@ Unchanged: all paths use `SyncManager`. Latest sync is just another job type pay
 
 ## References
 
-- [`promptstudio/scraping/downloader.py`](../promptstudio/scraping/downloader.py) — `_post_archive_state`, feed modes
-- [`promptstudio/storage/db.py`](../promptstudio/storage/db.py) — photos identity, `delete_photo`
+- [`promptstudio/scraping/downloader.py`](../../promptstudio/scraping/downloader.py) — `_post_archive_state`, feed modes
+- [`promptstudio/storage/db.py`](../../promptstudio/storage/db.py) — photos identity, `delete_photo`
 - [`docs/design_creator_scrape_queue.md`](design_creator_scrape_queue.md) — serial queue
-- [`docs/instagram_downloader.md`](instagram_downloader.md) — resume table (to be updated)
+- [`docs/instagram_downloader.md`](../instagram_downloader.md) — resume table (to be updated)

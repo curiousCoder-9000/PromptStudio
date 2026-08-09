@@ -1,6 +1,7 @@
 # AGENTS.md — PromptStudio
 
-Injected workspace rules. **Full map:** [docs/context.md](docs/context.md) (read first; keeps later tasks cheap).
+Workspace rules, auto-loaded via [CLAUDE.md](CLAUDE.md).
+**Full map:** [docs/context.md](docs/context.md) — read first; keeps later tasks cheap.
 
 ## Stack (current)
 
@@ -16,10 +17,12 @@ Injected workspace rules. **Full map:** [docs/context.md](docs/context.md) (read
 
 ## Hard rules
 
-1. **Archive safety:** never delete media without user confirm → UI `#deleteConfirmModal` → `DELETE /api/photo`. Deletes are **soft** (move to `_trash/`, restorable). Only `permanent=1` / `POST /api/trash/purge` destroy data — never call either without an explicit user action.
-2. **No `cgi`:** multipart via `promptstudio.server.multipart`. Target **Python 3.14+** on Windows.
+These are the single source of truth — other docs point here rather than restating them.
+
+1. **Archive safety:** never delete media without user confirm → UI `#deleteConfirmModal` → `DELETE /api/photo`. Deletes are **soft** (move to `_trash/`, restorable). Only `permanent=1` / `POST /api/trash/purge` destroy data — never call either without an explicit user action. No archive bulk-delete scripts without an explicit user ask.
+2. **No `cgi`:** multipart via `promptstudio.server.multipart`. Target **Python 3.14+** on Windows; new code sticks to stdlib unless the dep already exists.
 3. **Config single source:** `promptstudio/config.py` (+ `.env` / env vars). Never hardcode usernames, secrets, or archive paths. Never commit `.env`, sessions, `following_list.json`, or classify dumps.
-4. **Routes live in** `promptstudio/server/handler.py`. Prefer package modules over new root files.
+4. **Routes live in** `promptstudio/server/handler.py` — the sole HTTP switchboard. Prefer package modules over new root files.
 5. **Do not resurrect** non-person filter UX; keep `EXCLUDED_FOLDERS` behavior.
 6. **UI:** preserve glassmorphism + keyboard lightbox (`←`/`→`/`Esc`).
 7. **Never interpolate third-party text into `innerHTML` unescaped** — use `escapeHtml()` or `textContent`. Debounce typed input; give user-driven fetches an `AbortController`.
@@ -27,7 +30,8 @@ Injected workspace rules. **Full map:** [docs/context.md](docs/context.md) (read
 9. **Never `open(path, "w")` for state.** Use `promptstudio.storage.atomic.atomic_write_json` — a truncated file reads as empty and every loader here swallows the parse error, so a partial write is silent total loss.
 10. **No `print()`.** `log = get_logger(__name__)` from `promptstudio.logging_setup`.
 11. **Cross-job exclusion is a lease** (`promptstudio/jobs.py`), never an `is_running()` check on another manager — polling then starting is a race. Declare the resource, acquire, release in a `finally`.
-12. **Measure before optimising, and report the number.** Two "obvious" wins in this codebase turned out to be losses under measurement (FTS5 search, incremental rebuild) — both are recorded in `docs/review_backend_architecture.md`.
+12. **Measure before optimising, and report the number.** Two "obvious" wins in this codebase turned out to be losses under measurement (FTS5 search, incremental rebuild) — both recorded in [docs/review_backend_architecture.md](docs/review_backend_architecture.md).
+13. **IG sync:** multi-day pacing; stop on abort; never password-login every run.
 
 ## Where to look
 
@@ -40,14 +44,49 @@ Injected workspace rules. **Full map:** [docs/context.md](docs/context.md) (read
 | Why a job did that | `<archive>/_journal/`, `GET /api/journal` |
 | Duplicate detection | `promptstudio/storage/dedupe.py` |
 | Instagram sync | `promptstudio/scraping/downloader.py` |
+| Add a scrape source | `promptstudio/scraping/sources/` |
 | ComfyUI | `promptstudio/comfy/client.py` |
 | Frontend | `app.js` |
 
+## Runtime checks
+
+```powershell
+# Ollama reachable
+py -c "import urllib.request; print(urllib.request.urlopen('http://localhost:11434/api/tags', timeout=2).read()[:200])"
+py server.py            # app on :5000
+py prompt_engine.py     # vision smoke test
+```
+
+Health: `GET /api/health` → `ollama`, `model` (`qwen2.5vl:7b` default), `model_ready`, `comfy`, `leases`.
+
 ## Docs (token budget)
 
-| Load | Skip unless needed |
-|------|--------------------|
-| [docs/context.md](docs/context.md) | `docs/following_list.md`, `docs/following_classify_report.md` (data dumps) |
-| [docs/api.md](docs/api.md) for schemas | Full `app.js` / `style.css` unless UI task |
-| [docs/instagram_downloader.md](docs/instagram_downloader.md) for sync | Entire `scripts/` tree for non-scrape work |
-| [docs/review_backend_architecture.md](docs/review_backend_architecture.md) for backend decisions + measurements | — |
+Load only what the task needs.
+
+| Doc | Open when |
+|-----|-----------|
+| [docs/context.md](docs/context.md) | **Always first** — package map, data layout, task→file table |
+| [docs/api.md](docs/api.md) | Request/response schemas |
+| [docs/architecture.md](docs/architecture.md) | Component diagram, request/sync flows |
+| [docs/instagram_downloader.md](docs/instagram_downloader.md) | IG sync pacing, queue, resume |
+| [docs/multi_source_scraping.md](docs/multi_source_scraping.md) | X / Reddit via gallery-dl |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Ollama, ports, cache wipe, known bugs |
+| [docs/review_backend_architecture.md](docs/review_backend_architecture.md) | Backend decisions + measurements |
+| [docs/product_review.md](docs/product_review.md) | Product themes, accepted backlog |
+| [docs/roadmap.md](docs/roadmap.md) | Phase history; 13–15 planned |
+| [docs/design_generation_loop.md](docs/design_generation_loop.md) | Active spec for Phases 13–14 |
+| [scripts/README.md](scripts/README.md) · [tests/ui/README.md](tests/ui/README.md) | CLI examples · browser suites |
+
+**Never load:** `docs/archive/` (shipped/superseded design docs, ~117KB — history only),
+`docs/following_list.md` (generated data dump stub), full `app.js` / `style.css` unless it is a UI task,
+the whole `scripts/` tree for non-scrape work.
+
+## Stale doc traps
+
+| Wrong (old docs) | Current |
+|------------------|---------|
+| Vision model `moondream` | `qwen2.5vl:7b` (`OLLAMA_VISION_MODEL`) |
+| Multipart in `server.py` via `cgi` | `promptstudio.server.multipart` |
+| Monolithic `server.py` | Thin shim → `handler.py` |
+| `opencv-python` only | `opencv-python-headless` (+ optional Pillow) |
+| Prompts in `prompts_cache.json` | `prompts` table in `archive.db`; JSON is a stale rollback snapshot |

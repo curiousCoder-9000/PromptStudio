@@ -3,7 +3,10 @@
 **Read this first.** Dense map so agents avoid scanning the whole tree.  
 Detail on demand: [api.md](api.md) · [instagram_downloader.md](instagram_downloader.md) · [troubleshooting.md](troubleshooting.md) · [roadmap.md](roadmap.md)
 
-**Do not load as agent context:** `docs/following_list.md` (generated data dump).
+**Hard rules live in [AGENTS.md](../AGENTS.md)** (auto-loaded) — not restated here.
+
+**Do not load as agent context:** `docs/archive/` (shipped design docs, history only) ·
+`docs/following_list.md` (generated data dump stub).
 
 ---
 
@@ -38,9 +41,9 @@ py prompt_engine.py [image.jpg]       # smoke-test vision
 **Verify before claiming done** (`pip install -r requirements-dev.txt`):
 
 ```powershell
-pytest                  # 107 unit tests, temp archive, no server needed
+pytest                  # unit tests — temp archive, no server needed
 ruff check .            # must be clean — config in pyproject.toml
-./tests/ui/run.sh       # 70 browser checks; needs Node 22+ and Chrome
+./tests/ui/run.sh       # browser suites; needs Node 22+ and Chrome
 ```
 
 Deps: `instaloader`, `opencv-python-headless`, `Pillow`, `python-dotenv` (`requirements.txt`).
@@ -54,6 +57,7 @@ promptstudio/
   config.py              # ALL env defaults, paths, pacing, models
   logging_setup.py       # lazy logging config; handlers on the promptstudio logger
   jobs.py                # LeaseRegistry — exclusive ollama/instagram/comfy leases
+  insights.py            # archive stats/aggregates behind /api/insights
   server/
     handler.py           # Every HTTP route lives here
     multipart.py         # cgi-free multipart upload parser
@@ -62,6 +66,7 @@ promptstudio/
     atomic.py            # atomic_write_json — ALL derived-state writes go here
     db.py                # ArchiveIndex: photos + prompts + phashes + tombstones
     dedupe.py            # perceptual hash + near-duplicate grouping
+    paths.py             # resolve_path containment — all media path resolution
     journal.py           # append-only JSONL run history per job kind
     favorites.py         # favorites.json write-through
     metadata.py          # *.meta.json sidecars (post_id, shortcode)
@@ -83,6 +88,7 @@ promptstudio/
     checkpoints.py       # sync_state.json telemetry
     sync_manager.py      # single background sync job; dispatches by source
     organizer.py         # root organize + dedupe
+    video_frames.py      # reel frame extraction / cover-image pick
     sources/             # multi-source seam (see docs/multi_source_scraping.md)
       base.py            # NormalizedPost, SourceTarget, MediaSource, folder naming
       __init__.py        # lazy registry: instagram | x | reddit
@@ -93,17 +99,15 @@ promptstudio/
     workflows/modelToimage_pro.api.json
 scripts/                 # thin CLIs only — logic stays in package
 server.py / prompt_engine.py   # shims
-tests/
+tests/                   # one test_<concern>.py per module; `ls tests/` for the current set
   conftest.py            # temp archive + cache reset (sets env BEFORE import)
-  test_paths.py          # resolve_path containment (traversal regressions)
-  test_byte_range.py     # Range header parsing (video scrubbing)
-  test_multipart.py      # upload parser (no stdlib cgi)
-  test_filters.py        # following filters + feed post ranking
-  test_trash.py          # soft delete / restore / purge
-  test_batch_job.py      # batch cancel / pending snapshot (vision mocked)
-  test_stats.py          # prompts_ready indexed count vs exact walk
-  test_sources.py        # target parsing, gallery-dl argv, metadata mapping, exit codes
-  test_source_identity.py # platform-scoped tombstones + schema migration
+  # security / protocol: test_paths, test_path_containment, test_byte_range, test_multipart
+  # storage:            test_atomic_write, test_prompt_store, test_trash, test_dedupe,
+  #                     test_sort_newest, test_index_sidecar_reads, test_journal, test_stats
+  # jobs / runtime:     test_job_leases, test_batch_job, test_logging_and_errors, test_insights
+  # scraping:           test_filters, test_sources, test_source_dispatch,
+  #                     test_source_identity, test_scrape_options
+  # comfy:              test_comfy_seed
   ui/                    # headless-Chrome suites over CDP (run.sh)
 ```
 
@@ -266,13 +270,9 @@ Idempotent: skip by `post_id`/`shortcode` in DB + meta. Catch-up stop after `IG_
 
 ## Hard rules (agents)
 
-1. **Never delete archive media** without user confirm via UI `#deleteConfirmModal` → `DELETE /api/photo`. Deletes are **soft** (`_trash/`) — only `permanent=1` or `/api/trash/purge` destroys data, and neither may be called without an explicit user action.
-2. **No `cgi` module** — use `promptstudio.server.multipart`.
-3. **Python 3.14+ Windows** compatible stdlib only for new code unless already a dep.
-4. **Logic in `promptstudio/`**, not fat scripts.
-5. **Do not reintroduce** non-person filter folder UX; excluded dirs stay excluded.
-6. Lightbox a11y: ←/→/Esc. Keep glass dark theme + brand colors.
-7. Prefer editing existing modules over new top-level files.
+Single source: **[AGENTS.md](../AGENTS.md)** — auto-loaded via `CLAUDE.md`, so they are
+already in context. Deliberately not duplicated here; the copy that used to live in this
+section drifted four rules behind.
 
 ---
 
@@ -280,14 +280,16 @@ Idempotent: skip by `post_id`/`shortcode` in DB + meta. Catch-up stop after `IG_
 
 | File | When to open |
 |------|----------------|
-| **context.md** (this) | Always first — map + rules |
+| **context.md** (this) | Always first — map, data layout, task→file table |
+| Root [AGENTS.md](../AGENTS.md) | Hard rules (auto-loaded) |
 | [api.md](api.md) | Request/response shapes |
 | [architecture.md](architecture.md) | Component diagram, data flow |
 | [instagram_downloader.md](instagram_downloader.md) | Sync pacing, queue, resume |
-| [troubleshooting.md](troubleshooting.md) | Ollama, ports, cache wipe |
+| [multi_source_scraping.md](multi_source_scraping.md) | X / Reddit via gallery-dl |
+| [troubleshooting.md](troubleshooting.md) | Ollama, ports, cache wipe, known bugs |
+| [review_backend_architecture.md](review_backend_architecture.md) | Backend decisions + measurements |
 | [roadmap.md](roadmap.md) | Phase history / future |
 | [product_review.md](product_review.md) | Product themes A/B/C/E, accepted backlog + sequence |
 | [design_generation_loop.md](design_generation_loop.md) | Theme A spec — generations table, rating, outputs gallery, batch, workflow registry |
-| [agent.md](agent.md) | Short ops checklist |
-| Root [AGENTS.md](../AGENTS.md) | Injected workspace rules |
-| [scripts/README.md](../scripts/README.md) | CLI examples |
+| [scripts/README.md](../scripts/README.md) · [tests/ui/README.md](../tests/ui/README.md) | CLI examples · browser suites |
+| `archive/` | **Do not load.** Shipped/superseded designs, kept for history |

@@ -3,7 +3,7 @@
 How PromptStudio scrapes beyond Instagram, and the things that will bite you.
 
 Design rationale and the platform survey live in
-[research_multi_source_scraping.md](research_multi_source_scraping.md).
+[archive/research_multi_source_scraping.md](archive/research_multi_source_scraping.md).
 
 ---
 

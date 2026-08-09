@@ -121,9 +121,13 @@ CI runs lint + tests on Python 3.10 and 3.13, plus the UI suites
 | [docs/instagram_downloader.md](docs/instagram_downloader.md) | Sync & anti-ban |
 | [docs/multi_source_scraping.md](docs/multi_source_scraping.md) | X / Reddit scraping via gallery-dl |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Setup & failures |
+| [docs/review_backend_architecture.md](docs/review_backend_architecture.md) | Backend review — durability, observability, measurements |
+| [docs/product_review.md](docs/product_review.md) | Product themes & accepted backlog |
 | [docs/roadmap.md](docs/roadmap.md) | Phases done / optional next |
-| [AGENTS.md](AGENTS.md) | Hard rules for AI agents |
-| [scripts/README.md](scripts/README.md) | CLI wrappers |
+| [docs/design_generation_loop.md](docs/design_generation_loop.md) | Active spec — Phases 13–14 |
+| [AGENTS.md](AGENTS.md) | Hard rules for AI agents (auto-loaded via `CLAUDE.md`) |
+| [scripts/README.md](scripts/README.md) · [tests/ui/README.md](tests/ui/README.md) | CLI wrappers · browser suites |
+| [docs/archive/](docs/archive/) | Shipped/superseded designs — history, not current behavior |
 
 ## Layout
 

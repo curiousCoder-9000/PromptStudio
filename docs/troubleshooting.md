@@ -122,3 +122,21 @@ Index is `archive.db` next to media.
 ### Thumbs broken
 
 OpenCV headless is enough for resize; if both Pillow and cv2 fail, `/media/thumb` falls back to full image.
+
+### Creator count keeps growing with folders you never followed
+
+Expected, not a corruption bug. Three separate causes:
+
+1. **Saved-post sync.** `sync_saved_posts` names the folder from `post.owner_username`
+   (`scraping/downloader.py`) — the account that *made* the saved post, which is usually
+   not one you follow. Real handles, unexpected folders.
+2. **Test payloads.** `POST /api/creator/create` calls from UI testing create real folders
+   (`test_nonexistent_xyz_ui_check2` and similar). Delete the folder and drop the entry
+   from `creator_scrape_queue.json`.
+3. **Underscore state dirs.** `_trash`, `_thumbs`, `_journal`, `_classify`, `_generations`
+   are app state, not creators. They are in `EXCLUDED_FOLDERS` and never counted — you only
+   see them when browsing the archive directly.
+
+Only cause 1 is unresolved by design. Fixing it means either routing saved posts into a
+generic `_saved/` folder, or only creating a creator folder when the owner is already a
+known target in `following_list.json`. Neither is implemented.
