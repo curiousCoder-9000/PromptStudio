@@ -4533,30 +4533,43 @@ function renderOneLaneChip(lane) {
     }
 
     let sub = '';
+    let fullSub = '';
     if (running) {
         const mode = running.mode || 'full';
         const deep = running.deep === true ? ' deep' : '';
         sub = mode + deep;
-        if (pending.length) sub += ` · +${pending.length} queued`;
+        fullSub = sub;
+        if (pending.length) {
+            sub += ` · +${pending.length} queued`;
+            fullSub += ` · +${pending.length} queued`;
+        }
         if (sync.progress) {
             const p = String(sync.progress);
-            sub += ` · ${p.length > 80 ? p.slice(-80) : p}`;
+            fullSub += ` · ${p}`;
+            sub += ` · ${p.length > 80 ? '…' + p.slice(-79) : p}`;
         }
     } else if (sync.running) {
         sub = sync.progress || sync.job_type || 'in progress';
-        if (pending.length) sub += ` · +${pending.length} queued`;
+        fullSub = sub;
+        if (pending.length) {
+            sub += ` · +${pending.length} queued`;
+            fullSub += ` · +${pending.length} queued`;
+        }
     } else if (paused) {
         sub = pending.length
             ? `${pending.length} waiting — press Resume to continue`
             : 'Press Resume to continue';
+        fullSub = sub;
     } else if (pending.length) {
         sub = `position 1 · ${pending.length} in queue`;
+        fullSub = sub;
     }
 
     // textContent, not innerHTML: usernames and pause reasons are third-party
     // text (a pause reason can be a verbatim gallery-dl line).
     if (chip.title) chip.title.textContent = title;
     if (chip.sub) chip.sub.textContent = sub;
+    chip.root.title = `${title}\n${fullSub}`;
 
     // Resume only when this lane is paused. Cancel only while it is running.
     if (chip.resume) chip.resume.style.display = paused ? '' : 'none';
@@ -5308,7 +5321,14 @@ async function pollSyncStatus() {
                 elements.syncProgressFill.style.background = 'var(--accent-red)';
             } else if (data.result) {
                 const r = data.result;
-                const isNewResult = state.lastSyncFinishedAt !== data.finished_at;
+                let isNewResult = false;
+                
+                // Seed the baseline on first poll so we don't re-toast old finished jobs on page load
+                if (state.lastSyncFinishedAt === undefined) {
+                    state.lastSyncFinishedAt = data.finished_at;
+                } else if (state.lastSyncFinishedAt !== data.finished_at) {
+                    isNewResult = true;
+                }
 
                 if (r.aborted) {
                     elements.syncStatusText.textContent =
