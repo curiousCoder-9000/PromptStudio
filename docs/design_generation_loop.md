@@ -512,7 +512,7 @@ Fixed structurally rather than with CSS overrides: the two views are now mutuall
 exclusive, each leaving the other on entry. All four are regression checks in
 `tests/ui/test_outputs_gallery.js` (35 checks).
 
-### A2 — Batch generate *(after S6)*
+### A2 — Batch generate ✅
 
 - `ComfyBatchManager` on `BackgroundJob`, `resource="comfy"`.
 - `POST /api/comfy/batch`, `GET /api/comfy/batch/status`, `POST /api/comfy/batch/cancel`.
@@ -521,6 +521,37 @@ exclusive, each leaving the other on entry. All four are regression checks in
 
 **Gate:** 50-item batch runs unattended; cancel stops within one item; a Comfy restart
 mid-batch fails that item and continues; chip resumes after browser refresh.
+
+**As built** (`cebba18` S6, `71e6037` backend, `855e421` frontend).
+
+Two extractions were the bulk of the work, and neither was in the plan:
+
+| Extracted | Why it could not be skipped |
+|-----------|------------------------------|
+| `comfy/params.py` | Prompt selection, Mode E assembly and the numeric defaults were ninety inline lines in `/api/comfy/generate`, reachable only over HTTP and covered by nothing. A batch makes the same decisions per item; a second copy would have drifted within a release. 33 tests now, where there were zero. |
+| `comfy/runner.py` | `ComfyRunner` — upload, queue, poll, download, save, index. No lease, no thread, no status dict. `ComfyJobManager` is now only the singleton, the lease and the status shape the lightbox polls. |
+
+**Mode E broke the skip rule as specified.** §3.5 says items with no prompt are
+skipped and counted. But `build_mode_e_bundle` falls back to
+`"stylish outfit, soft natural lighting, RAW photo, photorealistic, 8k"` when
+handed an empty prompt, so an unanalyzed photo comes back looking analyzed.
+That fallback is *correct* for img2img — the reference image carries the
+subject and the prompt is styling — so it is not a bug to fix. It does mean
+"has this been analyzed" is not readable off the resolved text, and reading it
+there would have run every unanalyzed photo in the archive through one string.
+`GenerationParams.has_prompt_source` is the flag A2 skips on instead.
+
+**The `/interrupt` guard is load-bearing** (§8 predicted this). ComfyUI's
+`/interrupt` takes no argument — it kills whatever is executing. It is only
+sent when the head of `queue_running` is our `prompt_id`; the pending copy is
+dropped by id either way, which is unambiguous. Without that check, cancelling
+a PromptStudio batch would kill a job the user started in the ComfyUI tab.
+
+**Gate status:** cancel-within-one-item, per-item failure isolation and
+chip-resume are asserted (`test_comfy_batch.py`, `test_api_comfy_batch.py`,
+`tests/ui/test_batch_generate.js`, 36 checks). The unattended 50-item run
+against a live ComfyUI is **not** met on the development machine — the wiring
+is tested against a faked ComfyUI, the throughput is not.
 
 ### A4 — Workflow registry
 
