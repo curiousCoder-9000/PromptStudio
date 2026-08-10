@@ -366,6 +366,7 @@ EXCLUDED_FOLDERS = {
     "_trash",
     "_journal",
     "_eval",
+    "_workflows",
 }
 METADATA_SUFFIX = ".meta.json"
 
@@ -418,9 +419,16 @@ COMFYUI_CHECKPOINT = os.environ.get(
     "COMFYUI_CHECKPOINT", "juggernautXL_ragnarok.safetensors"
 )
 _COMFY_PKG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comfy")
-COMFYUI_PRO_WORKFLOW = os.environ.get(
-    "COMFYUI_PRO_WORKFLOW",
-    os.path.join(_COMFY_PKG_DIR, "workflows", "modelToimage_pro.api.json"),
+# A4 workflow registry (see comfy/registry.py). `pro` and `txt2img` ship in the
+# package so a fresh checkout can generate with an empty archive; the user's own
+# ComfyUI exports live beside the archive, where E1 backs them up and a checkout
+# cannot lose them. A user entry shadows a built-in of the same name.
+COMFY_BUILTIN_WORKFLOWS_DIR = os.path.join(_COMFY_PKG_DIR, "workflows")
+# `or`, not a two-arg get: a set-but-empty COMFY_WORKFLOWS_DIR would otherwise
+# resolve to "" and point the registry at the process CWD (hard rule 14's trap,
+# applied to a path instead of a host).
+COMFY_WORKFLOWS_DIR = (
+    os.environ.get("COMFY_WORKFLOWS_DIR", "").strip() or os.path.join(SAVED_DIR, "_workflows")
 )
 COMFYUI_DEFAULT_DENOISE = float(os.environ.get("COMFYUI_DENOISE", "0.70"))
 COMFYUI_DEFAULT_STEPS = int(os.environ.get("COMFYUI_STEPS", "32"))

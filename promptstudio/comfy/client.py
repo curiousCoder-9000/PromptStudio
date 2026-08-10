@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import mimetypes
 import os
@@ -16,13 +15,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from promptstudio.comfy.params import GenerationParams
+from promptstudio.comfy.registry import DEFAULT_WORKFLOW, WorkflowError, get_workflow
 from promptstudio.comfy.runner import ComfyRunner
 from promptstudio.config import (
-    COMFYUI_CHECKPOINT,
     COMFYUI_DEFAULT_CFG,
     COMFYUI_DEFAULT_DENOISE,
     COMFYUI_DEFAULT_STEPS,
-    COMFYUI_PRO_WORKFLOW,
     COMFYUI_URL,
     GENERATIONS_INDEX_FILE,
     GENERATIONS_KEEP_PER_SOURCE,
@@ -34,15 +32,6 @@ from promptstudio.storage.atomic import atomic_write_json
 log = get_logger(__name__)
 
 LEASE_OWNER = "comfy"
-
-# Node ids in modelToimage_pro.api.json (Export API)
-PRO_NODE_LOAD_IMAGE = "4"
-PRO_NODE_POSITIVE = "6"
-PRO_NODE_NEGATIVE = "7"
-PRO_NODE_SAMPLER = "9"
-PRO_NODE_SAVE = "11"
-PRO_NODE_FACE_DETAILER = "22"
-PRO_NODE_CHECKPOINT = "1"
 
 
 def check_comfy_health(timeout: float = 0.4) -> Dict[str, Any]:
@@ -101,75 +90,6 @@ def aspect_to_size(aspect: str, base: int = 1024) -> Tuple[int, int]:
         return 896, 1152
 
 
-def build_txt2img_workflow(
-    positive: str,
-    negative: str,
-    *,
-    seed: int,
-    width: int = 896,
-    height: int = 1152,
-    steps: int = 30,
-    cfg: float = 7.0,
-    checkpoint: str = COMFYUI_CHECKPOINT,
-) -> Dict[str, Any]:
-    """Minimal CheckpointLoader → KSampler API graph (legacy / txt2img fallback).
-
-    ``seed`` is required: see `resolve_seed`.
-    """
-    seed = int(seed)
-    return {
-        "3": {
-            "class_type": "KSampler",
-            "inputs": {
-                "seed": int(seed),
-                "steps": int(steps),
-                "cfg": float(cfg),
-                "sampler_name": "dpmpp_2m",
-                "scheduler": "karras",
-                "denoise": 1,
-                "model": ["4", 0],
-                "positive": ["6", 0],
-                "negative": ["7", 0],
-                "latent_image": ["5", 0],
-            },
-        },
-        "4": {
-            "class_type": "CheckpointLoaderSimple",
-            "inputs": {"ckpt_name": checkpoint},
-        },
-        "5": {
-            "class_type": "EmptyLatentImage",
-            "inputs": {"width": int(width), "height": int(height), "batch_size": 1},
-        },
-        "6": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {"text": positive, "clip": ["4", 1]},
-        },
-        "7": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {"text": negative, "clip": ["4", 1]},
-        },
-        "8": {
-            "class_type": "VAEDecode",
-            "inputs": {"samples": ["3", 0], "vae": ["4", 2]},
-        },
-        "9": {
-            "class_type": "SaveImage",
-            "inputs": {"filename_prefix": "promptstudio", "images": ["8", 0]},
-        },
-    }
-
-
-def load_pro_workflow_template(path: str = COMFYUI_PRO_WORKFLOW) -> Dict[str, Any]:
-    if not os.path.isfile(path):
-        raise FileNotFoundError(f"ComfyUI Pro workflow not found: {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict) or not data:
-        raise ValueError(f"Invalid ComfyUI Pro workflow: {path}")
-    return data
-
-
 def upload_image_to_comfy(
     local_path: str,
     *,
@@ -224,54 +144,6 @@ def upload_image_to_comfy(
         raise RuntimeError(f"ComfyUI upload failed: {payload}")
     sub = (payload.get("subfolder") or "").strip()
     return f"{sub}/{stored}" if sub else stored
-
-
-def build_pro_workflow(
-    *,
-    image_name: str,
-    positive: str,
-    negative: str,
-    seed: int,
-    steps: int = COMFYUI_DEFAULT_STEPS,
-    cfg: float = COMFYUI_DEFAULT_CFG,
-    denoise: float = COMFYUI_DEFAULT_DENOISE,
-    checkpoint: Optional[str] = None,
-    filename_prefix: str = "promptstudio_pro",
-) -> Dict[str, Any]:
-    """Clone modelToimage_pro API graph and inject runtime inputs.
-
-    ``seed`` is required: see `resolve_seed`.
-    """
-    workflow = copy.deepcopy(load_pro_workflow_template())
-    seed = int(seed)
-
-    def node(nid: str) -> Dict[str, Any]:
-        n = workflow.get(nid)
-        if not isinstance(n, dict) or "inputs" not in n:
-            raise KeyError(f"Pro workflow missing node {nid}")
-        return n
-
-    node(PRO_NODE_LOAD_IMAGE)["inputs"]["image"] = image_name
-    node(PRO_NODE_POSITIVE)["inputs"]["text"] = positive
-    node(PRO_NODE_NEGATIVE)["inputs"]["text"] = negative
-
-    sampler_in = node(PRO_NODE_SAMPLER)["inputs"]
-    sampler_in["seed"] = seed
-    sampler_in["steps"] = int(steps)
-    sampler_in["cfg"] = float(cfg)
-    sampler_in["denoise"] = float(denoise)
-
-    node(PRO_NODE_SAVE)["inputs"]["filename_prefix"] = filename_prefix
-
-    if PRO_NODE_FACE_DETAILER in workflow:
-        fd = node(PRO_NODE_FACE_DETAILER)["inputs"]
-        if "seed" in fd:
-            fd["seed"] = seed
-
-    if checkpoint and PRO_NODE_CHECKPOINT in workflow:
-        node(PRO_NODE_CHECKPOINT)["inputs"]["ckpt_name"] = checkpoint
-
-    return workflow
 
 
 class GenerationsIndex:
@@ -370,7 +242,15 @@ class ComfyJobManager:
         mode_e: bool = False,
         prompt_version: Optional[str] = None,
     ) -> bool:
-        workflow = (workflow or "pro").lower()
+        workflow = (workflow or DEFAULT_WORKFLOW).lower()
+        # Resolved here rather than trusted: refusing up front with the name in
+        # the message beats spawning a thread that dies on the first line.
+        try:
+            spec = get_workflow(workflow)
+        except WorkflowError as exc:
+            self.last_refusal = str(exc)
+            return False
+        is_ref = spec.kind == "img2img"
         # Resolve before the thread starts so the caller can report the seed in
         # the HTTP response — the runner is async and would be too late.
         resolved_seed = resolve_seed(seed)
@@ -401,23 +281,25 @@ class ComfyJobManager:
                 "seed": resolved_seed,
             }
 
-        is_pro = workflow in ("pro", "modeltoimage_pro", "ref")
         params = GenerationParams(
             rel_path=source_rel,
             positive=positive,
             negative=negative,
-            workflow="pro" if is_pro else "txt2img",
+            workflow=spec.name,
             variant=workflow,
             aspect=aspect,
-            steps=(steps if steps is not None else (COMFYUI_DEFAULT_STEPS if is_pro else 30)),
-            cfg=(cfg if cfg is not None else (COMFYUI_DEFAULT_CFG if is_pro else 7.0)),
+            steps=(steps if steps is not None else (COMFYUI_DEFAULT_STEPS if is_ref else 30)),
+            cfg=(cfg if cfg is not None else (COMFYUI_DEFAULT_CFG if is_ref else 7.0)),
             denoise=(
                 (denoise if denoise is not None else COMFYUI_DEFAULT_DENOISE)
-                if is_pro
+                if is_ref
                 else None
             ),
             seed=resolved_seed,
-            checkpoint=checkpoint if is_pro else (checkpoint or COMFYUI_CHECKPOINT),
+            # Left as given. The txt2img fallback to the configured checkpoint
+            # is the runner's, so there is one place that decides it and one
+            # value that reaches both the graph and the recorded row.
+            checkpoint=checkpoint,
             mode_e=bool(mode_e),
             prompt_version=prompt_version,
         )

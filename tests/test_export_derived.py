@@ -60,6 +60,10 @@ def populated(make_photo):
 
 def _wipe_derived():
     """Clear every derived store, leaving the media alone."""
+    import shutil
+
+    from promptstudio.config import COMFY_WORKFLOWS_DIR
+
     index = ArchiveIndex.get()
     with index._lock:
         for table in ("prompts", "media_verdicts", "phashes", "generations"):
@@ -69,6 +73,103 @@ def _wipe_derived():
     FavoritesStore().save(set())
     FavoritesStore().invalidate_memory()
     CreatorStyleStore().save({})
+    shutil.rmtree(COMFY_WORKFLOWS_DIR, ignore_errors=True)
+
+
+# ── A4 workflows: file-backed, like favourites and styles ────────────
+
+WF_SLOTS = {
+    "name": "myref",
+    "label": "My reference graph",
+    "kind": "txt2img",
+    "slots": {"positive": {"node": "2", "field": "text"}, "seed": {"node": "3", "field": "seed"}},
+}
+WF_GRAPH = {
+    "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["1", 1]}},
+    "3": {"class_type": "KSampler", "inputs": {"seed": 0}},
+}
+
+
+@pytest.fixture
+def user_workflow():
+    from promptstudio.config import COMFY_WORKFLOWS_DIR
+
+    directory = os.path.join(COMFY_WORKFLOWS_DIR, "myref")
+    os.makedirs(directory, exist_ok=True)
+    for filename, doc in (("slots.json", WF_SLOTS), ("graph.json", WF_GRAPH)):
+        with open(os.path.join(directory, filename), "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+    return "myref"
+
+
+def test_workflows_are_an_exportable_kind(user_workflow, tmp_path):
+    """An imported ComfyUI graph plus its slot map is derived state nobody wants
+    to rebuild by hand — and it is file-backed, so it has no table."""
+    assert "workflows" in DERIVED_KINDS
+    out = tmp_path / "derived.json"
+
+    summary = export_derived(str(out))
+
+    assert summary["workflows"] == 1
+    payload = json.loads(out.read_text(encoding="utf-8"))["payload"]["workflows"]
+    assert payload["myref"]["slots"] == WF_SLOTS
+    assert payload["myref"]["graph"] == WF_GRAPH
+
+
+def test_the_built_in_workflows_are_not_exported(user_workflow, tmp_path):
+    """`pro` and `txt2img` ship with the package. Carrying stale copies in every
+    bundle would let an old export shadow an updated built-in on restore."""
+    out = tmp_path / "derived.json"
+    export_derived(str(out))
+    payload = json.loads(out.read_text(encoding="utf-8"))["payload"]["workflows"]
+    assert set(payload) == {"myref"}
+
+
+def test_a_workflow_survives_the_round_trip_and_is_loadable(user_workflow, tmp_path):
+    from promptstudio.comfy import registry
+
+    out = tmp_path / "derived.json"
+    export_derived(str(out))
+    _wipe_derived()
+    assert "myref" not in registry.workflow_names()
+
+    import_derived(str(out))
+
+    spec = registry.get_workflow("myref")
+    assert spec.label == "My reference graph"
+    assert spec.builtin is False
+
+
+def test_a_bundle_cannot_write_a_workflow_outside_the_registry(user_workflow, tmp_path):
+    """A bundle is a file from somewhere else. A name with a separator in it
+    would land `slots.json` wherever it pointed."""
+    from promptstudio.config import COMFY_WORKFLOWS_DIR
+
+    out = tmp_path / "derived.json"
+    export_derived(str(out))
+    bundle = json.loads(out.read_text(encoding="utf-8"))
+    entry = bundle["payload"]["workflows"].pop("myref")
+    bundle["payload"]["workflows"]["../escaped"] = entry
+    out.write_text(json.dumps(bundle), encoding="utf-8")
+    _wipe_derived()
+
+    summary = import_derived(str(out), kinds=["workflows"])
+
+    assert summary["workflows"] == 0
+    assert not os.path.exists(os.path.join(os.path.dirname(COMFY_WORKFLOWS_DIR), "escaped"))
+
+
+def test_restoring_workflows_alone_leaves_the_other_kinds_untouched(
+    populated, user_workflow, tmp_path
+):
+    out = tmp_path / "derived.json"
+    export_derived(str(out))
+    _wipe_derived()
+
+    summary = import_derived(str(out), kinds=["workflows"])
+
+    assert summary == {"workflows": 1}
+    assert ArchiveIndex.get().prompt_count() == 0
 
 
 def test_export_writes_a_versioned_bundle(populated, tmp_path):

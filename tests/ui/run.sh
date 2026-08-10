@@ -152,7 +152,7 @@ if [ ${#SUITES[@]} -eq 0 ]; then
           test_insights_and_pollers.js test_distribution_guard.js
           test_browse_and_paging.js test_source_filter.js test_post_grouping.js
           test_scrape_lanes.js test_generation_rating.js
-          test_outputs_gallery.js test_batch_generate.js)
+          test_outputs_gallery.js test_batch_generate.js test_workflow_registry.js)
 fi
 
 STATUS=0

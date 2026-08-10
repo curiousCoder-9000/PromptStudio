@@ -27,6 +27,10 @@ const state = {
     ollamaOnline: null,
     comfyOnline: null,
     comfyPollTimer: null,
+    // A4 registry, from /api/workflows. Which graph runs is a user choice now,
+    // not something inferred from which of three buttons was pressed.
+    workflows: [],
+    workflowDefault: 'pro',
     compareMode: false,
     currentGenerations: [],
     // The generation currently shown in the compare pane, and its rating.
@@ -353,6 +357,7 @@ const elements = {
     generateJobChipIcon: document.getElementById('generateJobChipIcon'),
     generateJobChipCancel: document.getElementById('generateJobChipCancel'),
     bulkGenerateBtn: document.getElementById('bulkGenerateBtn'),
+    bulkWorkflowSelect: document.getElementById('bulkWorkflowSelect'),
     outputDetailModal: document.getElementById('outputDetailModal'),
     outputDetailImage: document.getElementById('outputDetailImage'),
     outputDetailSource: document.getElementById('outputDetailSource'),
@@ -370,6 +375,7 @@ const elements = {
     comfySdxlBtn: document.getElementById('comfySdxlBtn'),
     comfyFluxBtn: document.getElementById('comfyFluxBtn'),
     comfyProBtn: document.getElementById('comfyProBtn'),
+    comfyWorkflowSelect: document.getElementById('comfyWorkflowSelect'),
     comfyDenoiseInput: document.getElementById('comfyDenoiseInput'),
     comfyStepsInput: document.getElementById('comfyStepsInput'),
     comfyCfgInput: document.getElementById('comfyCfgInput'),
@@ -587,6 +593,7 @@ async function initApp() {
     // Before fetchCreators, so the first sidebar render already has pills
     // rather than flashing them in a frame later.
     await fetchKnownSources();
+    await fetchWorkflows();
     await fetchCreators();
     await fetchPhotos();
     // Resume job chips if work is mid-flight — jobs live on the server, so a
@@ -637,6 +644,73 @@ function updateOllamaBadge(data) {
     updateComfyButtons();
 }
 
+/**
+ * A4 workflow registry — `<archive>/_workflows/<name>/{graph,slots}.json`, plus
+ * the two that ship with the package.
+ *
+ * The picker is the whole point: before this, the graph was inferred from which
+ * of three buttons you pressed, so a workflow the server could run perfectly
+ * well had no way of being asked for.
+ */
+async function fetchWorkflows() {
+    try {
+        const res = await fetch('/api/workflows');
+        const data = await res.json();
+        state.workflows = Array.isArray(data.workflows) ? data.workflows : [];
+        state.workflowDefault = data.default || state.workflowDefault;
+    } catch (err) {
+        // Degrade to the built-in name rather than to an empty picker: an empty
+        // <select> means the Generate button posts nothing and says nothing.
+        console.error('Error fetching workflows:', err);
+        state.workflows = [];
+    }
+    renderWorkflowPickers();
+    return state.workflows;
+}
+
+function workflowOptions() {
+    if (state.workflows.length) return state.workflows;
+    return [{ name: state.workflowDefault || 'pro', label: 'Pro (reference)', kind: 'img2img' }];
+}
+
+function workflowKind(name) {
+    const found = workflowOptions().find((w) => w.name === name);
+    return found ? found.kind : 'img2img';
+}
+
+function workflowLabel(name) {
+    const found = workflowOptions().find((w) => w.name === name);
+    return found ? found.label : name;
+}
+
+function selectedWorkflow() {
+    const picked = elements.comfyWorkflowSelect && elements.comfyWorkflowSelect.value;
+    return picked || state.workflowDefault || 'pro';
+}
+
+function renderWorkflowPickers() {
+    const entries = workflowOptions();
+    const fallback = entries.some((w) => w.name === state.workflowDefault)
+        ? state.workflowDefault
+        : entries[0].name;
+    [elements.comfyWorkflowSelect, elements.bulkWorkflowSelect].forEach((el) => {
+        if (!el) return;
+        // Keep whatever the user already picked across a refresh of the list.
+        const current = el.value;
+        el.innerHTML = '';
+        entries.forEach((wf) => {
+            const opt = document.createElement('option');
+            opt.value = wf.name;
+            // textContent, not innerHTML: the label comes out of a JSON file the
+            // user wrote, which is third-party text (hard rule 7).
+            opt.textContent = wf.label || wf.name;
+            opt.title = wf.kind;
+            el.appendChild(opt);
+        });
+        el.value = entries.some((w) => w.name === current) ? current : fallback;
+    });
+}
+
 function updateComfyButtons() {
     const on = state.comfyOnline !== false;
     const hasPrompt = Boolean(state.currentPromptData);
@@ -649,6 +723,7 @@ function updateComfyButtons() {
         elements.applyModeEBtn.disabled = !hasPrompt;
     }
     [
+        elements.comfyWorkflowSelect,
         elements.comfyDenoiseInput,
         elements.comfyStepsInput,
         elements.comfyCfgInput,
@@ -657,7 +732,24 @@ function updateComfyButtons() {
     ].forEach((el) => {
         if (el) el.disabled = !on;
     });
+    syncComfyWorkflowControls();
     syncComfySeedInput();
+}
+
+/**
+ * Denoise and Mode E only mean anything to a workflow that takes a reference
+ * image. Leaving them live on a txt2img pick offers two controls the server
+ * will ignore, which reads as a bug in the graph rather than in the UI.
+ */
+function syncComfyWorkflowControls() {
+    const isRef = workflowKind(selectedWorkflow()) === 'img2img';
+    const off = state.comfyOnline === false;
+    [elements.comfyDenoiseInput, elements.comfyModeECheck].forEach((el) => {
+        if (!el) return;
+        el.disabled = off || !isRef;
+        const label = el.closest('.comfy-denoise-label');
+        if (label) label.style.opacity = isRef ? '' : '0.45';
+    });
 }
 
 function syncComfySeedInput() {
@@ -3050,14 +3142,18 @@ async function sendToComfy(variant) {
         || state.currentPromptData.positive_prompt;
     const negative = elements.negativePromptText.innerText.trim()
         || state.currentPromptData.negative_prompt;
-    const workflow = (variant === 'pro' || variant === 'ref') ? 'pro' : 'txt2img';
+    // The picker decides the graph. This used to be inferred from which button
+    // was pressed, which is why a third workflow was unreachable from the UI no
+    // matter what the server could run (A4).
+    const workflow = selectedWorkflow();
+    const isRef = workflowKind(workflow) === 'img2img';
     const controls = readComfyProControls();
     if (elements.comfyStatusText) {
-        elements.comfyStatusText.textContent = workflow === 'pro'
+        elements.comfyStatusText.textContent = isRef
             ? (controls.useModeE
                 ? 'Mode E + uploading reference…'
-                : 'Uploading reference + queueing Pro…')
-            : 'Queueing ComfyUI txt2img…';
+                : `Uploading reference + queueing ${workflowLabel(workflow)}…`)
+            : `Queueing ${workflowLabel(workflow)}…`;
     }
     try {
         const body = {
@@ -3067,7 +3163,7 @@ async function sendToComfy(variant) {
             positive_prompt: positive,
             negative_prompt: negative,
         };
-        if (workflow === 'pro') {
+        if (isRef) {
             body.denoise = controls.denoise;
             body.steps = controls.steps;
             body.cfg_scale = controls.cfg;
@@ -3101,9 +3197,10 @@ async function sendToComfy(variant) {
             elements.comfySeedInput.value = String(data.seed);
         }
         const seedBit = data.seed != null ? ` · seed ${data.seed}` : '';
-        const label = workflow === 'pro'
-            ? `Pro d=${data.denoise ?? controls.denoise}${data.use_mode_e ? ' ModeE' : ''}`
-            : variant.toUpperCase();
+        const label = isRef
+            ? `${workflowLabel(workflow)} d=${data.denoise ?? controls.denoise}`
+                + `${data.use_mode_e ? ' ModeE' : ''}`
+            : `${workflowLabel(workflow)} · ${variant.toUpperCase()}`;
         showToast(`ComfyUI ${label} started${seedBit}`);
         if (elements.comfyStatusText && data.positive_prompt) {
             elements.comfyStatusText.textContent =
@@ -4385,6 +4482,9 @@ function setupEventListeners() {
     }
     if (elements.comfySeedLock) {
         elements.comfySeedLock.addEventListener('change', syncComfySeedInput);
+    }
+    if (elements.comfyWorkflowSelect) {
+        elements.comfyWorkflowSelect.addEventListener('change', syncComfyWorkflowControls);
     }
     if (elements.comfySdxlBtn) {
         elements.comfySdxlBtn.addEventListener('click', () => sendToComfy('sdxl'));
@@ -6427,7 +6527,11 @@ async function startBatchGenerate(body, { label = 'Generate' } = {}) {
 function startBulkGenerate() {
     const paths = Array.from(state.selectedPaths);
     if (!paths.length) return;
-    startBatchGenerate({ paths }, { label: 'Generate' });
+    // The batch runs the workflow the bulk bar's picker names, not whatever the
+    // server would have defaulted to.
+    const workflow = (elements.bulkWorkflowSelect && elements.bulkWorkflowSelect.value)
+        || state.workflowDefault || 'pro';
+    startBatchGenerate({ paths, workflow }, { label: workflowLabel(workflow) });
 }
 
 

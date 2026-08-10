@@ -95,8 +95,10 @@ promptstudio/
       instagram_source.py  # wraps InstagramDownloader
       gallery_dl_source.py # X + Reddit via gallery-dl subprocess
   comfy/
-    client.py            # ComfyJobManager, pro + txt2img workflows
-    workflows/modelToimage_pro.api.json
+    client.py            # ComfyJobManager (lease + status) · params · runner · batch
+    registry.py          # A4: workflows are data — slot map → injected graph
+    workflows/<name>/{graph.json,slots.json}   # built-ins: pro, txt2img
+                         # user entries: <archive>/_workflows/ (COMFY_WORKFLOWS_DIR)
 scripts/                 # thin CLIs only — logic stays in package
 server.py / prompt_engine.py   # shims
 tests/                   # one test_<concern>.py per module; `ls tests/` for the current set

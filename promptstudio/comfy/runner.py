@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from promptstudio.comfy.params import GenerationParams
+from promptstudio.comfy.registry import build_graph, get_workflow
 from promptstudio.config import (
     COMFY_BATCH_ITEM_TIMEOUT,
     COMFYUI_CHECKPOINT,
@@ -33,6 +34,12 @@ log = get_logger(__name__)
 
 ProgressFn = Optional[Callable[[str], None]]
 PromptIdFn = Optional[Callable[[str], None]]
+
+
+def _creator_and_base(rel_path: str) -> tuple:
+    """('creator', 'photo_1') from 'creator/photo_1.jpg'."""
+    creator = rel_path.replace("\\", "/").split("/", 1)[0]
+    return creator, os.path.splitext(os.path.basename(rel_path))[0]
 
 
 class ComfyRunner:
@@ -73,15 +80,61 @@ class ComfyRunner:
         `seed` is required and already resolved — see `client.resolve_seed` for
         why materialising it exactly once, before anything uses it, is the whole
         point.
-        """
-        if params.workflow == "pro":
-            return self._run_pro(params, seed=seed, batch_id=batch_id)
-        return self._run_txt2img(params, seed=seed, batch_id=batch_id)
 
-    def _run_pro(
-        self, params: GenerationParams, *, seed: int, batch_id: Optional[str]
-    ) -> Dict[str, Any]:
-        from promptstudio.comfy.client import build_pro_workflow, upload_image_to_comfy
+        There is one path, not one per workflow. Everything that used to differ
+        between `_run_pro` and `_run_txt2img` — inject here, inject there,
+        upload or not — is now read off the slot map (A4): a workflow needs a
+        reference upload exactly when it declares an `image` slot.
+        """
+        spec = get_workflow(params.workflow)
+
+        image_name: Optional[str] = None
+        filename_prefix: Optional[str] = None
+        if spec.needs_image:
+            image_name = self._upload_reference(params.rel_path)
+        if spec.has("filename_prefix"):
+            creator, base = _creator_and_base(params.rel_path)
+            filename_prefix = f"promptstudio/{creator}/{base}"
+
+        checkpoint = params.checkpoint
+        if checkpoint is None and spec.kind == "txt2img":
+            # A txt2img graph is a skeleton with no checkpoint worth keeping, so
+            # the configured default fills it. An img2img graph is the user's own
+            # ComfyUI export — "no override" there means "use the one you
+            # exported", not "substitute mine".
+            checkpoint = COMFYUI_CHECKPOINT
+
+        graph = build_graph(
+            spec,
+            params,
+            seed=seed,
+            image_name=image_name,
+            filename_prefix=filename_prefix,
+            checkpoint=checkpoint,
+        )
+        self._progress(f"Queueing {spec.label}…")
+        outputs = self._execute(graph, f"Generating ({spec.label})…")
+
+        extra: Dict[str, Any] = {
+            "workflow": spec.name,
+            "steps": params.steps,
+            "cfg": params.cfg,
+            "seed": seed,
+            "checkpoint": checkpoint,
+            "mode_e": params.mode_e,
+            "prompt_version": params.prompt_version,
+            "batch_id": batch_id,
+        }
+        if params.denoise is not None:
+            extra["denoise"] = params.denoise
+        if image_name:
+            extra["reference"] = image_name
+        return self._save_outputs(
+            params.rel_path, outputs, params.positive, params.negative, extra=extra
+        )
+
+    def _upload_reference(self, rel_path: str) -> str:
+        from promptstudio.comfy.client import upload_image_to_comfy
         from promptstudio.storage.archive import ArchiveStore
 
         self._progress("Uploading reference…")
@@ -89,88 +142,14 @@ class ComfyRunner:
         # collapse to the same refusal on purpose: the caller cannot act on the
         # difference, and the old FileNotFoundError(full) put an absolute
         # filesystem path into a user-visible job error.
-        full = ArchiveStore().resolve_path(params.rel_path)
+        full = ArchiveStore().resolve_path(rel_path)
         if not full:
-            raise FileNotFoundError(
-                f"Reference image not found in archive: {params.rel_path}"
-            )
-        creator = params.rel_path.replace("\\", "/").split("/", 1)[0]
-        base = os.path.splitext(os.path.basename(params.rel_path))[0]
+            raise FileNotFoundError(f"Reference image not found in archive: {rel_path}")
+        creator, base = _creator_and_base(rel_path)
         upload_name = f"ps_{creator}_{base}{os.path.splitext(full)[1] or '.jpg'}"
         # Keep upload filename filesystem-safe
-        upload_name = "".join(
-            c if c.isalnum() or c in "._-" else "_" for c in upload_name
-        )
-        image_name = upload_image_to_comfy(full, filename=upload_name, overwrite=True)
-
-        graph = build_pro_workflow(
-            image_name=image_name,
-            positive=params.positive,
-            negative=params.negative,
-            seed=seed,
-            steps=params.steps,
-            cfg=params.cfg,
-            denoise=(
-                params.denoise if params.denoise is not None else 0.70
-            ),
-            checkpoint=params.checkpoint,
-            filename_prefix=f"promptstudio/{creator}/{base}",
-        )
-        self._progress("Queueing Pro workflow…")
-        outputs = self._execute(graph, "Generating (Pro)…")
-        return self._save_outputs(
-            params.rel_path,
-            outputs,
-            params.positive,
-            params.negative,
-            extra={
-                "workflow": "pro",
-                "denoise": params.denoise,
-                "steps": params.steps,
-                "cfg": params.cfg,
-                "seed": seed,
-                "reference": image_name,
-                "checkpoint": params.checkpoint,
-                "mode_e": params.mode_e,
-                "prompt_version": params.prompt_version,
-                "batch_id": batch_id,
-            },
-        )
-
-    def _run_txt2img(
-        self, params: GenerationParams, *, seed: int, batch_id: Optional[str]
-    ) -> Dict[str, Any]:
-        from promptstudio.comfy.client import aspect_to_size, build_txt2img_workflow
-
-        width, height = aspect_to_size(params.aspect)
-        checkpoint = params.checkpoint or COMFYUI_CHECKPOINT
-        graph = build_txt2img_workflow(
-            params.positive,
-            params.negative,
-            seed=seed,
-            width=width,
-            height=height,
-            steps=params.steps,
-            cfg=params.cfg,
-            checkpoint=checkpoint,
-        )
-        outputs = self._execute(graph, "Generating…")
-        return self._save_outputs(
-            params.rel_path,
-            outputs,
-            params.positive,
-            params.negative,
-            extra={
-                "workflow": "txt2img",
-                "steps": params.steps,
-                "cfg": params.cfg,
-                "seed": seed,
-                "checkpoint": checkpoint,
-                "mode_e": params.mode_e,
-                "prompt_version": params.prompt_version,
-                "batch_id": batch_id,
-            },
-        )
+        upload_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in upload_name)
+        return upload_image_to_comfy(full, filename=upload_name, overwrite=True)
 
     def _execute(self, graph: Dict[str, Any], progress: str) -> List[Dict[str, str]]:
         prompt_id = self._queue_prompt(graph, str(uuid.uuid4()))

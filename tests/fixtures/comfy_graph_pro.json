@@ -1,0 +1,363 @@
+{
+  "1": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "juggernautXL_ragnarok.safetensors"
+    }
+  },
+  "10": {
+    "class_type": "VAEDecode",
+    "inputs": {
+      "samples": [
+        "9",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    }
+  },
+  "11": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "promptstudio/creator/photo_1",
+      "images": [
+        "22",
+        0
+      ]
+    }
+  },
+  "2": {
+    "class_type": "CLIPVisionLoader",
+    "inputs": {
+      "clip_name": "CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
+    }
+  },
+  "22": {
+    "_meta": {
+      "title": "Face Cleanup (light)"
+    },
+    "class_type": "FaceDetailer",
+    "inputs": {
+      "bbox_crop_factor": 3.0,
+      "bbox_detector": [
+        "23",
+        0
+      ],
+      "bbox_dilation": 10,
+      "bbox_threshold": 0.5,
+      "cfg": 4.0,
+      "clip": [
+        "1",
+        1
+      ],
+      "cycle": 1,
+      "denoise": 0.15,
+      "drop_size": 10,
+      "feather": 5,
+      "force_inpaint": true,
+      "guide_size": 384,
+      "guide_size_for": true,
+      "image": [
+        "10",
+        0
+      ],
+      "max_size": 1024,
+      "model": [
+        "1",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "noise_mask": true,
+      "positive": [
+        "6",
+        0
+      ],
+      "sam_bbox_expansion": 0,
+      "sam_detection_hint": "center-1",
+      "sam_dilation": 0,
+      "sam_mask_hint_threshold": 0.7,
+      "sam_mask_hint_use_negative": "False",
+      "sam_threshold": 0.93,
+      "sampler_name": "dpmpp_2m_sde",
+      "scheduler": "karras",
+      "seed": 777333,
+      "steps": 16,
+      "vae": [
+        "1",
+        2
+      ],
+      "wildcard": ""
+    }
+  },
+  "23": {
+    "class_type": "UltralyticsDetectorProvider",
+    "inputs": {
+      "model_name": "bbox/face_yolov8m.pt"
+    }
+  },
+  "24": {
+    "_meta": {
+      "title": "Scale Reference (all branches)"
+    },
+    "class_type": "ImageScale",
+    "inputs": {
+      "crop": "disabled",
+      "height": 0,
+      "image": [
+        "4",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "width": 1024
+    }
+  },
+  "25": {
+    "_meta": {
+      "title": "Encode Full Reference (keep body)"
+    },
+    "class_type": "VAEEncode",
+    "inputs": {
+      "pixels": [
+        "24",
+        0
+      ],
+      "vae": [
+        "1",
+        2
+      ]
+    }
+  },
+  "26": {
+    "class_type": "ControlNetLoader",
+    "inputs": {
+      "control_net_name": "OpenPoseXL2.safetensors"
+    }
+  },
+  "27": {
+    "_meta": {
+      "title": "Extract Body Pose"
+    },
+    "class_type": "DWPreprocessor",
+    "inputs": {
+      "bbox_detector": "yolox_l.onnx",
+      "detect_body": "enable",
+      "detect_face": "disable",
+      "detect_hand": "enable",
+      "image": [
+        "24",
+        0
+      ],
+      "pose_estimator": "dw-ll_ucoco_384.onnx",
+      "resolution": 1024,
+      "scale_stick_for_xinsr_cn": "disable"
+    }
+  },
+  "28": {
+    "_meta": {
+      "title": "Apply Pose Control"
+    },
+    "class_type": "ControlNetApplyAdvanced",
+    "inputs": {
+      "control_net": [
+        "26",
+        0
+      ],
+      "end_percent": 0.85,
+      "image": [
+        "27",
+        0
+      ],
+      "negative": [
+        "7",
+        0
+      ],
+      "positive": [
+        "6",
+        0
+      ],
+      "start_percent": 0.0,
+      "strength": 0.8
+    }
+  },
+  "29": {
+    "_meta": {
+      "title": "Face Mask"
+    },
+    "class_type": "BboxDetectorCombined_v2",
+    "inputs": {
+      "bbox_detector": [
+        "23",
+        0
+      ],
+      "dilation": 8,
+      "image": [
+        "24",
+        0
+      ],
+      "threshold": 0.5
+    }
+  },
+  "3": {
+    "_meta": {
+      "title": "Plus-Face (identity)"
+    },
+    "class_type": "IPAdapterModelLoader",
+    "inputs": {
+      "ipadapter_file": "ip-adapter-plus-face_sdxl_vit-h.safetensors"
+    }
+  },
+  "30": {
+    "_meta": {
+      "title": "Face Mask (IPAdapter only)"
+    },
+    "class_type": "GrowMask",
+    "inputs": {
+      "expand": 24,
+      "mask": [
+        "29",
+        0
+      ],
+      "tapered_corners": true
+    }
+  },
+  "33": {
+    "_meta": {
+      "title": "Plus SDXL (body shape)"
+    },
+    "class_type": "IPAdapterModelLoader",
+    "inputs": {
+      "ipadapter_file": "ip-adapter-plus_sdxl_vit-h.safetensors"
+    }
+  },
+  "34": {
+    "_meta": {
+      "title": "IPAdapter BODY (composition)"
+    },
+    "class_type": "IPAdapterAdvanced",
+    "inputs": {
+      "clip_vision": [
+        "2",
+        0
+      ],
+      "combine_embeds": "concat",
+      "embeds_scaling": "V only",
+      "end_at": 0.85,
+      "image": [
+        "24",
+        0
+      ],
+      "ipadapter": [
+        "33",
+        0
+      ],
+      "model": [
+        "5",
+        0
+      ],
+      "start_at": 0.0,
+      "weight": 0.55,
+      "weight_type": "composition"
+    }
+  },
+  "4": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "ps_creator_photo_1.jpg"
+    }
+  },
+  "5": {
+    "_meta": {
+      "title": "IPAdapter FACE (identity)"
+    },
+    "class_type": "IPAdapterAdvanced",
+    "inputs": {
+      "attn_mask": [
+        "30",
+        0
+      ],
+      "clip_vision": [
+        "2",
+        0
+      ],
+      "combine_embeds": "concat",
+      "embeds_scaling": "V only",
+      "end_at": 0.9,
+      "image": [
+        "24",
+        0
+      ],
+      "ipadapter": [
+        "3",
+        0
+      ],
+      "model": [
+        "1",
+        0
+      ],
+      "start_at": 0.0,
+      "weight": 0.85,
+      "weight_type": "linear"
+    }
+  },
+  "6": {
+    "_meta": {
+      "title": "Positive (outfit + scene)"
+    },
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "1",
+        1
+      ],
+      "text": "POS text"
+    }
+  },
+  "7": {
+    "_meta": {
+      "title": "Negative Prompt"
+    },
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": [
+        "1",
+        1
+      ],
+      "text": "NEG text"
+    }
+  },
+  "9": {
+    "_meta": {
+      "title": "Img2Img (preserve body shape)"
+    },
+    "class_type": "KSampler",
+    "inputs": {
+      "cfg": 5.5,
+      "denoise": 0.63,
+      "latent_image": [
+        "25",
+        0
+      ],
+      "model": [
+        "34",
+        0
+      ],
+      "negative": [
+        "28",
+        1
+      ],
+      "positive": [
+        "28",
+        0
+      ],
+      "sampler_name": "dpmpp_2m_sde",
+      "scheduler": "karras",
+      "seed": 777333,
+      "steps": 41
+    }
+  }
+}

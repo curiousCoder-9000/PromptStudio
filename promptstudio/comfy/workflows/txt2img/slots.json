@@ -1,0 +1,15 @@
+{
+  "name": "txt2img",
+  "label": "Txt2img (no reference)",
+  "kind": "txt2img",
+  "slots": {
+    "positive": {"node": "6", "field": "text"},
+    "negative": {"node": "7", "field": "text"},
+    "seed": {"node": "3", "field": "seed"},
+    "steps": {"node": "3", "field": "steps"},
+    "cfg": {"node": "3", "field": "cfg"},
+    "checkpoint": {"node": "4", "field": "ckpt_name"},
+    "width": {"node": "5", "field": "width"},
+    "height": {"node": "5", "field": "height"}
+  }
+}

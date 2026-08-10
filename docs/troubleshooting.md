@@ -117,7 +117,13 @@ Index is `archive.db` next to media.
 
 - ComfyUI running; `GET /api/health` → `comfy: true`.
 - Checkpoint `COMFYUI_CHECKPOINT` must exist in Comfy models.
-- Pro workflow JSON: `promptstudio/comfy/workflows/modelToimage_pro.api.json`.
+- Pro workflow: `promptstudio/comfy/workflows/pro/` — `graph.json` (ComfyUI API export)
+  plus `slots.json` (where the prompt, seed and parameters are injected).
+- `GET /api/workflows` lists what the picker offers. A workflow missing from it failed
+  validation — `<archive>/promptstudio.log` has the line, naming the slot or node id.
+- To use your own graph: export it from ComfyUI with **Export (API)**, drop it and a
+  `slots.json` into `<archive>/_workflows/<name>/`. A user entry shadows a built-in of
+  the same name, so `<archive>/_workflows/pro/` overrides the shipped Pro graph.
 
 ### Thumbs broken
 

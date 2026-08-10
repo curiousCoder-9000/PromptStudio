@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from promptstudio.comfy.registry import DEFAULT_WORKFLOW, get_workflow
 from promptstudio.config import (
     COMFYUI_DEFAULT_CFG,
     COMFYUI_DEFAULT_DENOISE,
@@ -77,12 +78,17 @@ class GenerationParams:
 
 def _infer_workflow(variant: str, explicit: str) -> str:
     if explicit:
+        # Checked against the registry rather than trusted. An unrecognised name
+        # used to fall straight through to the txt2img branch below, so a typo'd
+        # workflow silently produced a no-reference render at someone else's
+        # step count instead of an error.
+        get_workflow(explicit)
         return explicit
     if variant in _TXT2IMG_VARIANTS:
         return "txt2img"
     # Unknown variants get the reference graph, which is what the product is
     # for; a typo should not silently drop the reference image.
-    return "pro"
+    return DEFAULT_WORKFLOW
 
 
 def resolve_generation_params(
@@ -105,6 +111,10 @@ def resolve_generation_params(
 
     variant = str(data.get("variant") or "pro").lower()
     workflow = _infer_workflow(variant, str(data.get("workflow") or "").lower())
+    # Which defaults apply is a property of the *graph*, not of the string
+    # "pro". A second reference workflow must get the reference defaults, or A4
+    # ships a registry that only one entry can actually be driven through.
+    is_ref = get_workflow(workflow).kind == "img2img"
 
     positive = data.get("positive_prompt")
     negative = data.get("negative_prompt")
@@ -117,11 +127,11 @@ def resolve_generation_params(
 
     use_mode_e = data.get("use_mode_e")
     if use_mode_e is None:
-        use_mode_e = workflow == "pro"
+        use_mode_e = is_ref
     # Mode E is a property of the reference graph. Claiming it on a txt2img run
     # would write a wrong `mode_e` into the generations row, and that column is
     # one of the cuts keep_rate is sliced by.
-    use_mode_e = bool(use_mode_e) and workflow == "pro"
+    use_mode_e = bool(use_mode_e) and is_ref
 
     mode_meta: Optional[Dict[str, Any]] = None
     if use_mode_e:
@@ -171,7 +181,7 @@ def resolve_generation_params(
     if not str(positive).strip():
         raise NoPromptError(rel_path)
 
-    if workflow == "pro":
+    if is_ref:
         steps = int(
             data.get("steps") if data.get("steps") is not None else COMFYUI_DEFAULT_STEPS
         )

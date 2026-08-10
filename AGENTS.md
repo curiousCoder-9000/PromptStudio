@@ -66,6 +66,7 @@ These are the single source of truth — other docs point here rather than resta
 | Duplicate detection | `promptstudio/storage/dedupe.py` |
 | Instagram sync | `promptstudio/scraping/downloader.py` |
 | Add a scrape source | `promptstudio/scraping/sources/` |
+| Add a ComfyUI workflow | `promptstudio/comfy/registry.py` · `comfy/workflows/<name>/` |
 | ComfyUI | `promptstudio/comfy/client.py` |
 | Frontend | `app.js` |
 

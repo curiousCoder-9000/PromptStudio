@@ -1,0 +1,17 @@
+{
+  "name": "pro",
+  "label": "Pro (reference)",
+  "kind": "img2img",
+  "slots": {
+    "positive": {"node": "6", "field": "text"},
+    "negative": {"node": "7", "field": "text"},
+    "image": {"node": "4", "field": "image"},
+    "seed": [{"node": "9", "field": "seed"},
+             {"node": "22", "field": "seed"}],
+    "steps": {"node": "9", "field": "steps"},
+    "cfg": {"node": "9", "field": "cfg"},
+    "denoise": {"node": "9", "field": "denoise"},
+    "checkpoint": {"node": "1", "field": "ckpt_name"},
+    "filename_prefix": {"node": "11", "field": "filename_prefix"}
+  }
+}

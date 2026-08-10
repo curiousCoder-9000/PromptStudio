@@ -4,8 +4,8 @@ Export or restore the archive's derived state as one portable file.
 
 Derived state is everything the archive cannot re-download: prompts and
 keep/reject verdicts that cost GPU hours, favourites and generation ratings
-that are your own judgement, creator styles, perceptual hashes, and the
-generation index with its seeds.
+that are your own judgement, creator styles, perceptual hashes, the generation
+index with its seeds, and the ComfyUI workflows you imported and slotted by hand.
 
     py scripts/export_derived.py                        # -> derived_state.json.gz
     py scripts/export_derived.py backup.json            # uncompressed

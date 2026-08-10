@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|--------|
-| **Status** | **A0 · A1 · A3 shipped** (roadmap Phase 13, closed). A2 · A4 remain, as Phase 14. |
+| **Status** | **A0 · A1 · A3 shipped** (roadmap Phase 13, closed) · **A2 · A4 shipped** (Phase 14). A4's import UI deferred — §4. |
 | **Date** | 2026-08-09 |
 | **Problem** | The product acquires 4,400 images and can render them one at a time, through a lightbox, with one hardcoded workflow, into a directory nobody can browse. The user's verdict on the output is never captured. |
 | **Source** | [`product_review.md`](product_review.md) Theme A · [`roadmap.md`](roadmap.md) Phases 13–14 |
@@ -553,15 +553,76 @@ chip-resume are asserted (`test_comfy_batch.py`, `test_api_comfy_batch.py`,
 against a live ComfyUI is **not** met on the development machine — the wiring
 is tested against a faked ComfyUI, the throughput is not.
 
-### A4 — Workflow registry
+### A4 — Workflow registry ✅ *(import flow deferred — see below)*
 
-- Registry loader + slot-map injector; `pro`/`txt2img` migrated onto it and the constants
-  deleted.
-- Import + validate UI; workflow picker in lightbox and batch.
-- `_workflows` excluded and exported.
+- ✅ `comfy/registry.py`: `list_workflows()` · `get_workflow()` · `build_graph()`, plus
+  load-time validation that names the slot, the node id or the input at fault.
+- ✅ `pro` and `txt2img` are registry entries under `comfy/workflows/<name>/`.
+  `modelToimage_pro.api.json` was **moved**, not copied, to `pro/graph.json` — one graph
+  file in the repo, not two. `COMFYUI_PRO_WORKFLOW` is gone with it: pointing at a
+  different pro graph is now `<archive>/_workflows/pro/`, which shadows the built-in.
+- ✅ `PRO_NODE_*`, `build_pro_workflow`, `build_txt2img_workflow` and
+  `load_pro_workflow_template` **deleted**. `ComfyRunner._run_pro` / `_run_txt2img`
+  collapsed into one `run()`: whether to upload a reference is now
+  `"image" in slots`, and the FaceDetailer's second seed is the slot map's list form.
+- ✅ `GET /api/workflows`; picker in the lightbox generate panel and the bulk bar.
+- ✅ `COMFY_WORKFLOWS_DIR`, `_workflows` in `EXCLUDED_FOLDERS`, `workflows` in E1's
+  `DERIVED_KINDS` (file-backed, like `favorites` / `styles` — no `_TABLE_FOR_KIND` entry).
+- ✅ Tests: `tests/test_workflow_registry.py` (39) · `tests/test_export_derived.py` +5 ·
+  `tests/ui/test_workflow_registry.js` (28 checks). `tests/test_comfy_seed.py` and
+  `tests/test_generation_records.py` retargeted off the deleted `PRO_NODE_*` onto the
+  slot map, so a re-slotted graph cannot make them lie.
 
-**Gate:** `pro` through the registry produces a graph byte-identical to today's
-`build_pro_workflow` output for the same inputs — a regression fixture, not a judgement.
+**Gate: met.** `tests/test_workflow_registry.py` asserts
+`json.dumps(registry.build_graph("pro", …), sort_keys=True)` equals the legacy builder's
+output for the same inputs. It was written and run **against the live
+`build_pro_workflow`** — watched to fail (no registry), then to pass — and only then was
+that function deleted, with its output frozen into `tests/fixtures/comfy_graph_pro.json`
+so the gate outlives the code it was checking. Same for `txt2img`. The fixtures are the
+only surviving record of the old behaviour; regenerating one to make a test pass would
+throw the gate away. Verified to bite: dropping node 22 from `pro`'s `seed` slot fails it.
+
+**Two slots the design's list did not have.** §3.6 names nine; `pro` uses exactly those.
+`txt2img` also needs **`width` / `height`**, because its size comes from `aspect_ratio`
+via `aspect_to_size()` and there is no other way for that to reach `EmptyLatentImage`.
+Conversely `txt2img` declares **no `filename_prefix`** — `build_txt2img_workflow`
+hardcoded `"promptstudio"` and never took the per-creator prefix, so slotting it would
+have changed behaviour. (That asymmetry looks like a latent bug: txt2img output lands
+un-namespaced in ComfyUI's own output dir. Left alone; it is not A4's to fix.)
+
+**`kind` replaced `== "pro"` in three more places.** Steps/cfg/denoise defaults, the Mode
+E default, and the reference upload were all keyed off the literal name. A second
+`img2img` entry would have silently got txt2img's 30/7.0 and no Mode E — a registry only
+one entry could actually be driven through. They now read `spec.kind` /
+`spec.needs_image`. The txt2img checkpoint fallback to `COMFYUI_CHECKPOINT` stayed, but
+moved into the runner so one value reaches both the graph and the recorded row.
+
+**Deliberately deferred, and why.** `POST /api/workflows/import`, the
+`class_type` → slot auto-proposal, the remap form, and `/object_info` validation are
+**not** built. Their gate — "every `class_type` is known to the running ComfyUI" — cannot
+be met without a live ComfyUI, and this repo's test suites deliberately have none. A
+mocked `/object_info` would prove nothing about the case the feature exists for (an
+imported graph referencing a custom node the user has not installed). Until then a
+workflow is installed by dropping `graph.json` + `slots.json` into
+`<archive>/_workflows/<name>/`, the registry validates everything that can be checked
+offline, and E1 backs the directory up.
+
+**No cache, and here is the number.** Nothing is memoised: `get_workflow` re-reads
+`slots.json` and `build_graph` re-reads `graph.json` on every call. Measured on the real
+`pro` graph, 200 iterations: `get_workflow` **0.32 ms**, `build_graph` **0.43 ms**,
+`list_workflows` **0.51 ms**. One lightbox generate makes four `get_workflow` calls and
+one `build_graph` — **1.7 ms**, against a run that spends tens of seconds on the GPU
+(~0.006%). A cache would buy that back and pay for it with a stale-file bug the first
+time someone edits a `slots.json` with the server up, which is exactly the workflow this
+feature is for.
+
+**A path-traversal read, found by writing the test for it.** `workflow` arrives off an
+HTTP body and is `os.path.join`-ed onto the registry root, and `os.path.join(root,
+"/etc")` discards the root — `get_workflow("/etc")` really did try to open
+`/etc/slots.json`. Read-only and it errored out, but it is the same defect
+`roadmap.md` Phase 9 records in `resolve_path`. Names are now refused unless they are a
+bare directory name (`registry.is_valid_name`), and the E1 import — which *writes* —
+uses the same rule rather than a second copy of it.
 
 ---
 
@@ -577,7 +638,7 @@ is tested against a faked ComfyUI, the throughput is not.
 | 6 | Batch cancel latency | ≤ 1 item, in-flight interrupted |
 | 7 | `keep_rate` available, sliced by `prompt_version` / `workflow` / `checkpoint` | yes |
 | 8 | Existing one-shot lightbox generate | behaviour unchanged (regression gate) |
-| 9 | `pro` graph via registry vs `build_pro_workflow` | byte-identical (regression gate) |
+| 9 | `pro` graph via registry vs `build_pro_workflow` | byte-identical (regression gate) ✅ |
 
 (1) and (7) are the two that matter. (1) is the defect nobody had noticed; (7) is the
 first time the product can answer whether any of its AI work is producing what the user
@@ -595,8 +656,8 @@ wants.
 | `POST` | `/api/comfy/batch` | **new** — `paths[]` or `creator`+filters, `limit`, workflow params |
 | `GET` | `/api/comfy/batch/status` | **new** — snapshot; `pending` never recomputed per poll |
 | `POST` | `/api/comfy/batch/cancel` | **new** — cooperative + in-flight interrupt |
-| `GET` | `/api/workflows` | **new** (A4) — registry list |
-| `POST` | `/api/workflows/import` | **new** (A4) — graph + slot map, validated |
+| `GET` | `/api/workflows` | **shipped** (A4) — registry list: `name`, `label`, `kind`, plus `default` |
+| `POST` | `/api/workflows/import` | **deferred** (A4) — its `/object_info` gate needs a running ComfyUI (§4) |
 | `GET` | `/api/generations?path=` | **unchanged** — lightbox back-compat |
 | `POST` | `/api/comfy/generate` | **unchanged** contract; response gains real `seed` |
 

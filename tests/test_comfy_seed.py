@@ -3,8 +3,12 @@
 `build_pro_workflow` used to roll its own random seed when handed None. The
 graph got a real value, the saved record got None, and the UI leaves the seed
 lock off by default — so every generation made the normal way was
-unreproducible. These tests pin the contract at both ends: the builders refuse
+unreproducible. These tests pin the contract at both ends: the builder refuses
 to invent a seed, and the value in the graph is the value in the record.
+
+Since A4 the builder is `registry.build_graph` and the node ids come from the
+slot map rather than from `PRO_NODE_*` constants — the assertions below read
+them out of the registry so a re-slotted graph cannot make this file lie.
 """
 
 import json
@@ -12,13 +16,37 @@ import os
 
 import pytest
 
-from promptstudio.comfy.client import (
-    PRO_NODE_FACE_DETAILER,
-    PRO_NODE_SAMPLER,
-    build_pro_workflow,
-    build_txt2img_workflow,
-    resolve_seed,
-)
+from promptstudio.comfy import registry
+from promptstudio.comfy.client import resolve_seed
+from promptstudio.comfy.params import GenerationParams
+
+
+def _pro_seed_nodes():
+    return [ref.node for ref in registry.get_workflow("pro").slots["seed"]]
+
+
+PRO_SAMPLER = "9"
+
+
+def _params(workflow="pro", **over):
+    base = dict(
+        rel_path="creator/photo.jpg",
+        positive="a",
+        negative="b",
+        workflow=workflow,
+        variant=workflow,
+        aspect="4:5",
+        steps=32,
+        cfg=6.0,
+        denoise=0.7 if workflow == "pro" else None,
+        seed=None,
+        checkpoint=None,
+        mode_e=False,
+        prompt_version=None,
+    )
+    base.update(over)
+    return GenerationParams(**base)
+
 
 # ── resolve_seed ─────────────────────────────────────────────────────
 
@@ -39,36 +67,32 @@ def test_resolve_seed_is_not_constant():
     assert len({resolve_seed(None) for _ in range(20)}) > 1
 
 
-# ── builders require a seed ──────────────────────────────────────────
+# ── the builder requires a seed ──────────────────────────────────────
 
 
-def test_txt2img_builder_requires_a_seed():
+@pytest.mark.parametrize("workflow", ["pro", "txt2img"])
+def test_the_builder_requires_a_seed(workflow):
     with pytest.raises(TypeError):
-        build_txt2img_workflow("a", "b")  # type: ignore[call-arg]
-
-
-def test_pro_builder_requires_a_seed():
-    with pytest.raises(TypeError):
-        build_pro_workflow(  # type: ignore[call-arg]
-            image_name="x.jpg", positive="a", negative="b"
+        registry.build_graph(  # type: ignore[call-arg]
+            workflow, _params(workflow), image_name="x.jpg"
         )
 
 
 def test_txt2img_builder_injects_the_given_seed():
-    graph = build_txt2img_workflow("a", "b", seed=4242)
+    graph = registry.build_graph("txt2img", _params("txt2img"), seed=4242)
     assert graph["3"]["inputs"]["seed"] == 4242
 
 
 def test_pro_builder_injects_the_given_seed_everywhere():
-    graph = build_pro_workflow(
-        image_name="ref.jpg", positive="a", negative="b", seed=4242
+    graph = registry.build_graph(
+        "pro", _params(), seed=4242, image_name="ref.jpg", filename_prefix="p"
     )
-    assert graph[PRO_NODE_SAMPLER]["inputs"]["seed"] == 4242
-    # The FaceDetailer pass has its own seed input and must not diverge.
-    if PRO_NODE_FACE_DETAILER in graph:
-        fd = graph[PRO_NODE_FACE_DETAILER]["inputs"]
-        if "seed" in fd:
-            assert fd["seed"] == 4242
+    # Every node the slot map points at, not just the sampler: the FaceDetailer
+    # pass has its own seed input and must not diverge.
+    nodes = _pro_seed_nodes()
+    assert len(nodes) > 1, "the multi-node seed case is what this test is for"
+    for node in nodes:
+        assert graph[node]["inputs"]["seed"] == 4242
 
 
 # ── end to end: graph seed == recorded seed ──────────────────────────
@@ -88,7 +112,7 @@ def test_unpinned_seed_is_recorded(make_photo, fake_comfy, run_comfy_job):
     recorded = status["result"]["seed"]
     assert isinstance(recorded, int)
 
-    graph_seed = fake_comfy["graph"][PRO_NODE_SAMPLER]["inputs"]["seed"]
+    graph_seed = fake_comfy["graph"][PRO_SAMPLER]["inputs"]["seed"]
     assert recorded == graph_seed, "recorded seed differs from the one rendered with"
     assert status["seed"] == recorded
 
@@ -104,7 +128,7 @@ def test_pinned_seed_is_honoured_and_recorded(make_photo, fake_comfy, run_comfy_
     )
 
     assert status["result"]["seed"] == 99887766
-    assert fake_comfy["graph"][PRO_NODE_SAMPLER]["inputs"]["seed"] == 99887766
+    assert fake_comfy["graph"][PRO_SAMPLER]["inputs"]["seed"] == 99887766
 
 
 def test_txt2img_seed_is_recorded(make_photo, fake_comfy, run_comfy_job):

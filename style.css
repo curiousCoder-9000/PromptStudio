@@ -1577,6 +1577,17 @@ body {
     height: 14px;
 }
 
+/* A4 workflow picker. Labels come from a user-written slots.json, so the width
+   is capped and the text ellipsised rather than letting one verbose label
+   reflow the whole control row. */
+.comfy-workflow-select,
+#bulkWorkflowSelect {
+    max-width: 190px;
+    padding: 5px 8px;
+    border-radius: 8px;
+    text-overflow: ellipsis;
+}
+
 #comfyProBtn {
     background: rgba(139, 92, 246, 0.28);
     border-color: rgba(139, 92, 246, 0.5);
