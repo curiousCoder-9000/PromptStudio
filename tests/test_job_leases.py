@@ -289,6 +289,7 @@ def test_comfy_takes_the_comfy_lease_while_generating(make_photo, monkeypatch):
 
     from promptstudio.comfy import client as comfy
     from promptstudio.comfy.client import ComfyJobManager
+    from promptstudio.comfy.runner import ComfyRunner
     from promptstudio.jobs import LEASES
 
     rel, _ = make_photo(creator="leasetest", name="a.jpg")
@@ -301,15 +302,15 @@ def test_comfy_takes_the_comfy_lease_while_generating(make_photo, monkeypatch):
         return "prompt-1"
 
     monkeypatch.setattr(comfy, "upload_image_to_comfy", lambda *a, **k: "ref.jpg")
-    monkeypatch.setattr(ComfyJobManager, "_queue_prompt", fake_queue)
+    monkeypatch.setattr(ComfyRunner, "_queue_prompt", fake_queue)
     monkeypatch.setattr(
-        ComfyJobManager,
+        ComfyRunner,
         "_wait_for_images",
         lambda self, pid, timeout_sec=600: [
             {"filename": "o.png", "subfolder": "", "type": "output"}
         ],
     )
-    monkeypatch.setattr(ComfyJobManager, "_download_image", lambda self, m: b"\x89PNG")
+    monkeypatch.setattr(ComfyRunner, "_download_image", lambda self, m: b"\x89PNG")
 
     LEASES.reset()
     mgr = ComfyJobManager()

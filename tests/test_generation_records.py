@@ -1,4 +1,4 @@
-"""A0 — what `_save_outputs` records, end to end through a mocked ComfyUI.
+"""A0 — what `ComfyRunner._save_outputs` records, end to end through a mocked ComfyUI.
 
 `tests/test_generations_store.py` covers the table in isolation. This file
 covers the write path that fills it, which is where the truncation and the
@@ -7,7 +7,7 @@ covers the write path that fills it, which is where the truncation and the
 
 from __future__ import annotations
 
-from promptstudio.comfy.client import ComfyJobManager
+from promptstudio.comfy.runner import ComfyRunner
 from promptstudio.storage.db import ArchiveIndex
 
 
@@ -29,7 +29,7 @@ def test_two_generations_in_the_same_second_do_not_overwrite_each_other(
     of the same photo within one second wrote over the first — on disk, before
     any index was involved."""
     rel, _ = make_photo(creator="gentest", name="collide.jpg")
-    manager = ComfyJobManager()
+    manager = ComfyRunner()
 
     first = _save_one(manager, rel, index=1)
     second = _save_one(manager, rel, index=2)
@@ -44,7 +44,7 @@ def test_more_than_twenty_generations_for_one_source_all_survive(
     """§2.2: `items[:20]` was data loss that only becomes visible once
     something renders the history."""
     rel, _ = make_photo(creator="gentest", name="many.jpg")
-    manager = ComfyJobManager()
+    manager = ComfyRunner()
 
     for i in range(22):
         _save_one(manager, rel, index=i)
@@ -58,7 +58,7 @@ def test_the_recorded_prompt_is_not_truncated(make_photo, fake_comfy):
     rel, _ = make_photo(creator="gentest", name="long.jpg")
     long_positive = "cinematic portrait, golden hour, 85mm, " * 40
     assert len(long_positive) > 500
-    manager = ComfyJobManager()
+    manager = ComfyRunner()
 
     _save_one(manager, rel, index=1, positive=long_positive)
 
@@ -70,7 +70,7 @@ def test_checkpoint_and_mode_e_are_persisted(make_photo, fake_comfy):
     """Both existed only in the handler's `mode_meta` and were never written,
     so "is Mode E worth it" was unanswerable (§3.3)."""
     rel, _ = make_photo(creator="gentest", name="meta.jpg")
-    manager = ComfyJobManager()
+    manager = ComfyRunner()
 
     manager._save_outputs(
         rel,

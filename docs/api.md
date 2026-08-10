@@ -51,6 +51,9 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/scrape/resume` | Resume + try drain. Optional `source` |
 | `POST` | `/api/comfy/generate` | Queue ComfyUI Pro (ref) or txt2img |
 | `GET` | `/api/comfy/status` | ComfyUI job progress |
+| `POST` | `/api/comfy/batch` | Batch generate — `paths[]` or `/api/photos` filters |
+| `GET` | `/api/comfy/batch/status` | Batch generate progress |
+| `POST` | `/api/comfy/batch/cancel` | Cooperative cancel + in-flight interrupt |
 | `GET` | `/api/generations` | Saved generations for a source photo |
 | `GET` | `/api/generations/list` | Outputs gallery — filter, sort, paginate |
 | `PUT` | `/api/generation/rate` | Rate one output: `-1` discard · `0` unrated · `1` keep · `2` star |
@@ -359,6 +362,84 @@ Outputs are saved under `_generations/<creator>/` and indexed in `generations_in
 ```json
 { "running": true, "progress": "Generating…", "source_path": "…", "result": null }
 ```
+
+### `POST /api/comfy/batch`
+
+Batch generate (A2). Selection is either `paths` — the gallery's multi-select —
+or the same filter vocabulary `/api/photos` accepts. Every other key is a
+generation override applied to all items, identical in meaning to
+`/api/comfy/generate`.
+
+```json
+{
+  "paths": ["creator/a.jpg", "creator/b.jpg"],
+  "creator": "nina",
+  "favorite": false,
+  "media_type": "photo",
+  "verdict": "keep",
+  "source": "instagram",
+  "limit": 50,
+  "workflow": "pro",
+  "seed": null
+}
+```
+
+```json
+{
+  "status": "started",
+  "batch_id": "9f2c1a7b40de",
+  "pending": 47,
+  "skipped_no_prompt": 3,
+  "skipped_video": 0,
+  "capped": false
+}
+```
+
+- `409` with `status: "busy"` when the `comfy` lease is held — the message names
+  the holder, whether that is a one-shot generate or another batch.
+- `503` with `status: "offline"` when ComfyUI is unreachable.
+- `200` with `status: "nothing_to_do"` when the selection resolved to nothing;
+  the skip counts still come back, so "why did nothing happen" is answerable.
+
+**Skips are counted, never fixed.** A photo with no prompt is reported, not
+auto-analyzed — chaining the two jobs is out of scope (design §9). Videos are
+skipped because img2img has no meaningful reference frame. `COMFY_BATCH_MAX`
+(default 200) caps one enqueue and sets `capped`.
+
+Every row written by the run carries `batch_id`, so
+`GET /api/generations/list?batch_id=…` is the contact sheet for it.
+
+### `GET /api/comfy/batch/status`
+
+```json
+{
+  "running": true, "batch_id": "9f2c1a7b40de", "total": 47,
+  "completed": 12, "failed": 1, "pending": 34, "current": "nina/x.jpg",
+  "cancelled": false, "cancel_requested": false,
+  "skipped_no_prompt": 3, "skipped_video": 0, "workflow": "pro"
+}
+```
+
+`pending` is snapshotted at start and decremented per item — never recomputed
+per poll, which would be a full archive scan every four seconds.
+
+### `POST /api/comfy/batch/cancel`
+
+```json
+{ "status": "cancelling", "running": true }
+```
+
+Two-level. The cooperative flag drains the remaining queue; the item already on
+the GPU is interrupted via ComfyUI's `/interrupt`, but **only** when our
+`prompt_id` is the head of `/queue` — otherwise cancelling a PromptStudio batch
+would kill an unrelated job started from the ComfyUI tab. The pending copy is
+dropped by id either way.
+
+This inverts `/api/prompt/batch/cancel`, which finishes the in-flight photo.
+Both are right: a half-written prompt poisons the cache, whereas nothing here is
+persisted until the image is downloaded.
+
+`{ "status": "idle" }` when no batch is running.
 
 ### `GET /api/generations?path=creator/file.jpg`
 

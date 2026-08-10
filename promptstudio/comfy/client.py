@@ -8,7 +8,6 @@ import mimetypes
 import os
 import random
 import threading
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -16,6 +15,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from promptstudio.comfy.params import GenerationParams
+from promptstudio.comfy.runner import ComfyRunner
 from promptstudio.config import (
     COMFYUI_CHECKPOINT,
     COMFYUI_DEFAULT_CFG,
@@ -23,7 +24,6 @@ from promptstudio.config import (
     COMFYUI_DEFAULT_STEPS,
     COMFYUI_PRO_WORKFLOW,
     COMFYUI_URL,
-    GENERATIONS_DIR,
     GENERATIONS_INDEX_FILE,
     GENERATIONS_KEEP_PER_SOURCE,
 )
@@ -401,34 +401,33 @@ class ComfyJobManager:
                 "seed": resolved_seed,
             }
 
+        is_pro = workflow in ("pro", "modeltoimage_pro", "ref")
+        params = GenerationParams(
+            rel_path=source_rel,
+            positive=positive,
+            negative=negative,
+            workflow="pro" if is_pro else "txt2img",
+            variant=workflow,
+            aspect=aspect,
+            steps=(steps if steps is not None else (COMFYUI_DEFAULT_STEPS if is_pro else 30)),
+            cfg=(cfg if cfg is not None else (COMFYUI_DEFAULT_CFG if is_pro else 7.0)),
+            denoise=(
+                (denoise if denoise is not None else COMFYUI_DEFAULT_DENOISE)
+                if is_pro
+                else None
+            ),
+            seed=resolved_seed,
+            checkpoint=checkpoint if is_pro else (checkpoint or COMFYUI_CHECKPOINT),
+            mode_e=bool(mode_e),
+            prompt_version=prompt_version,
+        )
+
         def runner() -> None:
             try:
-                if workflow in ("pro", "modeltoimage_pro", "ref"):
-                    self._run_pro(
-                        source_rel=source_rel,
-                        positive=positive,
-                        negative=negative,
-                        steps=steps if steps is not None else COMFYUI_DEFAULT_STEPS,
-                        cfg=cfg if cfg is not None else COMFYUI_DEFAULT_CFG,
-                        denoise=denoise if denoise is not None else COMFYUI_DEFAULT_DENOISE,
-                        seed=resolved_seed,
-                        checkpoint=checkpoint,
-                        mode_e=mode_e,
-                        prompt_version=prompt_version,
-                    )
-                else:
-                    self._run_txt2img(
-                        source_rel=source_rel,
-                        positive=positive,
-                        negative=negative,
-                        aspect=aspect,
-                        steps=steps if steps is not None else 30,
-                        cfg=cfg if cfg is not None else 7.0,
-                        seed=resolved_seed,
-                        checkpoint=checkpoint or COMFYUI_CHECKPOINT,
-                        mode_e=mode_e,
-                        prompt_version=prompt_version,
-                    )
+                saved = self._runner().run(params, seed=resolved_seed)
+                with self._job_lock:
+                    self._status["result"] = saved
+                    self._status["progress"] = "Complete"
             except Exception as exc:
                 log.exception("ComfyUI job failed for %s", source_rel)
                 with self._job_lock:
@@ -445,291 +444,21 @@ class ComfyJobManager:
         threading.Thread(target=runner, daemon=True).start()
         return True
 
-    def _run_pro(
-        self,
-        *,
-        source_rel: str,
-        positive: str,
-        negative: str,
-        steps: int,
-        cfg: float,
-        denoise: float,
-        seed: int,
-        checkpoint: Optional[str],
-        mode_e: bool = False,
-        prompt_version: Optional[str] = None,
-    ) -> None:
-        with self._job_lock:
-            self._status["progress"] = "Uploading reference…"
-        # One containment check in the codebase, not two. Escaped and missing
-        # collapse to the same refusal on purpose: the caller cannot act on the
-        # difference, and the old FileNotFoundError(full) put an absolute
-        # filesystem path into a user-visible job error.
-        from promptstudio.storage.archive import ArchiveStore
+    def _runner(self) -> "ComfyRunner":
+        """A runner wired to report into this job's status dict.
 
-        full = ArchiveStore().resolve_path(source_rel)
-        if not full:
-            raise FileNotFoundError(
-                f"Reference image not found in archive: {source_rel}"
-            )
-        creator = source_rel.replace("\\", "/").split("/", 1)[0]
-        base = os.path.splitext(os.path.basename(source_rel))[0]
-        upload_name = f"ps_{creator}_{base}{os.path.splitext(full)[1] or '.jpg'}"
-        # Keep upload filename filesystem-safe
-        upload_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in upload_name)
-        image_name = upload_image_to_comfy(full, filename=upload_name, overwrite=True)
-
-        prefix = f"promptstudio/{creator}/{base}"
-        graph = build_pro_workflow(
-            image_name=image_name,
-            positive=positive,
-            negative=negative,
-            seed=seed,
-            steps=steps,
-            cfg=cfg,
-            denoise=denoise,
-            checkpoint=checkpoint,
-            filename_prefix=prefix,
-        )
-        with self._job_lock:
-            self._status["progress"] = "Queueing Pro workflow…"
-        client_id = str(uuid.uuid4())
-        prompt_id = self._queue_prompt(graph, client_id)
-        with self._job_lock:
-            self._status["prompt_id"] = prompt_id
-            self._status["progress"] = "Generating (Pro)…"
-        outputs = self._wait_for_images(prompt_id, timeout_sec=900)
-        if not outputs:
-            raise RuntimeError("ComfyUI finished with no image outputs")
-        saved = self._save_outputs(
-            source_rel,
-            outputs,
-            positive,
-            negative,
-            extra={
-                "workflow": "pro",
-                "denoise": denoise,
-                "steps": steps,
-                "cfg": cfg,
-                "seed": seed,
-                "reference": image_name,
-                "checkpoint": checkpoint,
-                "mode_e": mode_e,
-                "prompt_version": prompt_version,
-            },
-        )
-        with self._job_lock:
-            self._status["result"] = saved
-            self._status["progress"] = "Complete"
-
-    def _run_txt2img(
-        self,
-        *,
-        source_rel: str,
-        positive: str,
-        negative: str,
-        aspect: str,
-        steps: int,
-        cfg: float,
-        seed: int,
-        checkpoint: str,
-        mode_e: bool = False,
-        prompt_version: Optional[str] = None,
-    ) -> None:
-        w, h = aspect_to_size(aspect)
-        graph = build_txt2img_workflow(
-            positive,
-            negative,
-            seed=seed,
-            width=w,
-            height=h,
-            steps=steps,
-            cfg=cfg,
-            checkpoint=checkpoint,
-        )
-        client_id = str(uuid.uuid4())
-        prompt_id = self._queue_prompt(graph, client_id)
-        with self._job_lock:
-            self._status["prompt_id"] = prompt_id
-            self._status["progress"] = "Generating…"
-        outputs = self._wait_for_images(prompt_id, timeout_sec=600)
-        if not outputs:
-            raise RuntimeError("ComfyUI finished with no image outputs")
-        saved = self._save_outputs(
-            source_rel,
-            outputs,
-            positive,
-            negative,
-            extra={
-                "workflow": "txt2img",
-                "steps": steps,
-                "cfg": cfg,
-                "seed": seed,
-                "checkpoint": checkpoint,
-                "mode_e": mode_e,
-                "prompt_version": prompt_version,
-            },
-        )
-        with self._job_lock:
-            self._status["result"] = saved
-            self._status["progress"] = "Complete"
-
-    def _queue_prompt(self, workflow: Dict[str, Any], client_id: str) -> str:
-        body = json.dumps({"prompt": workflow, "client_id": client_id}).encode("utf-8")
-        req = urllib.request.Request(
-            f"{COMFYUI_URL}/prompt",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        prompt_id = data.get("prompt_id")
-        if not prompt_id:
-            raise RuntimeError(f"ComfyUI queue failed: {data}")
-        node_errors = data.get("node_errors") or {}
-        if node_errors:
-            raise RuntimeError(f"ComfyUI node errors: {node_errors}")
-        return prompt_id
-
-    def _wait_for_images(self, prompt_id: str, timeout_sec: int = 600) -> List[Dict[str, str]]:
-        deadline = time.time() + timeout_sec
-        while time.time() < deadline:
-            req = urllib.request.Request(
-                f"{COMFYUI_URL}/history/{urllib.parse.quote(prompt_id)}",
-                method="GET",
-            )
-            try:
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    hist = json.loads(resp.read().decode("utf-8"))
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    time.sleep(1.5)
-                    continue
-                raise
-            entry = hist.get(prompt_id)
-            if entry:
-                status = entry.get("status") or {}
-                if status.get("status_str") == "error" or status.get("completed") is False:
-                    messages = status.get("messages") or []
-                    raise RuntimeError(f"ComfyUI execution error: {messages}")
-                outputs = entry.get("outputs") or {}
-                images: List[Dict[str, str]] = []
-                for node_out in outputs.values():
-                    for img in node_out.get("images") or []:
-                        images.append(
-                            {
-                                "filename": img.get("filename", ""),
-                                "subfolder": img.get("subfolder", ""),
-                                "type": img.get("type", "output"),
-                            }
-                        )
-                if images:
-                    return images
-            time.sleep(1.5)
-        raise TimeoutError("Timed out waiting for ComfyUI result")
-
-    def _download_image(self, meta: Dict[str, str]) -> bytes:
-        qs = urllib.parse.urlencode(
-            {
-                "filename": meta["filename"],
-                "subfolder": meta.get("subfolder") or "",
-                "type": meta.get("type") or "output",
-            }
-        )
-        req = urllib.request.Request(f"{COMFYUI_URL}/view?{qs}", method="GET")
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return resp.read()
-
-    def _save_outputs(
-        self,
-        source_rel: str,
-        outputs: List[Dict[str, str]],
-        positive: str,
-        negative: str,
-        extra: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        creator = source_rel.replace("\\", "/").split("/", 1)[0]
-        base = os.path.splitext(os.path.basename(source_rel))[0]
-        out_dir = os.path.join(GENERATIONS_DIR, creator)
-        os.makedirs(out_dir, exist_ok=True)
-        # Microseconds, not seconds. Two generations of the same photo inside
-        # one second produced byte-identical filenames, so the second silently
-        # overwrote the first on disk — and with `rel_path` UNIQUE it would now
-        # also collapse two rows into one.
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-        saved_files = []
-        for i, meta in enumerate(outputs):
-            raw = self._download_image(meta)
-            ext = os.path.splitext(meta.get("filename") or "")[1] or ".png"
-            name = f"{base}_gen_{stamp}_{i + 1}{ext}"
-            full = os.path.join(out_dir, name)
-            with open(full, "wb") as f:
-                f.write(raw)
-            rel = f"_generations/{creator}/{name}".replace("\\", "/")
-            saved_files.append(
-                {
-                    "filename": name,
-                    "rel_path": rel,
-                    "url": "/media/" + "/".join(
-                        urllib.parse.quote(part) for part in rel.split("/")
-                    ),
-                }
-            )
-        record: Dict[str, Any] = {
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "files": saved_files,
-            # Full text. Truncating to 500/300 kept enough to display and not
-            # enough to reproduce, which is the wrong half to keep.
-            "positive_prompt": positive,
-            "negative_prompt": negative,
-            "primary_url": saved_files[0]["url"] if saved_files else None,
-            "primary_rel": saved_files[0]["rel_path"] if saved_files else None,
-        }
-        if extra:
-            record.update(extra)
-        self._record_in_db(source_rel, creator, record, saved_files)
-        self.index.add(source_rel, record)
-        return record
-
-    def _record_in_db(
-        self,
-        source_rel: str,
-        creator: str,
-        record: Dict[str, Any],
-        saved_files: List[Dict[str, str]],
-    ) -> None:
-        """Write one `generations` row per output file.
-
-        Best-effort: the images are already on disk and returned to the caller,
-        so an index failure must not turn a successful generation into an error.
-        It is logged rather than swallowed — a silently unindexed generation is
-        exactly the class of loss A0 exists to stop.
+        The generation itself lives in `ComfyRunner` because A2's batch does
+        exactly the same work per item; this class is now only the singleton,
+        the lease and the status shape the lightbox polls.
         """
-        from promptstudio.storage.db import ArchiveIndex
 
-        try:
-            index = ArchiveIndex.get()
-            for item in saved_files:
-                # Stamped back onto the file entry so the job status — which is
-                # all the lightbox has after a generate — can rate the output
-                # without a second round trip to look the id up.
-                item["gen_id"] = index.record_generation(
-                    rel_path=item["rel_path"],
-                    source_rel=source_rel,
-                    creator=creator,
-                    workflow=str(record.get("workflow") or "pro"),
-                    seed=record.get("seed"),
-                    positive_prompt=record.get("positive_prompt") or "",
-                    negative_prompt=record.get("negative_prompt") or "",
-                    created_at=record.get("created_at"),
-                    batch_id=record.get("batch_id"),
-                    checkpoint=record.get("checkpoint"),
-                    steps=record.get("steps"),
-                    cfg=record.get("cfg"),
-                    denoise=record.get("denoise"),
-                    mode_e=bool(record.get("mode_e")),
-                    prompt_version=record.get("prompt_version"),
-                )
-        except Exception:
-            log.exception("failed to index generation for %s", source_rel)
+        def progress(text: str) -> None:
+            with self._job_lock:
+                self._status["progress"] = text
+
+        def prompt_id(pid: str) -> None:
+            with self._job_lock:
+                self._status["prompt_id"] = pid
+
+        return ComfyRunner(on_progress=progress, on_prompt_id=prompt_id)
+

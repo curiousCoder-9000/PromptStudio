@@ -163,7 +163,7 @@ def fake_comfy(monkeypatch):
     Returns the capture dict — `captured["graph"]` after a job completes.
     """
     from promptstudio.comfy import client as comfy
-    from promptstudio.comfy.client import ComfyJobManager
+    from promptstudio.comfy.runner import ComfyRunner
 
     captured = {}
 
@@ -180,10 +180,12 @@ def fake_comfy(monkeypatch):
     def fake_download(self, meta):
         return b"\x89PNG\r\n\x1a\n" + b"0" * 32
 
+    # Patched on ComfyRunner, not ComfyJobManager: the one-shot job and A2's
+    # batch both drive the runner, so one seam fakes ComfyUI for both.
     monkeypatch.setattr(comfy, "upload_image_to_comfy", fake_upload)
-    monkeypatch.setattr(ComfyJobManager, "_queue_prompt", fake_queue)
-    monkeypatch.setattr(ComfyJobManager, "_wait_for_images", fake_wait)
-    monkeypatch.setattr(ComfyJobManager, "_download_image", fake_download)
+    monkeypatch.setattr(ComfyRunner, "_queue_prompt", fake_queue)
+    monkeypatch.setattr(ComfyRunner, "_wait_for_images", fake_wait)
+    monkeypatch.setattr(ComfyRunner, "_download_image", fake_download)
     return captured
 
 

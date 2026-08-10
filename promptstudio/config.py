@@ -373,3 +373,9 @@ GENERATIONS_INDEX_FILE = os.path.join(SAVED_DIR, "generations_index.json")
 # history that nothing had yet rendered. The SQLite table is never capped by
 # this — it exists only to bound the rollback file while it is still written.
 GENERATIONS_KEEP_PER_SOURCE = int(os.environ.get("GENERATIONS_KEEP_PER_SOURCE", "0"))
+# A2 batch generate. The cap is a guard against a mis-clicked "select all" on a
+# 4,000-photo archive turning into a week of GPU time, not a capacity limit.
+COMFY_BATCH_MAX = int(os.environ.get("COMFY_BATCH_MAX", "200"))
+# Per-item ceiling. Was hardcoded at 900 in _run_pro; a batch needs it
+# configurable because one wedged item should not eat the whole run's evening.
+COMFY_BATCH_ITEM_TIMEOUT = int(os.environ.get("COMFY_BATCH_ITEM_TIMEOUT", "900"))

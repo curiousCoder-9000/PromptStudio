@@ -8,7 +8,9 @@ import socketserver
 import urllib.parse
 from typing import Any, Dict, List, Optional
 
+from promptstudio.comfy.batch import ComfyBatchManager
 from promptstudio.comfy.client import ComfyJobManager, check_comfy_health
+from promptstudio.comfy.params import NoPromptError, resolve_generation_params
 from promptstudio.config import (
     CLASSIFY_REJECT_MAX_TIER,
     CREATOR_SCRAPE_QUEUE_ENABLED,
@@ -53,6 +55,7 @@ _batch = BatchPromptManager.get()
 _styles = CreatorStyleStore()
 _trash = TrashStore()
 _comfy = ComfyJobManager.get()
+_comfy_batch = ComfyBatchManager.get()
 _classify = ClassifyJobManager.get()
 _scrape_queue = CreatorScrapeQueue.get() if CREATOR_SCRAPE_QUEUE_ENABLED else None
 
@@ -79,6 +82,52 @@ def _as_bool(value: Any, *, default: bool = False) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in _TRUTHY
     return bool(value)
+
+
+# Keys A2 accepts. An allowlist rather than `**data`: `plan()` forwards every
+# unrecognised key into the generation parameters, so a typo in the request
+# body would silently become a workflow override instead of a 400.
+_BATCH_SELECTION_KEYS = (
+    "creator",
+    "media_type",
+    "verdict",
+    "source",
+)
+_BATCH_OVERRIDE_KEYS = (
+    "variant",
+    "workflow",
+    "positive_prompt",
+    "negative_prompt",
+    "use_mode_e",
+    "aspect_ratio",
+    "steps",
+    "cfg_scale",
+    "denoise",
+    "checkpoint",
+    "seed",
+)
+
+
+def _batch_generate_args(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Request body → `ComfyBatchManager.start()` kwargs."""
+    args: Dict[str, Any] = {}
+    raw_paths = data.get("paths")
+    if isinstance(raw_paths, list):
+        paths = [str(p).strip() for p in raw_paths if str(p).strip()]
+        if paths:
+            args["paths"] = paths
+    for key in _BATCH_SELECTION_KEYS:
+        value = data.get(key)
+        if value:
+            args[key] = str(value).strip()
+    if data.get("favorite") is not None:
+        args["favorite"] = _as_bool(data.get("favorite"))
+    if data.get("limit") is not None:
+        args["limit"] = int(data["limit"])
+    for key in _BATCH_OVERRIDE_KEYS:
+        if data.get(key) is not None:
+            args[key] = data[key]
+    return args
 
 
 class _BadSource(ValueError):
@@ -1376,144 +1425,50 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 # lease and flips status under one lock. Building the prompt
                 # below is cheap, so there is nothing to short-circuit for.
 
-                filename = os.path.basename(rel_path)
-                cached = _prompt_cache.get(rel_path, filename) or {}
-                variant = (data.get("variant") or "pro").lower()
-                workflow = (data.get("workflow") or "").lower()
-                if not workflow:
-                    if variant in ("pro", "ref", "modeltoimage_pro"):
-                        workflow = "pro"
-                    elif variant in ("txt2img", "sdxl", "flux", "pony"):
-                        workflow = "txt2img"
-                    else:
-                        workflow = "pro"
-
-                exports = cached.get("exports") or {}
-                positive = data.get("positive_prompt")
-                negative = data.get("negative_prompt")
-                use_mode_e = data.get("use_mode_e")
-                if use_mode_e is None:
-                    use_mode_e = workflow == "pro"
-                use_mode_e = bool(use_mode_e)
-
-                if use_mode_e and workflow == "pro":
-                    from promptstudio.prompts.comfy_mode import build_mode_e_bundle
-
-                    structured = cached.get("structured_vision")
-                    if not isinstance(structured, dict):
-                        structured = None
-                    base_pos = positive or cached.get("positive_prompt") or ""
-                    base_neg = negative or cached.get("negative_prompt") or ""
-                    # Prefer cached Mode E export when client did not override text
-                    if positive is None and exports.get("comfy_ref"):
-                        positive = exports["comfy_ref"]
-                        negative = (
-                            exports.get("comfy_negative")
-                            or exports.get("negative")
-                            or base_neg
-                        )
-                        mode_meta = {"source": "exports", "anti_terms": []}
-                    else:
-                        bundle = build_mode_e_bundle(
-                            positive=str(base_pos),
-                            negative=str(base_neg),
-                            structured=structured,
-                        )
-                        positive = bundle["positive"]
-                        negative = bundle["negative"]
-                        mode_meta = {
-                            "source": bundle["source"],
-                            "anti_terms": bundle["anti_terms"],
-                        }
-                else:
-                    mode_meta = None
-                    if not positive:
-                        if variant == "flux":
-                            positive = exports.get("flux") or cached.get("positive_prompt", "")
-                        elif variant == "pony":
-                            positive = exports.get("pony") or cached.get("positive_prompt", "")
-                        else:
-                            positive = (
-                                exports.get("sdxl")
-                                or cached.get("positive_prompt", "")
-                            )
-                    if not negative:
-                        negative = (
-                            exports.get("negative")
-                            or cached.get("negative_prompt")
-                            or "deformed, bad anatomy, blurry"
-                        )
-                if not str(positive).strip():
-                    self.send_error(400, "No prompt available — generate one first")
+                # Prompt selection, Mode E and the numeric defaults all live in
+                # comfy/params.py, because A2's batch runner makes exactly the
+                # same decisions and two copies would drift.
+                try:
+                    params = resolve_generation_params(rel_path, data)
+                except NoPromptError as exc:
+                    self.send_error(400, str(exc))
                     return
-
-                params = cached.get("parameters") or {}
-                aspect = data.get("aspect_ratio") or params.get("aspect_ratio") or "4:5"
-                if workflow == "pro":
-                    from promptstudio.config import (
-                        COMFYUI_DEFAULT_CFG,
-                        COMFYUI_DEFAULT_DENOISE,
-                        COMFYUI_DEFAULT_STEPS,
-                    )
-
-                    steps = int(
-                        data.get("steps")
-                        if data.get("steps") is not None
-                        else COMFYUI_DEFAULT_STEPS
-                    )
-                    cfg = float(
-                        data.get("cfg_scale")
-                        if data.get("cfg_scale") is not None
-                        else COMFYUI_DEFAULT_CFG
-                    )
-                    denoise = float(
-                        data.get("denoise")
-                        if data.get("denoise") is not None
-                        else COMFYUI_DEFAULT_DENOISE
-                    )
-                else:
-                    steps = int(data.get("steps") or params.get("steps") or 30)
-                    cfg = float(data.get("cfg_scale") or params.get("cfg_scale") or 7.0)
-                    denoise = None
-                seed = data.get("seed")
-                seed = int(seed) if seed is not None else None
-                checkpoint = data.get("checkpoint") or None
 
                 if _comfy.start(
                     source_rel=rel_path,
-                    positive=str(positive),
-                    negative=str(negative),
-                    workflow=workflow,
-                    aspect=str(aspect),
-                    steps=steps,
-                    cfg=cfg,
-                    denoise=denoise,
-                    seed=seed,
-                    checkpoint=checkpoint,
+                    positive=params.positive,
+                    negative=params.negative,
+                    workflow=params.workflow,
+                    aspect=params.aspect,
+                    steps=params.steps,
+                    cfg=params.cfg,
+                    denoise=params.denoise,
+                    seed=params.seed,
+                    checkpoint=params.checkpoint,
                     # Both were computed here and thrown away. Without them the
                     # generations table cannot answer "did Mode E help" or "which
                     # prompt engine produced the winners" (design §3.3).
-                    mode_e=bool(use_mode_e and workflow == "pro"),
-                    prompt_version=params.get("vision_engine"),
+                    mode_e=params.mode_e,
+                    prompt_version=params.prompt_version,
                 ):
                     payload = {
                         "status": "started",
                         "path": rel_path,
-                        "variant": variant,
-                        "workflow": workflow,
-                        "denoise": denoise,
-                        "steps": steps,
-                        "cfg": cfg,
+                        "variant": params.variant,
+                        "workflow": params.workflow,
+                        "denoise": params.denoise,
+                        "steps": params.steps,
+                        "cfg": params.cfg,
                         # The resolved seed, not the request's — `seed` is None
                         # whenever the client did not pin one, which is the
                         # default. ComfyJobManager.start() materialises it.
                         "seed": _comfy.get_status().get("seed"),
-                        "use_mode_e": use_mode_e and workflow == "pro",
-                        "positive_prompt": str(positive)[:400],
-                        "negative_prompt": str(negative)[:300],
+                        "use_mode_e": params.mode_e,
+                        "positive_prompt": params.positive[:400],
+                        "negative_prompt": params.negative[:300],
                     }
-                    if mode_meta:
-                        payload["mode_e"] = mode_meta
+                    if params.mode_meta:
+                        payload["mode_e"] = params.mode_meta
                     self._send_json(payload)
                 else:
                     self._send_json(
@@ -1521,6 +1476,33 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     )
             except (ValueError, json.JSONDecodeError):
                 self.send_error(400, "Invalid JSON body")
+            return
+
+        if path == "/api/comfy/batch":
+            try:
+                data = self._read_json_body()
+            except (ValueError, json.JSONDecodeError):
+                self.send_error(400, "Invalid JSON body")
+                return
+            if not check_comfy_health().get("comfy"):
+                self._send_json(
+                    {"status": "offline", "message": "ComfyUI is not reachable"}, 503
+                )
+                return
+            # No is_running() pre-check, same as the one-shot route: start()
+            # takes the ComfyUI lease and flips status under one lock.
+            result = _comfy_batch.start(**_batch_generate_args(data))
+            self._send_json(result, 409 if result.get("status") == "busy" else 200)
+            return
+
+        if path == "/api/comfy/batch/cancel":
+            ok = _comfy_batch.cancel()
+            self._send_json(
+                {
+                    "status": "cancelling" if ok else "idle",
+                    "running": _comfy_batch.is_running(),
+                }
+            )
             return
 
         # Same as do_DELETE: there is no SimpleHTTPRequestHandler.do_POST.
@@ -1910,6 +1892,10 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 except Exception:
                     status["pending"] = None
             self._send_json(status)
+            return
+
+        if path == "/api/comfy/batch/status":
+            self._send_json(_comfy_batch.get_status())
             return
 
         if path == "/api/comfy/status":
