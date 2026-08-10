@@ -4127,6 +4127,19 @@ body.review-mode .view-controls {
     font-variant-numeric: tabular-nums;
 }
 
+/* Select toggle. Deliberately *not* a .review-chip: those are rose verdict
+   filters, and this is a mode switch. It inherits the cyan `.filter-chip.active`
+   the normal gallery's #selectModeBtn uses, so "selecting" looks the same in
+   both places. Sized to sit level with its btn-sm neighbours. */
+.review-select-toggle {
+    padding: 6px 12px;
+    font-size: 0.76rem;
+}
+
+.review-select-toggle.active {
+    font-weight: 700;
+}
+
 /* ── triage panel ─────────────────────────────────────────────────── */
 
 .triage-block {

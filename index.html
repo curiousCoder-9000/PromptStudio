@@ -208,7 +208,10 @@
                 <div class="review-bar" id="reviewBar" style="display:none;">
                     <div class="review-bar-head">
                         <span class="review-bar-title" id="reviewBarTitle">Reviewing</span>
-                        <span class="review-bar-hint">Click any card to open triage · <kbd>K</kbd> keep <kbd>R</kbd> reject</span>
+                        <!-- Rewritten per state by updateReviewBar(): the static
+                             copy promised click-to-triage while select mode was
+                             forced on and made that click impossible. -->
+                        <span class="review-bar-hint" id="reviewBarHint">Click any card to open triage · <kbd>K</kbd> keep <kbd>R</kbd> reject</span>
                     </div>
                     <div class="review-bar-filters" id="reviewBarFilters">
                         <button class="filter-chip review-chip active" type="button" data-verdict="reject">Rejects <span class="review-chip-n" data-count="reject">0</span></button>
@@ -219,9 +222,17 @@
                     </div>
                     <div class="review-bar-actions">
                         <span class="review-bar-count" id="reviewBarCount">0 selected</span>
+                        <!-- The way out of select mode. #selectModeBtn is hidden
+                             in review mode by `body.review-mode .view-controls`,
+                             so without this the mode had an entrance and no
+                             exit. Same button both ways. -->
+                        <button class="filter-chip review-select-toggle" id="reviewSelectToggleBtn" type="button" title="Select multiple items to delete (Esc to leave)">
+                            <i class="fa-solid fa-check-double"></i> Select
+                        </button>
                         <button class="btn btn-secondary btn-sm" id="reviewSelectAllBtn" type="button" title="Select every non-favourite on this page">
                             <i class="fa-solid fa-check-double"></i> Select non-favourites
                         </button>
+                        <button class="btn btn-ghost btn-sm" id="reviewClearBtn" type="button" style="display:none;" title="Clear the selection">Clear</button>
                         <button class="btn btn-danger btn-sm" id="reviewDeleteBtn" type="button" disabled>
                             <i class="fa-solid fa-trash-can"></i> Delete selected
                         </button>

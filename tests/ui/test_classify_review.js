@@ -14,6 +14,12 @@
  *   to prevent.
  * - Escaping holds on a model-authored reason string, which is the one field
  *   here that is not typed by the user.
+ * - Triage is reachable by *clicking a card*. This suite used to reach the
+ *   panel with a direct openLightbox(0) call, which tested the destination and
+ *   never the route — so it passed for months while review mode force-enabled
+ *   select mode and made the click open nothing at all. Drive the real handler.
+ * - Select mode inside review mode is opt-in, reversible by the same control,
+ *   and unwindable by Escape. A mode with no advertised exit is a trap.
  */
 const { Session, Report, sleep } = require('./cdp');
 
@@ -65,6 +71,118 @@ const { Session, Report, sleep } = require('./cdp');
     return getComputedStyle(document.getElementById('bulkBar')).display;
   `);
   r.check('normal bulk bar stays hidden', bulkHidden === 'none', bulkHidden);
+
+  // ── triage is reachable by clicking a card ─────────────────────────
+  //
+  // The whole point of review mode. Entry used to call setSelectMode(true),
+  // and a card click in select mode toggles a checkbox instead of opening the
+  // lightbox — so Keep/Reject/Auto and every K/R/X shortcut sat behind a door
+  // the mode itself locked. Bulk delete was the only reachable verb.
+  r.section('triage reachable by click');
+
+  r.check('review mode does not force select mode on',
+    (await s.eval(`return state.selectMode;`)) === false);
+
+  const entryHint = await s.eval(`
+    return document.querySelector('.review-bar-hint').textContent.trim();
+  `);
+  r.check('hint tells you to click a card', /click/i.test(entryHint) && /triage/i.test(entryHint),
+    entryHint);
+
+  const opened = await s.eval(`
+    document.querySelector('.photo-card').click();
+    return {
+      lightbox: getComputedStyle(document.getElementById('lightboxModal')).display,
+      triage: getComputedStyle(document.getElementById('triageBlock')).display,
+      index: state.lightboxIndex,
+      selected: state.selectedPaths.size
+    };
+  `);
+  await sleep(400);
+  r.check('clicking a card opens the lightbox', opened.lightbox === 'flex', opened.lightbox);
+  r.check('triage panel comes with it', opened.triage === 'flex', opened.triage);
+  r.check('and the click selected nothing', opened.selected === 0, String(opened.selected));
+
+  // handleTriageKey() bails unless lightboxIndex >= 0, so the click has to set
+  // it for the advertised K/R/X to exist at all. Assert the precondition, not
+  // the keys — firing one here would pin a real verdict and skew the counts the
+  // card-rendering section below depends on. The triage section covers the keys.
+  r.check('the click arms the triage keys', opened.index >= 0, String(opened.index));
+
+  await s.eval(`closeLightbox(); return true;`);
+  await sleep(300);
+
+  // ── select mode is opt-in and reversible ──────────────────────────
+  r.section('select mode is opt-in and reversible');
+
+  const toggleExists = await s.eval(`
+    const b = document.getElementById('reviewSelectToggleBtn');
+    return b ? { present: true, active: b.classList.contains('active') } : { present: false };
+  `);
+  r.check('review bar offers a select toggle', toggleExists.present === true,
+    JSON.stringify(toggleExists));
+  r.check('toggle starts inactive', toggleExists.active === false, JSON.stringify(toggleExists));
+
+  await s.eval(`document.getElementById('reviewSelectToggleBtn').click(); return true;`);
+  await sleep(300);
+  const turnedOn = await s.eval(`
+    return {
+      selectMode: state.selectMode,
+      active: document.getElementById('reviewSelectToggleBtn').classList.contains('active'),
+      hint: document.querySelector('.review-bar-hint').textContent.trim(),
+      checkboxes: document.querySelectorAll('.card-select-cb').length
+    };
+  `);
+  r.check('toggle turns select mode on', turnedOn.selectMode === true, JSON.stringify(turnedOn));
+  r.check('toggle reads as active', turnedOn.active === true, String(turnedOn.active));
+  r.check('cards grow checkboxes', turnedOn.checkboxes > 0, String(turnedOn.checkboxes));
+  r.check('hint switches to the selecting story', /select/i.test(turnedOn.hint), turnedOn.hint);
+
+  const clickSelects = await s.eval(`
+    document.querySelector('.photo-card').click();
+    return {
+      selected: state.selectedPaths.size,
+      lightbox: getComputedStyle(document.getElementById('lightboxModal')).display
+    };
+  `);
+  r.check('a click now selects instead of opening', clickSelects.selected === 1,
+    String(clickSelects.selected));
+  r.check('and the lightbox stays shut', clickSelects.lightbox === 'none', clickSelects.lightbox);
+
+  const clearBtn = await s.eval(`
+    const b = document.getElementById('reviewClearBtn');
+    return b ? getComputedStyle(b).display : '(missing)';
+  `);
+  r.check('a Clear control appears with a selection', clearBtn !== 'none' && clearBtn !== '(missing)',
+    clearBtn);
+
+  // The reported bug in one assertion: the same button must let you back out.
+  await s.eval(`document.getElementById('reviewSelectToggleBtn').click(); return true;`);
+  await sleep(300);
+  const turnedOff = await s.eval(`
+    return {
+      selectMode: state.selectMode,
+      active: document.getElementById('reviewSelectToggleBtn').classList.contains('active'),
+      selected: state.selectedPaths.size,
+      checkboxes: document.querySelectorAll('.card-select-cb').length,
+      reviewMode: state.reviewMode
+    };
+  `);
+  r.check('clicking the toggle again leaves select mode', turnedOff.selectMode === false,
+    JSON.stringify(turnedOff));
+  r.check('toggle reads as inactive again', turnedOff.active === false, String(turnedOff.active));
+  r.check('selection is dropped on the way out', turnedOff.selected === 0, String(turnedOff.selected));
+  r.check('checkboxes go away', turnedOff.checkboxes === 0, String(turnedOff.checkboxes));
+  r.check('leaving select mode does NOT leave review mode', turnedOff.reviewMode === true,
+    String(turnedOff.reviewMode));
+
+  const reopened = await s.eval(`
+    document.querySelector('.photo-card').click();
+    return getComputedStyle(document.getElementById('lightboxModal')).display;
+  `);
+  r.check('clicking a card opens triage again', reopened === 'flex', reopened);
+  await s.eval(`closeLightbox(); return true;`);
+  await sleep(300);
 
   // ── card rendering ─────────────────────────────────────────────────
   r.section('card rendering');
@@ -296,7 +414,58 @@ const { Session, Report, sleep } = require('./cdp');
   r.check('and never invents a creator=creator filter',
     !scoped.includes('creator=creator'), scoped);
 
-  await s.eval(`window.fetch = window.__realFetch; exitReviewMode(); return true;`);
+  // ── Escape unwinds one layer at a time ────────────────────────────
+  //
+  // Driven from the toast path on purpose: that path sets creatorPanelOpen,
+  // and the creator-panel Escape branch used to `return` before the select-mode
+  // branch was ever reached. So on the exact route a user takes out of a
+  // finished classify, the keyboard escape hatch was dead.
+  r.section('escape unwinds review mode');
+
+  await s.eval(`window.fetch = window.__realFetch; return true;`);
+
+  await s.eval(`
+    state.creatorPanelOpen = true;
+    document.getElementById('reviewSelectToggleBtn').click();
+    return true;
+  `);
+  await sleep(300);
+  await s.eval(`document.querySelector('.photo-card').click(); return true;`);
+  await sleep(200);
+  r.check('primed with a selection',
+    (await s.eval(`return state.selectedPaths.size;`)) === 1);
+
+  await s.key('Escape');
+  const esc1 = await s.eval(`
+    return { selected: state.selectedPaths.size, selectMode: state.selectMode,
+             reviewMode: state.reviewMode, panel: state.creatorPanelOpen };
+  `);
+  r.check('Esc #1 clears the selection', esc1.selected === 0, JSON.stringify(esc1));
+  r.check('Esc #1 keeps select mode', esc1.selectMode === true, JSON.stringify(esc1));
+  r.check('Esc #1 does not close the creator panel first', esc1.panel === true,
+    JSON.stringify(esc1));
+
+  await s.key('Escape');
+  const esc2 = await s.eval(`
+    return { selectMode: state.selectMode, reviewMode: state.reviewMode };
+  `);
+  r.check('Esc #2 leaves select mode', esc2.selectMode === false, JSON.stringify(esc2));
+  r.check('Esc #2 stays in review mode', esc2.reviewMode === true, JSON.stringify(esc2));
+
+  await s.key('Escape');
+  await sleep(500);
+  const esc3 = await s.eval(`
+    return { reviewMode: state.reviewMode,
+             bar: getComputedStyle(document.getElementById('reviewBar')).display };
+  `);
+  r.check('Esc #3 leaves review mode', esc3.reviewMode === false, JSON.stringify(esc3));
+  r.check('and the strip goes with it', esc3.bar === 'none', esc3.bar);
+
+  await s.key('Escape');
+  r.check('Esc #4 finally closes the creator panel',
+    (await s.eval(`return state.creatorPanelOpen;`)) === false);
+
+  await s.eval(`exitReviewMode(); return true;`);
   await sleep(500);
 
   // Review mode must never survive a reload — landing in a delete-oriented

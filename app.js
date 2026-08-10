@@ -272,7 +272,10 @@ const elements = {
     reviewBarTitle: document.getElementById('reviewBarTitle'),
     reviewBarFilters: document.getElementById('reviewBarFilters'),
     reviewBarCount: document.getElementById('reviewBarCount'),
+    reviewBarHint: document.getElementById('reviewBarHint'),
+    reviewSelectToggleBtn: document.getElementById('reviewSelectToggleBtn'),
     reviewSelectAllBtn: document.getElementById('reviewSelectAllBtn'),
+    reviewClearBtn: document.getElementById('reviewClearBtn'),
     reviewDeleteBtn: document.getElementById('reviewDeleteBtn'),
     reviewExitBtn: document.getElementById('reviewExitBtn'),
     // Triage block in the lightbox inspector
@@ -4099,7 +4102,8 @@ function setupEventListeners() {
     });
 
     // Keyboard Navigation — Escape priority:
-    // Photo Viewer > Delete > Lightbox > Sync > Upload > New Creator > Creator panel > Select
+    // Photo Viewer > Delete > Lightbox > Sync > Upload > New Creator
+    //   > Selection > Select mode > Review mode > Creator panel
     // Video: ←/→ seek (hold repeats smoothly), Space play/pause, Shift+←/→ prev/next media
     document.addEventListener('keydown', (e) => {
         if (elements.photoViewerOverlay.style.display === 'flex') {
@@ -4235,14 +4239,25 @@ function setupEventListeners() {
             closeTrashModal();
             return;
         }
-        if (e.key === 'Escape' && state.creatorPanelOpen) {
-            hideCreatorStylePanel();
-            return;
-        }
-
+        // Transient gallery modes unwind before the persistent side panel.
+        // The creator-panel branch used to sit above this one and `return`, and
+        // enterReviewMode() sets creatorPanelOpen — so arriving from the
+        // classify toast killed the only keyboard way out of select mode.
+        // Peel one layer per press: selection → select mode → review mode.
         if (e.key === 'Escape' && state.selectMode) {
             if (state.selectedPaths.size) clearSelection();
             else setSelectMode(false);
+            updateReviewBar();
+            return;
+        }
+        if (e.key === 'Escape' && state.reviewMode) {
+            exitReviewMode();
+            return;
+        }
+
+        if (e.key === 'Escape' && state.creatorPanelOpen) {
+            hideCreatorStylePanel();
+            return;
         }
     });
 }
@@ -5971,7 +5986,15 @@ function enterReviewMode(creator, verdict = 'reject') {
     state.reviewMode = true;
     state.verdictFilter = REVIEW_FILTERS.includes(verdict) ? verdict : 'reject';
     clearSelection();
-    setSelectMode(true);
+    // Entry used to force select mode ON, which was self-defeating: a click in
+    // select mode toggles a checkbox instead of opening the lightbox, and the
+    // lightbox is the *only* place Keep/Reject/Auto and K/R/X exist
+    // (handleTriageKey bails unless lightboxIndex >= 0). So the one mode built
+    // for triage could do everything except triage — bulk delete was the only
+    // reachable verb, and the control that would have turned select off is
+    // hidden by `body.review-mode .view-controls`. Select is opt-in now; the
+    // review strip carries its own toggle.
+    setSelectMode(false);
     updateReviewBar();
     fetchPhotos();
 }
@@ -6007,6 +6030,14 @@ function updateReviewBar() {
             : 'Reviewing all creators';
     }
 
+    // The hint has to track the mode, because the two modes answer a click in
+    // opposite ways. One fixed string is guaranteed to be lying half the time.
+    if (elements.reviewBarHint) {
+        elements.reviewBarHint.textContent = state.selectMode
+            ? 'Click cards to select · Esc or Select to go back to triage'
+            : 'Click a card to triage · K keep · R reject · X delete';
+    }
+
     // Archive-wide review used to show zeroes on every chip, because the counts
     // came from the selected creator and there wasn't one.
     const scoped = scopedVerdictCounts();
@@ -6031,6 +6062,16 @@ function updateReviewBar() {
         elements.reviewBarCount.textContent = selected
             ? `${selected} selected of ${state.photoTotal}`
             : `${state.photoTotal} item${state.photoTotal === 1 ? '' : 's'}`;
+    }
+    if (elements.reviewSelectToggleBtn) {
+        elements.reviewSelectToggleBtn.classList.toggle('active', Boolean(state.selectMode));
+        elements.reviewSelectToggleBtn.innerHTML = state.selectMode
+            ? '<i class="fa-solid fa-check-double"></i> Selecting'
+            : '<i class="fa-solid fa-check-double"></i> Select';
+        elements.reviewSelectToggleBtn.setAttribute('aria-pressed', state.selectMode ? 'true' : 'false');
+    }
+    if (elements.reviewClearBtn) {
+        elements.reviewClearBtn.style.display = selected ? '' : 'none';
     }
     if (elements.reviewDeleteBtn) {
         elements.reviewDeleteBtn.disabled = selected === 0;
@@ -6264,8 +6305,20 @@ function setupClassifyListeners() {
     if (elements.reviewExitBtn) {
         elements.reviewExitBtn.addEventListener('click', () => exitReviewMode());
     }
+    if (elements.reviewSelectToggleBtn) {
+        elements.reviewSelectToggleBtn.addEventListener('click', () => {
+            setSelectMode(!state.selectMode);
+            updateReviewBar();
+        });
+    }
     if (elements.reviewSelectAllBtn) {
         elements.reviewSelectAllBtn.addEventListener('click', selectNonFavourites);
+    }
+    if (elements.reviewClearBtn) {
+        elements.reviewClearBtn.addEventListener('click', () => {
+            clearSelection();
+            updateReviewBar();
+        });
     }
     if (elements.reviewDeleteBtn) {
         elements.reviewDeleteBtn.addEventListener('click', promptBulkDelete);
