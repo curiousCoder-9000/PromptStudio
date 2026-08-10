@@ -1412,6 +1412,11 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     denoise=denoise,
                     seed=seed,
                     checkpoint=checkpoint,
+                    # Both were computed here and thrown away. Without them the
+                    # generations table cannot answer "did Mode E help" or "which
+                    # prompt engine produced the winners" (design §3.3).
+                    mode_e=bool(use_mode_e and workflow == "pro"),
+                    prompt_version=params.get("vision_engine"),
                 ):
                     payload = {
                         "status": "started",

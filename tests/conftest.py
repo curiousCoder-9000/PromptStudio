@@ -80,10 +80,14 @@ def clean_archive():
         # directory does not clear them either — without this a stale keep/reject
         # leaks into the next test's counters.
         index._conn.execute("DELETE FROM media_verdicts")
+        # Generations live under _generations/, which the archive wipe above
+        # does remove — but the rows describing them do not go with it.
+        index._conn.execute("DELETE FROM generations")
         if index.fts_enabled:
             index._conn.execute("DELETE FROM prompts_fts")
         index._conn.execute(
-            "DELETE FROM meta WHERE key = 'prompts_imported_from_json'"
+            "DELETE FROM meta WHERE key IN "
+            "('prompts_imported_from_json', 'generations_imported_from_json')"
         )
         index._conn.commit()
     index.rebuild()
@@ -95,6 +99,61 @@ def clean_archive():
 @pytest.fixture
 def store():
     return ArchiveStore()
+
+
+@pytest.fixture
+def fake_comfy(monkeypatch):
+    """Run a Comfy job without ComfyUI, capturing the graph that would be queued.
+
+    Returns the capture dict — `captured["graph"]` after a job completes.
+    """
+    from promptstudio.comfy import client as comfy
+    from promptstudio.comfy.client import ComfyJobManager
+
+    captured = {}
+
+    def fake_upload(local_path, *, filename=None, overwrite=True):
+        return "uploaded_ref.jpg"
+
+    def fake_queue(self, workflow, client_id):
+        captured["graph"] = workflow
+        return "prompt-1"
+
+    def fake_wait(self, prompt_id, timeout_sec=600):
+        return [{"filename": "out.png", "subfolder": "", "type": "output"}]
+
+    def fake_download(self, meta):
+        return b"\x89PNG\r\n\x1a\n" + b"0" * 32
+
+    monkeypatch.setattr(comfy, "upload_image_to_comfy", fake_upload)
+    monkeypatch.setattr(ComfyJobManager, "_queue_prompt", fake_queue)
+    monkeypatch.setattr(ComfyJobManager, "_wait_for_images", fake_wait)
+    monkeypatch.setattr(ComfyJobManager, "_download_image", fake_download)
+    return captured
+
+
+@pytest.fixture
+def run_comfy_job():
+    """Start a job on an isolated manager and block until it finishes.
+
+    A bare `ComfyJobManager()` rather than the singleton: `_status` would
+    otherwise carry across tests.
+    """
+    import time
+
+    from promptstudio.comfy.client import ComfyJobManager
+
+    def _run(**kwargs):
+        manager = ComfyJobManager()
+        assert manager.start(**kwargs) is True
+        for _ in range(400):
+            if not manager.is_running():
+                break
+            time.sleep(0.01)
+        assert not manager.is_running(), "job did not finish"
+        return manager.get_status()
+
+    return _run
 
 
 @pytest.fixture

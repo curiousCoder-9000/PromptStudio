@@ -1,15 +1,15 @@
 """Containment is one implementation now, so test it once and at each caller.
 
 `ArchiveStore.resolve_path` had the correct boundary check; two other copies
-(`comfy.client.resolve_archive_file`, `TrashStore.restore`) still used a bare
+(`comfy.client.resolve_archive_file`, `TrashStore.restore`) once used a bare
 `startswith(base)`, which passes for a sibling directory sharing the prefix.
+Both were fixed onto the shared `safe_join`, and A0 then deleted the Comfy copy
+outright — the Comfy cases below drive the job entry point instead.
 `tests/test_paths.py` covers the ArchiveStore route; this covers the primitive
 and the two callers that were wrong.
 """
 
 import os
-
-import pytest
 
 from promptstudio.config import SAVED_DIR
 from promptstudio.storage.paths import contains, safe_join
@@ -54,10 +54,17 @@ def test_safe_join_allows_a_normal_relative_path():
 
 
 # ── caller: ComfyUI reference resolution ────────────────────────────────
+#
+# `resolve_archive_file` was deleted in A0 — it was a second containment check
+# maintained beside `ArchiveStore.resolve_path`. These now drive the entry point
+# that survived, so they keep testing the archive boundary rather than a helper.
 
-def test_comfy_rejects_sibling_directory_sharing_the_archive_prefix():
-    """Regression: this used `startswith(normpath(SAVED_DIR))`."""
-    from promptstudio.comfy.client import resolve_archive_file
+def test_comfy_rejects_sibling_directory_sharing_the_archive_prefix(
+    fake_comfy, run_comfy_job
+):
+    """Regression: this used `startswith(normpath(SAVED_DIR))`, which passes for
+    a sibling directory sharing the prefix."""
+    from promptstudio.storage.db import ArchiveIndex
 
     sibling = SAVED_DIR + "_backup"
     os.makedirs(sibling, exist_ok=True)
@@ -66,25 +73,38 @@ def test_comfy_rejects_sibling_directory_sharing_the_archive_prefix():
         f.write("PRIVATE")
     try:
         escape = "../" + os.path.basename(sibling) + "/private.jpg"
-        with pytest.raises(ValueError):
-            resolve_archive_file(escape)
+        status = run_comfy_job(
+            source_rel=escape, positive="a", negative="b", workflow="pro", seed=1
+        )
+        assert status["error"], "traversal was accepted"
+        assert ArchiveIndex.get().list_generations_for(escape) == []
     finally:
         os.remove(leaked)
         os.rmdir(sibling)
 
 
-def test_comfy_resolves_a_real_archive_file(make_photo):
-    from promptstudio.comfy.client import resolve_archive_file
+def test_comfy_resolves_a_real_archive_file(make_photo, fake_comfy, run_comfy_job):
+    rel, _full = make_photo(creator="comfytest", name="ref.jpg")
 
-    rel, full = make_photo(creator="comfytest", name="ref.jpg")
-    assert resolve_archive_file(rel) == os.path.normpath(full)
+    status = run_comfy_job(
+        source_rel=rel, positive="a", negative="b", workflow="pro", seed=1
+    )
+
+    assert status["error"] is None, status["error"]
 
 
-def test_comfy_raises_not_found_for_a_contained_but_missing_file():
-    from promptstudio.comfy.client import resolve_archive_file
+def test_comfy_refuses_a_contained_but_missing_file(fake_comfy, run_comfy_job):
+    status = run_comfy_job(
+        source_rel="comfytest/nope.jpg",
+        positive="a",
+        negative="b",
+        workflow="pro",
+        seed=1,
+    )
 
-    with pytest.raises(FileNotFoundError):
-        resolve_archive_file("comfytest/nope.jpg")
+    assert status["error"]
+    # The absolute filesystem path must not reach a user-visible error.
+    assert SAVED_DIR not in status["error"]
 
 
 # ── caller: trash restore ───────────────────────────────────────────────

@@ -12,11 +12,9 @@ import os
 
 import pytest
 
-from promptstudio.comfy import client as comfy
 from promptstudio.comfy.client import (
     PRO_NODE_FACE_DETAILER,
     PRO_NODE_SAMPLER,
-    ComfyJobManager,
     build_pro_workflow,
     build_txt2img_workflow,
     resolve_seed,
@@ -76,54 +74,9 @@ def test_pro_builder_injects_the_given_seed_everywhere():
 # ── end to end: graph seed == recorded seed ──────────────────────────
 
 
-@pytest.fixture
-def fake_comfy(monkeypatch, tmp_path):
-    """Run a job without ComfyUI, capturing the graph that would be queued."""
-    captured = {}
-
-    def fake_upload(local_path, *, filename=None, overwrite=True):
-        return "uploaded_ref.jpg"
-
-    def fake_queue(self, workflow, client_id):
-        captured["graph"] = workflow
-        return "prompt-1"
-
-    def fake_wait(self, prompt_id, timeout_sec=600):
-        return [{"filename": "out.png", "subfolder": "", "type": "output"}]
-
-    def fake_download(self, meta):
-        return b"\x89PNG\r\n\x1a\n" + b"0" * 32
-
-    monkeypatch.setattr(comfy, "upload_image_to_comfy", fake_upload)
-    monkeypatch.setattr(ComfyJobManager, "_queue_prompt", fake_queue)
-    monkeypatch.setattr(ComfyJobManager, "_wait_for_images", fake_wait)
-    monkeypatch.setattr(ComfyJobManager, "_download_image", fake_download)
-    return captured
-
-
-def _run_to_completion(manager, **kwargs):
-    import time
-
-    assert manager.start(**kwargs) is True
-    for _ in range(200):
-        if not manager.is_running():
-            break
-        time.sleep(0.01)
-    assert not manager.is_running(), "job did not finish"
-    return manager.get_status()
-
-
-def _fresh_manager():
-    # The singleton carries status across tests; a bare instance is isolated.
-    return ComfyJobManager()
-
-
-def test_unpinned_seed_is_recorded(make_photo, fake_comfy):
+def test_unpinned_seed_is_recorded(make_photo, fake_comfy, run_comfy_job):
     rel, _ = make_photo(creator="seedtest", name="a.jpg")
-    manager = _fresh_manager()
-
-    status = _run_to_completion(
-        manager,
+    status = run_comfy_job(
         source_rel=rel,
         positive="a photo",
         negative="blurry",
@@ -140,12 +93,9 @@ def test_unpinned_seed_is_recorded(make_photo, fake_comfy):
     assert status["seed"] == recorded
 
 
-def test_pinned_seed_is_honoured_and_recorded(make_photo, fake_comfy):
+def test_pinned_seed_is_honoured_and_recorded(make_photo, fake_comfy, run_comfy_job):
     rel, _ = make_photo(creator="seedtest", name="b.jpg")
-    manager = _fresh_manager()
-
-    status = _run_to_completion(
-        manager,
+    status = run_comfy_job(
         source_rel=rel,
         positive="a photo",
         negative="blurry",
@@ -157,12 +107,9 @@ def test_pinned_seed_is_honoured_and_recorded(make_photo, fake_comfy):
     assert fake_comfy["graph"][PRO_NODE_SAMPLER]["inputs"]["seed"] == 99887766
 
 
-def test_txt2img_seed_is_recorded(make_photo, fake_comfy):
+def test_txt2img_seed_is_recorded(make_photo, fake_comfy, run_comfy_job):
     rel, _ = make_photo(creator="seedtest", name="c.jpg")
-    manager = _fresh_manager()
-
-    status = _run_to_completion(
-        manager,
+    status = run_comfy_job(
         source_rel=rel,
         positive="a photo",
         negative="blurry",
@@ -175,13 +122,10 @@ def test_txt2img_seed_is_recorded(make_photo, fake_comfy):
     assert recorded == fake_comfy["graph"]["3"]["inputs"]["seed"]
 
 
-def test_seed_reaches_the_generations_index(make_photo, fake_comfy):
+def test_seed_reaches_the_generations_index(make_photo, fake_comfy, run_comfy_job):
     """The record on disk — not just the in-memory status — carries the seed."""
     rel, _ = make_photo(creator="seedtest", name="d.jpg")
-    manager = _fresh_manager()
-
-    status = _run_to_completion(
-        manager,
+    status = run_comfy_job(
         source_rel=rel,
         positive="a photo",
         negative="blurry",

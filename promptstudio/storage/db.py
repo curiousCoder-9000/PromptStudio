@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 import urllib.parse
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -17,6 +18,7 @@ from promptstudio.config import (
     CLASSIFY_REJECT_MAX_TIER,
     EXCLUDED_FOLDERS,
     FTS_SEARCH,
+    GENERATIONS_INDEX_FILE,
     IMAGE_EXTENSIONS,
     MEDIA_EXTENSIONS,
     PROMPT_PIPELINE_VERSION,
@@ -167,6 +169,47 @@ _EMPTY_VERDICT_COUNTS: Dict[str, int] = {
     "stale_count": 0,
 }
 
+# ComfyUI outputs. One row per output *file*, not per job: a workflow with a
+# batch node emits several images and each is independently rateable.
+#
+# `seed` is NOT NULL on purpose. The defect this table exists to close
+# (design_generation_loop.md §2.1) was a seed resolved inside the graph builder
+# and never returned, so every unlocked generation recorded `seed: null` and was
+# unreproducible. The schema now refuses the row rather than trusting the caller.
+# Legacy rows imported from JSON carry -1, an honest "never recorded" that is
+# distinguishable from a real seed.
+#
+# `positive_prompt` is the full text. The JSON index truncated to 500/300 chars,
+# which is enough to display and not enough to reproduce.
+_GENERATIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS generations (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  gen_id           TEXT NOT NULL UNIQUE,
+  rel_path         TEXT NOT NULL UNIQUE,
+  source_rel       TEXT NOT NULL,
+  creator          TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  batch_id         TEXT,
+  workflow         TEXT NOT NULL,
+  checkpoint       TEXT,
+  seed             INTEGER NOT NULL,
+  steps            INTEGER,
+  cfg              REAL,
+  denoise          REAL,
+  mode_e           INTEGER NOT NULL DEFAULT 0,
+  positive_prompt  TEXT NOT NULL,
+  negative_prompt  TEXT,
+  prompt_version   TEXT,
+  rating           INTEGER NOT NULL DEFAULT 0,
+  rated_at         TEXT,
+  error            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_gen_created ON generations(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gen_source ON generations(source_rel);
+CREATE INDEX IF NOT EXISTS idx_gen_rating ON generations(rating);
+CREATE INDEX IF NOT EXISTS idx_gen_batch ON generations(batch_id);
+"""
+
 # Standalone rather than an external-content FTS table: the content table is
 # tiny, and standalone avoids rowid-sync triggers that silently rot if a write
 # path forgets them.
@@ -193,6 +236,7 @@ _IDENTITY_COLUMNS = (
 DEFAULT_SOURCE = "instagram"
 
 _PROMPTS_IMPORTED_KEY = "prompts_imported_from_json"
+_GENERATIONS_IMPORTED_KEY = "generations_imported_from_json"
 _FTS_TOKEN = re.compile(r"[A-Za-z0-9_]+")
 
 
@@ -347,12 +391,20 @@ class ArchiveIndex:
             self._conn.executescript(_SCHEMA)
             self._conn.executescript(_PHASH_SCHEMA)
             self._conn.executescript(_VERDICT_SCHEMA)
+            self._conn.executescript(_GENERATIONS_SCHEMA)
             self._init_fts()
             self._migrate_identity_columns()
             self._migrate_deleted_posts()
             self._migrate_added_at()
             self._migrate_caption_search()
             self._conn.commit()
+        # After the schema commit, not inside it: the import writes rows, and a
+        # failure here must leave a usable index rather than an app that will
+        # not start. Best-effort for the same reason `_init_fts` is.
+        try:
+            self.import_generations_from_json()
+        except Exception:
+            log.exception("legacy generations import failed; continuing")
 
     def _apply_pragmas(self) -> None:
         """Connection tuning. Best-effort — an old SQLite must not stop startup.
@@ -510,6 +562,184 @@ class ArchiveIndex:
                     )
             self._conn.commit()
         return len(rows)
+
+    # ── generations ──────────────────────────────────────────────────
+
+    def record_generation(
+        self,
+        *,
+        rel_path: str,
+        source_rel: str,
+        creator: str,
+        workflow: str,
+        seed: int,
+        positive_prompt: str,
+        negative_prompt: str = "",
+        gen_id: Optional[str] = None,
+        created_at: Optional[str] = None,
+        batch_id: Optional[str] = None,
+        checkpoint: Optional[str] = None,
+        steps: Optional[int] = None,
+        cfg: Optional[float] = None,
+        denoise: Optional[float] = None,
+        mode_e: bool = False,
+        prompt_version: Optional[str] = None,
+        rating: int = 0,
+        error: Optional[str] = None,
+    ) -> str:
+        """Record one output file. Returns its `gen_id`.
+
+        `seed` is required and stored as an integer — passing None raises here
+        rather than writing an unreproducible row (design_generation_loop.md
+        §2.1). Use -1 to mean "never recorded", which is what the legacy JSON
+        import writes.
+
+        Re-recording the same `rel_path` overwrites: a regenerate that lands on
+        the same filename is a correction, not a second output. `rating` is
+        deliberately *not* overwritten on conflict — the user's verdict outlives
+        a metadata rewrite.
+        """
+        if seed is None:
+            raise ValueError("record_generation requires a resolved seed")
+        rel = normalize_rel_path(rel_path)
+        gid = gen_id or uuid.uuid4().hex
+        stamp = created_at or datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO generations("
+                "gen_id, rel_path, source_rel, creator, created_at, batch_id, "
+                "workflow, checkpoint, seed, steps, cfg, denoise, mode_e, "
+                "positive_prompt, negative_prompt, prompt_version, rating, error"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(rel_path) DO UPDATE SET "
+                "source_rel=excluded.source_rel, creator=excluded.creator, "
+                "created_at=excluded.created_at, batch_id=excluded.batch_id, "
+                "workflow=excluded.workflow, checkpoint=excluded.checkpoint, "
+                "seed=excluded.seed, steps=excluded.steps, cfg=excluded.cfg, "
+                "denoise=excluded.denoise, mode_e=excluded.mode_e, "
+                "positive_prompt=excluded.positive_prompt, "
+                "negative_prompt=excluded.negative_prompt, "
+                "prompt_version=excluded.prompt_version, error=excluded.error",
+                (
+                    gid,
+                    rel,
+                    normalize_rel_path(source_rel),
+                    creator,
+                    stamp,
+                    batch_id,
+                    workflow,
+                    checkpoint,
+                    int(seed),
+                    None if steps is None else int(steps),
+                    None if cfg is None else float(cfg),
+                    None if denoise is None else float(denoise),
+                    1 if mode_e else 0,
+                    positive_prompt or "",
+                    negative_prompt or "",
+                    prompt_version,
+                    int(rating),
+                    error,
+                ),
+            )
+            self._conn.commit()
+        return gid
+
+    def import_generations_from_json(
+        self, path: str = GENERATIONS_INDEX_FILE
+    ) -> int:
+        """One-time import of the pre-A0 `generations_index.json`.
+
+        Returns the number of output files imported. Guarded by a meta key, the
+        same shape as the prompts import — `ArchiveIndex` is constructed per
+        process and this would otherwise re-run on every start.
+
+        Legacy records carry `seed: null` because the seed was resolved inside
+        the graph builder and never returned (§2.1). That value is gone and
+        cannot be recovered, so those rows get **-1**: an honest "never
+        recorded" that A1 can render as "seed not recorded" and refuse to
+        regenerate from. Inventing a plausible seed would make the
+        regenerate button confidently wrong.
+
+        A malformed record is skipped, not fatal — the file is hand-editable
+        and was written by a path that could die mid-run, and abandoning the
+        import would lose the well-formed records after it.
+        """
+        if self._meta_get(_GENERATIONS_IMPORTED_KEY) == "1":
+            return 0
+        if not os.path.isfile(path):
+            return 0
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError) as e:
+            log.warning("generations index unreadable, skipping import: %s", e)
+            return 0
+        if not isinstance(data, dict):
+            return 0
+
+        imported = 0
+        for source_rel, records in data.items():
+            if not isinstance(records, list):
+                continue
+            for rec in records:
+                if not isinstance(rec, dict):
+                    continue
+                files = rec.get("files")
+                if not isinstance(files, list):
+                    continue
+                raw_seed = rec.get("seed")
+                seed = -1 if raw_seed is None else int(raw_seed)
+                for item in files:
+                    if not isinstance(item, dict):
+                        continue
+                    rel = item.get("rel_path")
+                    if not rel:
+                        continue
+                    rel = normalize_rel_path(str(rel))
+                    # _generations/<creator>/<file> — fall back to the source's
+                    # first segment for records written before that layout.
+                    parts = rel.split("/")
+                    creator = parts[1] if len(parts) > 2 else (
+                        normalize_rel_path(source_rel).split("/", 1)[0]
+                    )
+                    try:
+                        self.record_generation(
+                            rel_path=rel,
+                            source_rel=source_rel,
+                            creator=creator,
+                            workflow=str(rec.get("workflow") or "pro"),
+                            seed=seed,
+                            positive_prompt=rec.get("positive_prompt") or "",
+                            negative_prompt=rec.get("negative_prompt") or "",
+                            created_at=rec.get("created_at"),
+                            checkpoint=rec.get("checkpoint"),
+                            steps=rec.get("steps"),
+                            cfg=rec.get("cfg"),
+                            denoise=rec.get("denoise"),
+                        )
+                        imported += 1
+                    except (ValueError, sqlite3.DatabaseError) as e:
+                        log.warning("skipping legacy generation %s: %s", rel, e)
+
+        self._meta_set(_GENERATIONS_IMPORTED_KEY, "1")
+        log.info("imported %d generation(s) from %s", imported, path)
+        return imported
+
+    def list_generations_for(self, source_rel: str) -> List[Dict[str, Any]]:
+        """Every generation from one source photo, newest first — unbounded.
+
+        The JSON index it replaces kept `items[:20]` and dropped the rest
+        silently, which is data loss that only becomes visible once something
+        renders the history.
+        """
+        rel = normalize_rel_path(source_rel)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM generations WHERE source_rel = ? "
+                "ORDER BY created_at DESC, id DESC",
+                (rel,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ── perceptual hashes ────────────────────────────────────────────
 

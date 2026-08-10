@@ -368,3 +368,8 @@ COMFYUI_DEFAULT_STEPS = int(os.environ.get("COMFYUI_STEPS", "32"))
 COMFYUI_DEFAULT_CFG = float(os.environ.get("COMFYUI_CFG", "6.0"))
 GENERATIONS_DIR = os.path.join(SAVED_DIR, "_generations")
 GENERATIONS_INDEX_FILE = os.path.join(SAVED_DIR, "generations_index.json")
+# How many generations to keep per source photo in the legacy JSON index.
+# 0 = unbounded, and it is the default: the old hardcoded 20 silently discarded
+# history that nothing had yet rendered. The SQLite table is never capped by
+# this — it exists only to bound the rollback file while it is still written.
+GENERATIONS_KEEP_PER_SOURCE = int(os.environ.get("GENERATIONS_KEEP_PER_SOURCE", "0"))

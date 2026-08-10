@@ -370,14 +370,36 @@ imported workflow is derived state the user would hate to re-create.
 - ✅ Tests: `tests/test_comfy_seed.py` — 11 cases, including graph-seed == recorded-seed
   through a mocked ComfyUI, and the value landing in `generations_index.json`. Verified
   to fail against the pre-fix behaviour.
-- ⬜ `generations` table + additive migration + JSON import (`seed = -1` for legacy rows).
-- ⬜ Stop truncating prompts; persist `prompt_version`, `mode_e`, `checkpoint`.
-- ⬜ Delete `resolve_archive_file`; use `ArchiveStore.resolve_path` (§2.4).
-- ⬜ Tests: legacy JSON import; `>20` generations for one source all survive; the
-  traversal case from `tests/test_paths.py` applied to the Comfy entry point.
+- ✅ `generations` table + additive migration + JSON import (`seed = -1` for legacy rows).
+  Import is guarded by a `meta` key like the prompts one and runs from `ArchiveIndex`
+  construction, so "first run" needs no CLI step. A malformed legacy record is skipped
+  rather than abandoning the import.
+- ✅ Stop truncating prompts; persist `prompt_version`, `mode_e`, `checkpoint`. All three
+  are threaded `handler → start() → runner → _save_outputs`; the first two were computed
+  at the call site and discarded.
+- ✅ Delete `resolve_archive_file`; use `ArchiveStore.resolve_path` (§2.4).
+- ✅ `GENERATIONS_KEEP_PER_SOURCE` (default `0` = unbounded) replaces the hardcoded
+  `items[:20]` in the JSON index. The table is never capped by it.
+- ✅ Tests: `tests/test_generations_store.py` (9) · `tests/test_generation_records.py` (7);
+  the containment cases in `tests/test_path_containment.py` retargeted from the deleted
+  helper onto the job entry point.
 
 **Gate:** every new row has a real `seed` ✅; a mocked generate → read-back reproduces the
-exact graph ✅. Storage half outstanding.
+exact graph ✅; storage half ✅.
+
+**Found while building it — a filename collision that predates the table.** Output names
+were `<base>_gen_<YYYYmmdd_HHMMSS>_<n>`, a *second*-resolution stamp, so two generations of
+the same source photo inside one second produced byte-identical paths and the second
+overwrote the first on disk. The JSON index recorded both records pointing at one file, so
+it looked like history while being loss. With `rel_path` UNIQUE the table would have
+collapsed them into one row and made it visible — the stamp is now microsecond-resolution.
+This is not in §2; it was surfaced by the "two generations in the same second" test written
+for the 20-cap.
+
+**Not done, and deliberately:** the `/api/comfy/generate` pass-through of `mode_e` and
+`prompt_version` has no Python test. This repo has no HTTP-route harness — routes are
+covered by `tests/ui/` — so the seam is tested at `ComfyJobManager.start()`, one call below
+the route. Pre-existing gap, not introduced here.
 
 **Note on the existing corpus.** Everything generated before this fix still has
 `seed: null`. That is unrecoverable — the value was never written down. The migration

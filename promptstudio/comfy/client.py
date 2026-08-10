@@ -25,12 +25,11 @@ from promptstudio.config import (
     COMFYUI_URL,
     GENERATIONS_DIR,
     GENERATIONS_INDEX_FILE,
-    SAVED_DIR,
+    GENERATIONS_KEEP_PER_SOURCE,
 )
 from promptstudio.jobs import COMFY, LEASES
 from promptstudio.logging_setup import get_logger
 from promptstudio.storage.atomic import atomic_write_json
-from promptstudio.storage.paths import safe_join
 
 log = get_logger(__name__)
 
@@ -275,17 +274,6 @@ def build_pro_workflow(
     return workflow
 
 
-def resolve_archive_file(source_rel: str) -> str:
-    """Archive-relative path → absolute file. Raises if it escapes or is missing."""
-    rel = source_rel.replace("\\", "/").lstrip("/")
-    full = safe_join(SAVED_DIR, rel)
-    if full is None:
-        raise ValueError("Invalid path")
-    if not os.path.isfile(full):
-        raise FileNotFoundError(full)
-    return full
-
-
 class GenerationsIndex:
     def __init__(self, path: str = GENERATIONS_INDEX_FILE) -> None:
         self.path = path
@@ -312,11 +300,20 @@ class GenerationsIndex:
         return list(entry) if isinstance(entry, list) else []
 
     def add(self, rel_path: str, record: Dict[str, Any]) -> None:
+        """Append to the legacy JSON index.
+
+        Kept alongside the `generations` table for one release so a rollback is
+        possible (design_generation_loop.md §3.1). The table is the source of
+        truth; this file is the parachute.
+        """
         key = rel_path.replace("\\", "/")
         data = self.load()
         items = list(data.get(key) or [])
         items.insert(0, record)
-        data[key] = items[:20]
+        # 0 = unbounded. The old hardcoded 20 was silent data loss.
+        if GENERATIONS_KEEP_PER_SOURCE > 0:
+            items = items[:GENERATIONS_KEEP_PER_SOURCE]
+        data[key] = items
         self.save(data)
 
 
@@ -370,6 +367,8 @@ class ComfyJobManager:
         denoise: Optional[float] = None,
         seed: Optional[int] = None,
         checkpoint: Optional[str] = None,
+        mode_e: bool = False,
+        prompt_version: Optional[str] = None,
     ) -> bool:
         workflow = (workflow or "pro").lower()
         # Resolve before the thread starts so the caller can report the seed in
@@ -414,6 +413,8 @@ class ComfyJobManager:
                         denoise=denoise if denoise is not None else COMFYUI_DEFAULT_DENOISE,
                         seed=resolved_seed,
                         checkpoint=checkpoint,
+                        mode_e=mode_e,
+                        prompt_version=prompt_version,
                     )
                 else:
                     self._run_txt2img(
@@ -425,6 +426,8 @@ class ComfyJobManager:
                         cfg=cfg if cfg is not None else 7.0,
                         seed=resolved_seed,
                         checkpoint=checkpoint or COMFYUI_CHECKPOINT,
+                        mode_e=mode_e,
+                        prompt_version=prompt_version,
                     )
             except Exception as exc:
                 log.exception("ComfyUI job failed for %s", source_rel)
@@ -453,10 +456,22 @@ class ComfyJobManager:
         denoise: float,
         seed: int,
         checkpoint: Optional[str],
+        mode_e: bool = False,
+        prompt_version: Optional[str] = None,
     ) -> None:
         with self._job_lock:
             self._status["progress"] = "Uploading reference…"
-        full = resolve_archive_file(source_rel)
+        # One containment check in the codebase, not two. Escaped and missing
+        # collapse to the same refusal on purpose: the caller cannot act on the
+        # difference, and the old FileNotFoundError(full) put an absolute
+        # filesystem path into a user-visible job error.
+        from promptstudio.storage.archive import ArchiveStore
+
+        full = ArchiveStore().resolve_path(source_rel)
+        if not full:
+            raise FileNotFoundError(
+                f"Reference image not found in archive: {source_rel}"
+            )
         creator = source_rel.replace("\\", "/").split("/", 1)[0]
         base = os.path.splitext(os.path.basename(source_rel))[0]
         upload_name = f"ps_{creator}_{base}{os.path.splitext(full)[1] or '.jpg'}"
@@ -498,6 +513,9 @@ class ComfyJobManager:
                 "cfg": cfg,
                 "seed": seed,
                 "reference": image_name,
+                "checkpoint": checkpoint,
+                "mode_e": mode_e,
+                "prompt_version": prompt_version,
             },
         )
         with self._job_lock:
@@ -515,6 +533,8 @@ class ComfyJobManager:
         cfg: float,
         seed: int,
         checkpoint: str,
+        mode_e: bool = False,
+        prompt_version: Optional[str] = None,
     ) -> None:
         w, h = aspect_to_size(aspect)
         graph = build_txt2img_workflow(
@@ -540,7 +560,15 @@ class ComfyJobManager:
             outputs,
             positive,
             negative,
-            extra={"workflow": "txt2img", "steps": steps, "cfg": cfg, "seed": seed},
+            extra={
+                "workflow": "txt2img",
+                "steps": steps,
+                "cfg": cfg,
+                "seed": seed,
+                "checkpoint": checkpoint,
+                "mode_e": mode_e,
+                "prompt_version": prompt_version,
+            },
         )
         with self._job_lock:
             self._status["result"] = saved
@@ -625,7 +653,11 @@ class ComfyJobManager:
         base = os.path.splitext(os.path.basename(source_rel))[0]
         out_dir = os.path.join(GENERATIONS_DIR, creator)
         os.makedirs(out_dir, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        # Microseconds, not seconds. Two generations of the same photo inside
+        # one second produced byte-identical filenames, so the second silently
+        # overwrote the first on disk — and with `rel_path` UNIQUE it would now
+        # also collapse two rows into one.
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         saved_files = []
         for i, meta in enumerate(outputs):
             raw = self._download_image(meta)
@@ -647,12 +679,54 @@ class ComfyJobManager:
         record: Dict[str, Any] = {
             "created_at": datetime.now(timezone.utc).isoformat(),
             "files": saved_files,
-            "positive_prompt": positive[:500],
-            "negative_prompt": negative[:300],
+            # Full text. Truncating to 500/300 kept enough to display and not
+            # enough to reproduce, which is the wrong half to keep.
+            "positive_prompt": positive,
+            "negative_prompt": negative,
             "primary_url": saved_files[0]["url"] if saved_files else None,
             "primary_rel": saved_files[0]["rel_path"] if saved_files else None,
         }
         if extra:
             record.update(extra)
+        self._record_in_db(source_rel, creator, record, saved_files)
         self.index.add(source_rel, record)
         return record
+
+    def _record_in_db(
+        self,
+        source_rel: str,
+        creator: str,
+        record: Dict[str, Any],
+        saved_files: List[Dict[str, str]],
+    ) -> None:
+        """Write one `generations` row per output file.
+
+        Best-effort: the images are already on disk and returned to the caller,
+        so an index failure must not turn a successful generation into an error.
+        It is logged rather than swallowed — a silently unindexed generation is
+        exactly the class of loss A0 exists to stop.
+        """
+        from promptstudio.storage.db import ArchiveIndex
+
+        try:
+            index = ArchiveIndex.get()
+            for item in saved_files:
+                index.record_generation(
+                    rel_path=item["rel_path"],
+                    source_rel=source_rel,
+                    creator=creator,
+                    workflow=str(record.get("workflow") or "pro"),
+                    seed=record.get("seed"),
+                    positive_prompt=record.get("positive_prompt") or "",
+                    negative_prompt=record.get("negative_prompt") or "",
+                    created_at=record.get("created_at"),
+                    batch_id=record.get("batch_id"),
+                    checkpoint=record.get("checkpoint"),
+                    steps=record.get("steps"),
+                    cfg=record.get("cfg"),
+                    denoise=record.get("denoise"),
+                    mode_e=bool(record.get("mode_e")),
+                    prompt_version=record.get("prompt_version"),
+                )
+        except Exception:
+            log.exception("failed to index generation for %s", source_rel)
