@@ -1,7 +1,10 @@
 # Design — Per-source scrape lanes
 
-**Status:** accepted, not implemented · **Date:** 2026-08-10
-**Sequence:** ships after [design_source_filter.md](design_source_filter.md).
+**Status:** ✅ shipped in `6284867` (follow-up `3114e83`) · **Date:** 2026-08-10
+**Sequence:** shipped after [design_source_filter.md](design_source_filter.md), as planned.
+
+As-built notes are in [§12](#12-as-built). §1–§11 are the accepted spec, kept as
+written so the delta is visible.
 
 Delivers the follow-up that `multi_source_scraping.md` §6 already names:
 
@@ -214,3 +217,63 @@ the same source blocks with an attributable holder name.
 - Ranking for non-Instagram sources — `score_instagram_post` stays Instagram-only.
 - Making Ollama and Comfy mutually exclusive; unrelated product decision
   (`jobs.py:28-31`).
+
+---
+
+## 12. As built
+
+Shipped as specified. `scrape_resource()` with `INSTAGRAM` kept as an alias
+(`jobs.py:54,64`), `ALL_RESOURCES` derived from `known_sources()`, the v2 `lanes` block
+with a v1 fold-in (`creator_queue.py:98,132`), `ScrapeLane` owning its own status / cancel
+Event / `RunHandle` (`sync_manager.py:83`), and — the §5.1 line that mattered — every
+source bound to `lane.is_cancel_requested` instead of one process-wide Event. The
+`checkpoints.py` lock landed first as §6 required, in `2697495`
+(`_UPDATE_LOCK`, `checkpoints.py:22`).
+
+`3114e83` fixed four things the spec did not anticipate. All four share one root cause:
+**lanes are created lazily, and the spec reasoned about lanes that exist.**
+
+### 12.1 Global pause missed lanes that did not exist yet
+
+`pause(source=None)` materialised `set(self._lane_names()) | {DEFAULT_SOURCE}` — the lanes
+with a record. On an empty queue that is Instagram alone. Enqueue X immediately after
+pressing **Pause** and it found a fresh, unpaused lane and started scraping seconds later.
+
+`_pausable_lane_names()` (`creator_queue.py:188`) is now the union of stored lanes, queued
+sources, `DEFAULT_SOURCE`, and the whole registry — so a lane created *after* a global pause
+still inherits it. The registry import is lazy inside the method: the registry is itself
+lazy, and eager-importing it here would drag in instaloader and probe for the gallery-dl
+binary on every pause.
+
+### 12.2 The flat `paused` key was true when one lane was paused
+
+§4 specified `paused` = "all lanes paused" as the back-compat projection. Computed over
+*stored* lanes, pausing one lane creates exactly one record and `all()` over a single
+element is trivially true — so pausing X read as "the whole queue is paused" while
+Instagram and Reddit were idle and runnable. Both `is_paused(None)` and
+`_lane_snapshots_unlocked()` now iterate `_pausable_lane_names()`, and the snapshot reads
+with `.get` rather than `_lane()`: reporting status must not mutate the thing it reports on.
+
+### 12.3 `CREATOR_SCRAPE_MAX_PENDING` had to become per-lane
+
+The spec left the cap in the "unchanged, shared" column (§4). Shared, it couples
+independent lanes: 50 queued Instagram creators make it impossible to enqueue one Reddit
+job with the Reddit lane completely idle. It is now `_pending_count_unlocked(src)`, and
+`queue_depth` is counted in the same lane as `position` — otherwise "3 of 50" compares a
+lane-local rank against a cross-lane total.
+
+### 12.4 The lease leaked on refusal
+
+`start_job` acquired the lane lease *before* the status check, so a job refused for any
+other reason returned without releasing it — permanently wedging that lane. Status check
+and acquire now happen under one lock in that order, with release on every refusal path.
+Separately, `try_drain_creator_queue` iterated `self._lanes` unlocked; another thread
+creating a lane mid-iteration raised `dictionary changed size during iteration`. It
+snapshots under `_job_lock` first.
+
+### 12.5 Tests
+
+`tests/test_scrape_lanes.py` (439 lines + 114 in the follow-up) covers every case in §10,
+including the §5.1 cancel regression and both migration paths.
+`tests/test_job_leases.py` gained the two-sources-concurrent and same-source-blocks cases;
+`tests/ui/test_scrape_lanes.js` covers three chips and per-chip cancel.

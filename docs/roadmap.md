@@ -345,6 +345,67 @@ the prompt blob is rewritten on every regenerate.
 
 ---
 
+## Phase 12f — Multi-source: sources, filter, lanes ✅
+
+**Goal:** make the archive genuinely multi-platform — scrape beyond Instagram,
+browse by provenance, and stop one platform's scrape from serialising or
+cancelling another's.
+
+Specs: [design_source_filter.md](design_source_filter.md) ·
+[design_scrape_lanes.md](design_scrape_lanes.md) ·
+reference [multi_source_scraping.md](multi_source_scraping.md).
+
+| Deliverable | Where | Status |
+|-------------|-------|--------|
+| `MediaSource` interface + `_REGISTRY`; X and Reddit via **gallery-dl** as a subprocess | `737c409` | Done |
+| `photos.source` + `deleted_posts.platform` — post identity scoped per platform | `737c409` | Done |
+| Per-platform archive folders (`handle__x`, `r_sub__reddit`), `SCRAPE_FOLDER_SUFFIX=0` to merge | `737c409` | Done |
+| **Source as a view filter** — `?source=` on `/api/photos` + `/api/creators`, registry-driven pills, `sourceFilter` view pref | `2697495` | Done |
+| Creator rollup regrouped `GROUP BY creator, source`; `sources` map stays unfiltered | `2697495` | Done |
+| gallery-dl sync badges — folder-keyed `SyncCheckpoints` write | `2697495` | Done |
+| `checkpoints.py` load→mutate→save lock (prerequisite for lanes) | `2697495` | Done |
+| **Per-source scrape lanes** — `scrape:<source>` leases, `ScrapeLane`, lane-scoped cancel / pause / status / pacing | `6284867` | Done |
+| v2 `creator_scrape_queue.json` with a `lanes` block; v1 and flat `sync_status.json` migrate in place | `6284867` | Done |
+| One chip per lane, each with its own Cancel and Pause | `6284867` | Done |
+| Lane lifecycle fixes — lease release on refusal, global pause coverage, per-lane cap, `paused` union | `3114e83` | Done |
+| `test_source_filter.py` · `test_scrape_lanes.py` · `test_sources.py` · `test_source_dispatch.py` · `tests/ui/test_source_filter.js` · `tests/ui/test_scrape_lanes.js` | — | Done |
+
+**The source layer shipped before the phase that names it.** `737c409` landed on
+2026-08-09, ahead of the classifier and both UI-hardening stages, and was never
+recorded here — which is why the filter and lane work below reads as sudden. The
+row exists so the sequence is legible, not to claim it as new.
+
+**Provenance is a column, never a folder name.** The `__x` / `__reddit` suffix is
+right for most rows and silently wrong for the two cases the feature exists to
+serve: `SCRAPE_FOLDER_SUFFIX=0` merges platforms into one folder on purpose, and
+any folder can hold manual uploads. A folder is a *location*; `photos.source` is
+the *provenance*. This is the one rule that shaped the whole filter design.
+
+**One line was the entire concurrency bug.** Every running source bound to a
+process-wide cancel Event (`should_cancel=self.is_cancel_requested`), so
+cancelling X killed Reddit with it. Lanes are mostly bookkeeping around replacing
+that with `lane.is_cancel_requested`.
+
+**Measured, per rule 13.** The `GROUP BY creator, source` regroup costs
+**1.4 ms → 2.9 ms** at 4,400 rows in the harness's worst case, where every
+creator folder is round-robined across all three sources — 3× the groups a real
+archive produces. Full table in [design_source_filter.md](design_source_filter.md) §9.1.
+
+**Instagram's pacing was not relaxed.** Lanes make the *other* sources faster.
+Instagram stays pinned to one job forever, keeps `IG_ACCOUNT_PAUSE_*` and
+`IG_BATCH_*`, and its batch-pause counter became per-source so a finishing Reddit
+job can no longer trigger it.
+
+**What the follow-up caught,** all one root cause — lanes are created lazily and
+the spec reasoned about lanes that already exist. A global pause recorded only
+Instagram, so enqueueing X seconds later found a fresh unpaused lane and started
+scraping. Pausing one lane made the flat `paused` key read true for the whole
+queue. The pending cap was shared, so a full Instagram queue blocked an idle
+Reddit lane. And the lane lease leaked on every refusal path that was not
+contention. Detail in [design_scrape_lanes.md](design_scrape_lanes.md) §12.
+
+---
+
 ## Phase 13 — Instrument, then close the loop 🔜
 
 **Goal:** measure whether the pipeline works, stop losing what it produces, and
@@ -488,10 +549,13 @@ Recorded so it is not relitigated — full reasoning in
 
 ```
 promptstudio/
-├── config.py
+├── config.py  jobs.py  insights.py  logging_setup.py
 ├── storage/     archive db favorites metadata thumbs
+│                atomic dedupe journal paths trash
 ├── scraping/    session downloader filters queue checkpoints
-│                organizer sync_manager video_frames
+│                organizer sync_manager video_frames results
+│                creator_queue classify_job media_classifier
+│   └── sources/ base instagram_source gallery_dl_source
 ├── prompts/     cache engine styles batch comfy_mode
 ├── comfy/       client + workflows/modelToimage_pro.api.json
 └── server/      handler multipart

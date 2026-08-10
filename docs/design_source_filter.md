@@ -1,9 +1,12 @@
 # Design — Source as a first-class view filter
 
-**Status:** accepted, not implemented · **Date:** 2026-08-10
-**Sequence:** ships before [design_scrape_lanes.md](design_scrape_lanes.md). The two
-touch disjoint files; this one first so the UI can already separate platforms before
-three lanes start filling the archive at once.
+**Status:** ✅ shipped in `2697495` (follow-ups `08bbc15`) · **Date:** 2026-08-10
+**Sequence:** shipped before [design_scrape_lanes.md](design_scrape_lanes.md), as planned.
+The two touch disjoint files; this one first so the UI could already separate platforms
+before three lanes started filling the archive at once.
+
+As-built notes and the §3.4 measurement are in [§9](#9-as-built). §1–§8 are the
+accepted spec, kept as written so the delta is visible.
 
 ---
 
@@ -148,3 +151,61 @@ an Instagram and an X target sharing a handle keep separate checkpoint entries.
 - Any change to folder naming or `SCRAPE_FOLDER_SUFFIX` semantics.
 - Backfilling `source` for pre-existing rows — the column is
   `NOT NULL DEFAULT 'instagram'` (`db.py:62`), so legacy media is already correct.
+
+---
+
+## 9. As built
+
+Shipped as specified — `list_creators(source=)`, `creator_verdict_counts(source=)`,
+`query_photos(source=)`, `?source=` on `/api/creators` and `/api/photos` with a **400**
+on an unrecognised value, `state.sourceFilter` in `PREF_FIELDS`, registry-driven pills,
+and the folder-keyed `SyncCheckpoints().update(...)` in `GalleryDlSource._record_checkpoint`
+(`gallery_dl_source.py:307`). Three things differ from the spec above.
+
+### 9.1 The §3.4 measurement (hard rule 13)
+
+The regroup was benchmarked with `scripts/benchmark_queries.py`, whose synthetic archive
+round-robins every creator across all three sources — the **worst case**, 3× the groups of
+the `creator`-only rollup it replaces. 4,400 rows, 40 creators, median of 7:
+
+| Rollup | Median ms |
+|--------|----------:|
+| legacy `GROUP BY creator` (raw SQL) | 1.4 |
+| new `GROUP BY creator, source` (raw SQL) | **2.9** |
+| `list_creators()`, rollup only | 2.9 |
+| `list_creators()`, full (rollup + verdicts) | 6.4 |
+| `list_creators(source='x')`, full | 4.0 |
+
+**+1.5 ms** on a sidebar query that runs once per creator-list refresh, against a real
+archive where most folders are single-source and the grouping collapses. Accepted. The
+Python-side fold and `ORDER BY photo_count` cost nothing measurable on top of the raw SQL
+(2.9 ms for both), which is the part §3.1 asserted without evidence.
+
+### 9.2 The filter broke a button the spec called out of scope
+
+§8 ruled per-source classify out of scope, and that still holds — but **Classify All**
+read its count from `state.creators`, which `/api/creators?source=` narrows, while the job
+it starts is archive-wide regardless. Filter to a platform whose backlog happens to be
+clear and the button **disabled itself** — "every creator is already classified" — while
+another platform's pile sat untouched.
+
+Fixed with `ArchiveIndex.unclassified_total()` (`db.py:1737`) on `/api/stats`, which is
+never scoped to anything, replacing the sidebar sum (`app.js:702`). The lesson generalises:
+a count derived from a filtered list must not label an unfiltered action.
+
+### 9.3 A persisted filter can name a source that no longer exists
+
+Not in the spec, and it would have been a permanent empty sidebar. `sourceFilter` persists
+through `PREF_FIELDS`, and validation is against the live `known_sources()` — so
+unregistering a source strands every client that had it selected, on a 400, on every load.
+
+`fetchCreators()` treats a 400 as "drop the pref and retry once" (`app.js:934-941`) rather
+than surfacing an error. The strict 400 from §4 is right for an API caller and wrong as a
+terminal state for a stored preference; both behaviours coexist.
+
+### 9.4 Tests
+
+`tests/test_source_filter.py` covers every case in §7 including the merged-folder
+(`SCRAPE_FOLDER_SUFFIX=0`) one; `tests/test_sources.py` gained the folder-keyed checkpoint
+cases; `tests/ui/test_source_filter.js` covers pill toggling and reload persistence;
+`tests/test_stats.py` gained 4 for `unclassified_total`.
