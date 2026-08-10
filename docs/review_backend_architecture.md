@@ -298,6 +298,72 @@ a source filter *halves* the full call because both halves get scoped.
 maintenance on every `upsert_photo`. Not worth it at this archive size. Revisit
 if the rollup ever shows up in a profile.
 
+### S10 — Carousel grouping is a full scan, and stays one 🟢 ✅ done, measured, slower
+
+C2 collapses a post's slides into one tile via `GROUP BY` on `photos.post_id`
+(`query_photos(group_posts=True)`, `GET /api/photos?group=post`). Rule 13, so:
+
+`py scripts/benchmark_queries.py --rows 4400 --rows 40000`, median of 7,
+same rows for both columns of each pair — 2.9 slides per post, 35% of posts
+being carousels:
+
+| gallery page (limit 60) | 4 400 files / 1 562 posts | 40 000 files / 13 816 posts |
+|---|--:|--:|
+| `sort=name`, flat | 1.2 ms | 11.2 ms |
+| `sort=name`, grouped | 3.5 ms | 56.6 ms |
+| `sort=newest`, flat | 3.1 ms | 28.0 ms |
+| `sort=newest`, grouped | 8.3 ms | 147.7 ms |
+| `offset=1200`, flat | 3.6 ms | 30.6 ms |
+| `offset=1200`, grouped | 10.8 ms | 169.6 ms |
+| whole route (grouped + hydrating the slides) | 10.0 ms | 174.8 ms |
+
+**Grouping is slower — about 3x at 4 400 rows and 5x at 40 000**, and no amount
+of indexing fixes that: an exact group count has to visit every matching row,
+while the flat query rides an index and stops at 60. The absolute number is what
+makes it shippable (10 ms at the real archive size), not the ratio. It is also
+off by default.
+
+Two things were measured rather than assumed, and both changed the code:
+
+**The group key is grouped as two columns, not one concatenation.** `GROUP BY
+creator || '/' || IFNULL(NULLIF(post_id,''), filename)` cannot use an index;
+`GROUP BY creator, IFNULL(NULLIF(post_id,''), filename)` can, against a new
+expression index `idx_photos_group_key`. At 20 000 rows: **59 ms → 32 ms** on
+the page, for **+23% on a bulk reindex** (113 ms → 139 ms, once, on a path that
+already walks the filesystem). The concatenation survives only as the key the
+client sees. Same reasoning for the total: a grouped subquery, not
+`COUNT(DISTINCT concat)`.
+
+**Grouped `sort=name` orders by the group key, not the filename.** It is the
+same expression as the `GROUP BY`, so the ORDER BY temp B-tree disappears
+entirely and `LIMIT 60` short-circuits: **77 ms → 0.3 ms at 40 000 rows** on the
+page statement. The cost is honest and small — a carousel sorts by its post id
+rather than by its first slide's filename, so a folder mixing scraped posts with
+manual uploads interleaves them differently from the flat grid. A photo with no
+post id is unaffected, because then the key *is* the filename. The other sorts
+cannot use the trick (`added_at`, `mtime` and `tier` are not in the index) and
+keep the temp B-tree, which is why `sort=newest` is still the expensive one.
+
+After that change the **total** dominates the grouped call, not the page:
+
+```
+-- total (grouped)                    -- page, sort=name (grouped)
+CO-ROUTINE (subquery-1)               SCAN p USING INDEX idx_photos_group_key
+SCAN p USING INDEX idx_photos_group_key   SEARCH v USING COVERING INDEX … LEFT-JOIN
+SEARCH v USING COVERING INDEX … LEFT-JOIN
+SCAN (subquery-1)
+```
+
+An approximate total was considered and **not** taken: `total` and `has_more`
+drive the infinite-scroll sentinel, and an estimate there does not degrade
+gracefully — it skips content.
+
+Hydrating the slides the grid never draws (the second read behind
+`photos_for_rel_paths`) costs **0.9 ms for 126 extra files at 4 400 rows**, and
+runs only when a page actually contains a carousel. Returning bare paths instead
+would have saved that and cost the lightbox its favourite, verdict and prompt
+state on every slide after the first.
+
 ---
 
 ## 4. Feature proposals

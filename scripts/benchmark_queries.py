@@ -127,6 +127,46 @@ def seed(index: ArchiveIndex, rows: int, *, with_caption: bool, seed_value: int 
     return total_blob
 
 
+def assign_post_ids(
+    index: ArchiveIndex, rows: int, *, carousel_share: float = 0.35, seed_value: int = 11
+) -> int:
+    """Give the seeded rows a carousel shape, as an UPDATE after the fact.
+
+    Deliberately not folded into `seed()`: the S5 and S9 tables above were
+    produced on rows with a NULL `post_id`, and quietly widening every row would
+    make a fresh run of this script incomparable to the numbers already in
+    docs/review_backend_architecture.md.
+
+    Slides of one post must share a creator (the group key is creator-scoped),
+    and `seed()` round-robins creators, so this walks each creator's own rows.
+    Returns the number of posts.
+    """
+    rng = random.Random(seed_value)
+    by_creator: dict[str, list[str]] = {}
+    for i in range(rows):
+        creator = f"creator_{i % CREATORS:02d}"
+        by_creator.setdefault(creator, []).append(f"{creator}/photo_{i:06d}.jpg")
+
+    updates, posts = [], 0
+    for rels in by_creator.values():
+        pos = 0
+        while pos < len(rels):
+            slides = rng.randint(3, 10) if rng.random() < carousel_share else 1
+            slides = min(slides, len(rels) - pos)
+            post_id = f"post_{posts:07d}"
+            updates.extend((post_id, rels[pos + n]) for n in range(slides))
+            pos += slides
+            posts += 1
+
+    with index._lock:
+        index._conn.executemany(
+            "UPDATE photos SET post_id = ? WHERE rel_path = ?", updates
+        )
+        index._conn.execute("ANALYZE")
+        index._conn.commit()
+    return posts
+
+
 def time_call(fn, repeats: int = REPEATS) -> tuple[float, int]:
     """Median wall time in ms, plus the match count, discarding a warm-up."""
     fn()
@@ -186,6 +226,69 @@ def creator_scenarios(index: ArchiveIndex):
     ]
 
 
+def group_scenarios(index: ArchiveIndex):
+    """C2 carousel grouping, flat vs grouped on identical rows.
+
+    The last entry is what `/api/photos?group=post` actually costs: the grouped
+    page *plus* the second read that hydrates the slides the grid never draws.
+    """
+    q = index.query_photos
+
+    def whole_route():
+        reps, total = q(sort="newest", limit=60, group_posts=True)
+        extra = sorted({
+            rel
+            for rep in reps
+            for rel in rep["group_members"]
+            if rel != rep["rel_path"]
+        })
+        slides = index.photos_for_rel_paths(extra)
+        return reps, len(reps) + len(slides)
+
+    return [
+        ("sort=name, flat", lambda: q(sort="name", limit=60)),
+        ("sort=name, grouped", lambda: q(sort="name", limit=60, group_posts=True)),
+        ("sort=newest, flat", lambda: q(sort="newest", limit=60)),
+        ("sort=newest, grouped", lambda: q(sort="newest", limit=60, group_posts=True)),
+        ("offset=1200, flat", lambda: q(sort="newest", limit=60, offset=1200)),
+        ("offset=1200, grouped",
+         lambda: q(sort="newest", limit=60, offset=1200, group_posts=True)),
+        ("whole route (grouped + hydrate slides)", whole_route),
+    ]
+
+
+def print_group_plan(index: ArchiveIndex) -> None:
+    """EXPLAIN QUERY PLAN for both statements a grouped page issues.
+
+    `query_photos` runs a total *and* a page, and once the page can ride the
+    index the total is what dominates — which is only visible if both are here.
+    """
+    from promptstudio.storage.db import _GROUP_BY_SQL, _GROUP_KEY_SQL
+
+    join = " FROM photos p LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path"
+    statements = {
+        "total (grouped)":
+            f"SELECT COUNT(*) AS c FROM (SELECT 1{join} GROUP BY {_GROUP_BY_SQL})",
+        "page, sort=name (grouped)":
+            f"SELECT p.*, {_GROUP_KEY_SQL} AS group_key, COUNT(*) AS group_count, "
+            "MIN(p.rel_path) AS group_rep, "
+            f"GROUP_CONCAT(p.rel_path, char(10)) AS group_members{join} "
+            f"GROUP BY {_GROUP_BY_SQL} ORDER BY {_GROUP_BY_SQL} LIMIT 60 OFFSET 0",
+        "page, sort=newest (grouped)":
+            f"SELECT p.*, COUNT(*) AS group_count, MIN(p.rel_path) AS group_rep"
+            f"{join} GROUP BY {_GROUP_BY_SQL} "
+            "ORDER BY IFNULL(p.added_at, p.mtime) DESC, p.filename ASC "
+            "LIMIT 60 OFFSET 0",
+    }
+    print("\n```")
+    for label, sql in statements.items():
+        print(f"-- {label}")
+        with index._lock:
+            for row in index._conn.execute("EXPLAIN QUERY PLAN " + sql).fetchall():
+                print("   ", row["detail"])
+    print("```")
+
+
 def run(rows: int, *, with_caption: bool) -> None:
     index = ArchiveIndex.get()
     index.ensure_ready()
@@ -209,6 +312,16 @@ def run(rows: int, *, with_caption: bool) -> None:
     for name, fn in creator_scenarios(index):
         ms, matches = time_call(fn)
         print(f"| {name} | {matches:,} | {ms:.1f} |")
+
+    # Runs last, and mutates post_id — see assign_post_ids().
+    posts = assign_post_ids(index, rows)
+    print(f"\n| post grouping — {posts:,} posts, "
+          f"{rows / posts:.2f} slides each | groups | median ms |")
+    print("|---------------|-------:|----------:|")
+    for name, fn in group_scenarios(index):
+        ms, matches = time_call(fn)
+        print(f"| {name} | {matches:,} | {ms:.1f} |")
+    print_group_plan(index)
 
 
 def main() -> int:

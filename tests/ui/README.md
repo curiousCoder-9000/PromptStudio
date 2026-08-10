@@ -37,6 +37,8 @@ Overridable env: `TEST_PORT`, `CDP_PORT`, `PHOTO_COUNT`, `PYTHON`, `CHROME_BIN`.
 | `test_delete_flow.js` | Soft delete, undo, trash modal, bulk delete, optimistic refresh |
 | `test_escaping.js` | `escapeHtml` at real render sites, search debounce, abort ordering |
 | `test_jobs_and_prefs.js` | Job chips, persisted view prefs, skeletons, sync-mode payloads |
+| `test_post_grouping.js` | Carousels as one tile, `←`/`→` through a post's slides, the toggle as a pref |
+| `seed_*.py` | Fixtures the HTTP API cannot produce (verdicts, non-Instagram sources, carousels) — written straight into the index, and wired per suite in `run.sh` |
 | `run.sh` | Fixture seeding + server/Chrome lifecycle |
 
 ## Writing a new suite

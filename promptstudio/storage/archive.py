@@ -2,7 +2,7 @@
 
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from promptstudio.config import EXCLUDED_FOLDERS, SAVED_DIR, TRASH_ENABLED
 from promptstudio.logging_setup import get_logger
@@ -86,6 +86,7 @@ class ArchiveStore:
         verdict: Optional[str] = None,
         source: Optional[str] = None,
         sort: str = "name",
+        group_posts: bool = False,
     ) -> Tuple[List[Dict[str, Any]], int]:
         return self._index.query_photos(
             creator=creator,
@@ -98,7 +99,13 @@ class ArchiveStore:
             sort=sort,
             limit=limit,
             offset=offset,
+            group_posts=group_posts,
         )
+
+    def photos_for_rel_paths(
+        self, rel_paths: Sequence[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        return self._index.photos_for_rel_paths(rel_paths)
 
     def resolve_path(self, rel_path: str) -> Optional[str]:
         """Resolve an archive-relative path, or None if it escapes the archive.
