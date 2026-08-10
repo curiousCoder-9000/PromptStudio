@@ -1,12 +1,10 @@
 """Background batch prompt generation."""
 
 import os
-import threading
 import time
-from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from promptstudio.jobs import LEASES, OLLAMA
+from promptstudio.jobs import OLLAMA, BackgroundJob
 from promptstudio.logging_setup import get_logger
 from promptstudio.prompts.cache import PromptCache
 from promptstudio.prompts.engine import ENGINE_ID, get_prompt_for_image
@@ -20,64 +18,28 @@ LEASE_OWNER = "batch_prompt"
 LogFn = Optional[Callable[[str], None]]
 
 
-class BatchPromptManager:
-    _instance: Optional["BatchPromptManager"] = None
-    _lock = threading.Lock()
+class BatchPromptManager(BackgroundJob):
+    """Run the vision prompt over every uncached photo.
 
-    def __init__(self) -> None:
-        self._job_lock = threading.Lock()
-        self._cancel = threading.Event()
-        # Why the last start_batch() returned False, for the API's 409 message.
-        self.last_refusal = ""
-        self._status: Dict[str, Any] = self._idle_status()
+    Cancel is cooperative and checked *between* items, so the in-flight image
+    finishes first: the Ollama call is not interruptible and a partial write
+    would poison the prompt cache. (`ComfyBatchManager` interrupts mid-item for
+    the opposite reason — nothing there is persisted until the image is
+    downloaded.)
+    """
 
-    @staticmethod
-    def _idle_status() -> Dict[str, Any]:
+    resources = (OLLAMA,)
+    owner = LEASE_OWNER
+    busy_noun = "the vision model"
+    busy_message = "Batch already running"
+
+    def _idle_status(self) -> Dict[str, Any]:
         return {
-            "running": False,
-            "total": 0,
-            "completed": 0,
-            "failed": 0,
-            "current": "",
-            "started_at": None,
-            "finished_at": None,
-            "error": None,
-            "cancelled": False,
-            "cancel_requested": False,
+            **super()._idle_status(),
             # Snapshot taken once at job start — listing pending work is a full
             # archive scan, far too expensive to redo on every status poll.
             "pending": 0,
         }
-
-    @classmethod
-    def get(cls) -> "BatchPromptManager":
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = BatchPromptManager()
-        return cls._instance
-
-    def get_status(self) -> Dict[str, Any]:
-        with self._job_lock:
-            status = dict(self._status)
-        status["cancel_requested"] = self._cancel.is_set()
-        return status
-
-    def is_running(self) -> bool:
-        return self.get_status().get("running", False)
-
-    def cancel(self) -> bool:
-        """Request cooperative cancel; True if a job was running.
-
-        Checked between items, so the in-flight image finishes first — the
-        Ollama call is not interruptible and a partial write would poison the
-        prompt cache.
-        """
-        with self._job_lock:
-            if not self._status.get("running"):
-                return False
-        self._cancel.set()
-        return True
 
     def list_uncached(
         self,
@@ -144,33 +106,6 @@ class BatchPromptManager:
         if not pending:
             return False
 
-        # Same lease the classify job takes: whichever asks first gets Ollama,
-        # decided under one lock rather than by two independent is_running()
-        # polls that could both see "free".
-        blocker = LEASES.acquire([OLLAMA], LEASE_OWNER)
-        if blocker:
-            self.last_refusal = (
-                f"{LEASES.holder(blocker) or 'another job'} is using the vision model"
-            )
-            return False
-
-        with self._job_lock:
-            if self._status.get("running"):
-                LEASES.release(LEASE_OWNER)
-                self.last_refusal = "Batch already running"
-                return False
-            self.last_refusal = ""
-            self._cancel.clear()
-            self._status = self._idle_status()
-            self._status.update(
-                {
-                    "running": True,
-                    "total": len(pending),
-                    "pending": len(pending),
-                    "started_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-
         def runner() -> None:
             journal = RunJournal.for_kind("batch_prompt")
             with journal.run(
@@ -212,49 +147,29 @@ class BatchPromptManager:
                             ms=int((time.monotonic() - started) * 1000),
                         )
                     with self._job_lock:
-                        self._status["pending"] = max(
-                            0,
-                            self._status["total"]
-                            - self._status["completed"]
-                            - self._status["failed"],
-                        )
+                        self._status["pending"] = self._remaining()
                 with self._job_lock:
                     run.summary(
                         completed=self._status["completed"],
                         failed=self._status["failed"],
                         engine=ENGINE_ID,
                     )
-        def finish() -> None:
-            LEASES.release(LEASE_OWNER)
-            with self._job_lock:
-                self._status["running"] = False
-                self._status["finished_at"] = datetime.now(timezone.utc).isoformat()
-                self._status["current"] = ""
-                if self._status.get("cancelled"):
-                    self._status["pending"] = max(
-                        0,
-                        self._status["total"]
-                        - self._status["completed"]
-                        - self._status["failed"],
-                    )
-                else:
-                    self._status["pending"] = 0
-            self._cancel.clear()
 
-        def guarded_runner() -> None:
-            # Without this, an exception escaping the loop stranded the lease
-            # and left running=True forever — the job could never be restarted.
-            try:
-                runner()
-            except Exception as exc:
-                log.exception("batch prompt job crashed")
-                with self._job_lock:
-                    self._status["error"] = str(exc)
-            finally:
-                finish()
+        return self._start(runner, total=len(pending), pending=len(pending))
 
-        threading.Thread(target=guarded_runner, daemon=True).start()
-        return True
+    def _remaining(self) -> int:
+        return max(
+            0,
+            self._status["total"]
+            - self._status["completed"]
+            - self._status["failed"],
+        )
+
+    def _finalise(self) -> None:
+        # A cancelled run leaves real work undone and must say so; a completed
+        # one has nothing left regardless of what the last loop iteration wrote.
+        self._status["pending"] = self._remaining() if self._status.get("cancelled") else 0
+        super()._finalise()
 
 
 def count_prompts_ready() -> int:

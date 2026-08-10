@@ -1,4 +1,10 @@
-"""Exclusive leases on shared external resources.
+"""Background jobs and the exclusive leases they contend for.
+
+Two things live here, and they belong together: the resource a job needs and
+the scaffolding for running it are the same subject, and `BackgroundJob` is
+useless without `LEASES`.
+
+## Leases
 
 Background jobs contend for three things that cannot be shared: the Ollama
 vision model, the Instagram session, and ComfyUI. That contention used to be
@@ -28,13 +34,27 @@ This models the contention that already exists. ComfyUI is declared but
 deliberately not made exclusive with Ollama: they do share a GPU, but today they
 can run together, and changing that is a product decision rather than a
 refactor.
+
+## BackgroundJob
+
+`review_backend_architecture.md` S6 counted five managers independently
+reimplementing the same singleton / `_job_lock` / `_cancel` / `get_status` /
+`is_running` / `cancel` / thread-spawn scaffolding. `BackgroundJob` is that
+scaffolding, written once.
+
+Only three managers use it: `BatchPromptManager`, `ClassifyJobManager` and
+`ComfyBatchManager`. **`SyncManager` and `CreatorScrapeQueue` are deliberately
+left alone** — they carry pause/resume, multi-day pacing and per-lane queue
+state, which is a different shape, and bending them to fit would be shaping the
+abstraction to the review doc rather than to the code.
 """
 
 from __future__ import annotations
 
 import threading
 from contextlib import contextmanager
-from typing import Dict, Iterable, Iterator, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence
 
 from promptstudio.logging_setup import get_logger
 
@@ -165,3 +185,166 @@ class ResourceBusy(RuntimeError):
 
 # Process-wide. The resources are process-wide too.
 LEASES = LeaseRegistry()
+
+
+class BackgroundJob:
+    """One long-running job: singleton, status snapshot, cancel, leases.
+
+    A subclass declares what it needs and what it does::
+
+        class WidgetJob(BackgroundJob):
+            resources = (OLLAMA,)
+            owner = "widget"
+            busy_noun = "the vision model"
+
+            def start(self, items):
+                return self._start(lambda: self._run(items), total=len(items))
+
+    Everything below the subclass's own status keys and loop body is handled
+    here: acquiring the leases atomically, refusing with an attributable
+    message, spawning the thread, and — the part that was a real bug in
+    `BatchPromptManager` — releasing the lease and clearing `running` in a
+    `finally`, so an exception escaping the loop cannot leave the job wedged.
+    """
+
+    # What the job needs exclusive access to, and the name it holds it under.
+    resources: Sequence[str] = ()
+    owner: str = ""
+    # Filled into "<holder> is using <busy_noun>" when a resource is taken.
+    busy_noun: str = "a shared resource"
+    # Refusal when *this* job is the one already running.
+    busy_message: str = "A job is already running"
+
+    # One lock guards every subclass's lazy `get()`; contention is nil.
+    _singleton_lock = threading.Lock()
+
+    def __init__(self) -> None:
+        self._job_lock = threading.Lock()
+        self._cancel = threading.Event()
+        # Why the last start returned False, for the API's 409 message.
+        self.last_refusal = ""
+        self._status: Dict[str, Any] = self._idle_status()
+
+    @classmethod
+    def get(cls) -> "BackgroundJob":
+        """The process-wide instance for this subclass.
+
+        `cls.__dict__`, not `cls._instance`: a plain attribute lookup walks the
+        MRO, so the first subclass to instantiate would populate the base and
+        every later subclass would be handed *its* instance. Nothing about that
+        fails loudly, which is why it is worth the two extra characters.
+        """
+        instance = cls.__dict__.get("_instance")
+        if instance is None:
+            with BackgroundJob._singleton_lock:
+                instance = cls.__dict__.get("_instance")
+                if instance is None:
+                    instance = cls()
+                    cls._instance = instance
+        return instance
+
+    def _idle_status(self) -> Dict[str, Any]:
+        """The keys every job has. Subclasses extend via `super()`."""
+        return {
+            "running": False,
+            "total": 0,
+            "completed": 0,
+            "failed": 0,
+            "current": "",
+            "started_at": None,
+            "finished_at": None,
+            "error": None,
+            "cancelled": False,
+            "cancel_requested": False,
+        }
+
+    def get_status(self) -> Dict[str, Any]:
+        with self._job_lock:
+            status = dict(self._status)
+        # Derived from the event rather than read from the dict: the event is
+        # what the runner actually polls, so this cannot drift from it.
+        status["cancel_requested"] = self._cancel.is_set()
+        return status
+
+    def is_running(self) -> bool:
+        return bool(self.get_status().get("running"))
+
+    def cancel_requested(self) -> bool:
+        return self._cancel.is_set()
+
+    def cancel(self) -> bool:
+        """Request a cooperative cancel; True if a job was running."""
+        with self._job_lock:
+            if not self._status.get("running"):
+                return False
+            self._status["cancel_requested"] = True
+        self._cancel.set()
+        return True
+
+    def _refuse(self, message: str) -> bool:
+        self.last_refusal = message
+        return False
+
+    def _start(self, run: Callable[[], None], **initial_status: Any) -> bool:
+        """Acquire, flip to running, spawn. False (with `last_refusal`) if busy.
+
+        `initial_status` is merged over the idle status — `total`, `creator`,
+        whatever the subclass wants visible from the first poll.
+        """
+        # Both checks under `_job_lock`, and *this* order, which is the one the
+        # hand-rolled managers got wrong. They acquired first and checked
+        # `running` second — but re-acquiring your own lease legally succeeds,
+        # so a duplicate start slipped through to the `release()` in the
+        # already-running branch and dropped the lease out from under the job
+        # still using it. The next contender then sailed through: two jobs, one
+        # Ollama, from a double-clicked button.
+        #
+        # Lock order is always `_job_lock` → registry lock (LEASES never calls
+        # back into a job), so holding both here cannot invert.
+        with self._job_lock:
+            if self._status.get("running"):
+                return self._refuse(self.busy_message)
+            blocker = LEASES.acquire(self.resources, self.owner)
+            if blocker:
+                holder = LEASES.holder(blocker) or "another job"
+                return self._refuse(f"{holder} is using {self.busy_noun}")
+            self.last_refusal = ""
+            self._cancel.clear()
+            self._status = {
+                **self._idle_status(),
+                "running": True,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                **initial_status,
+            }
+
+        threading.Thread(target=self._guarded(run), daemon=True).start()
+        return True
+
+    def _guarded(self, run: Callable[[], None]) -> Callable[[], None]:
+        def guarded() -> None:
+            try:
+                run()
+            except Exception as exc:
+                log.exception("%s job crashed", self.owner or type(self).__name__)
+                with self._job_lock:
+                    self._status["error"] = str(exc)
+            finally:
+                # Released before the status flip so a client that sees
+                # running=False can immediately start the next job.
+                LEASES.release(self.owner)
+                self._cancel.clear()
+                with self._job_lock:
+                    self._finalise()
+
+        return guarded
+
+    def _finalise(self) -> None:
+        """Last write to the status dict. Called under `_job_lock`.
+
+        Subclasses that need a closing computation override this and call
+        `super()._finalise()`.
+        """
+        self._status["running"] = False
+        self._status["cancel_requested"] = False
+        self._status["finished_at"] = datetime.now(timezone.utc).isoformat()
+        self._status["current"] = ""

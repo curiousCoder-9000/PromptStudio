@@ -158,7 +158,7 @@ trigger. Turns substring scanning into a real inverted index and gives you
 phrase/prefix queries for free.
 </details>
 
-### S6 — Five job managers, one missing abstraction 🟡 ✅ leases done, base class deferred
+### S6 — Five job managers, one missing abstraction 🟡 ✅ done
 
 `SyncManager`, `BatchPromptManager`, `ClassifyJobManager`, `ComfyJobManager` and
 `CreatorScrapeQueue` each independently reimplement: double-checked-locking
@@ -196,10 +196,37 @@ Two things found while wiring it:
   share a GPU, but today they can run together; making that exclusive is a
   product decision, not a refactor.
 
-**Deferred:** the `BackgroundJob` base class. The duplicated
-singleton/status/cancel scaffolding is real but cosmetic, and collapsing it
-touches all five managers at once — poor value against the conflict risk while
-another session is editing the same files. The lease was the correctness half.
+**Shipped in Phase 14 (A2):** `BackgroundJob`, in the same `jobs.py` — the
+resource a job needs and the scaffolding for running it are one subject.
+`BatchPromptManager`, `ClassifyJobManager` and the new `ComfyBatchManager` are
+on it.
+
+**`SyncManager` and `CreatorScrapeQueue` are deliberately not**, and this is a
+narrowing of the original recommendation rather than an unfinished migration.
+They carry pause/resume, multi-day pacing and per-lane queue state; folding
+them in would mean widening the base until it stopped describing anything, to
+delete scaffolding the review itself called cosmetic. Two of five is where the
+abstraction earns its keep.
+
+The migration found a **third** correctness bug, of the same family as the two
+above and present in every hand-rolled manager. The order was acquire-then-
+check-`running`:
+
+```python
+blocker = LEASES.acquire([OLLAMA], LEASE_OWNER)   # succeeds — it is our own lease
+if blocker: ...
+with self._job_lock:
+    if self._status["running"]:
+        LEASES.release(LEASE_OWNER)               # drops it from under the running job
+```
+
+Re-acquiring a lease you already hold legally succeeds — it has to, or a job
+could not restart its own inner loop — so a duplicate start request reached the
+`release()` in the already-running branch and freed Ollama while the first job
+was still using it. The next contender then sailed through: two jobs on one
+model, from a double-clicked button. `BackgroundJob._start` checks `running`
+first, under `_job_lock`, and acquires inside it. Asserted by
+`test_a_refused_duplicate_start_leaves_the_running_job_holding_its_lease`.
 
 ### S7 — `handler.py` is a 1620-line if-chain 🟡
 
@@ -382,7 +409,7 @@ Keying on a content hash makes the cache self-healing. Low priority.
 3. ~~**S4** — prompt cache into SQLite.~~ **Done** — 7x faster writes, and the
    filename-collision bug is gone. ~~**S5** — FTS5.~~ **Built, default off**;
    the benchmark said the LIKE scan is faster for common queries at this size.
-4. ~~**S6** — job/lease abstraction.~~ **Done** (leases; base class deferred).
+4. ~~**S6** — job/lease abstraction.~~ **Done** (leases in Phase 12; `BackgroundJob` in Phase 14).
 5. **F1** — embeddings. The big feature; build it on the clean foundation.
 6. **S7** — router refactor, incrementally, whenever a route is touched anyway.
 
