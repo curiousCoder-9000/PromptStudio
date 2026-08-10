@@ -292,6 +292,20 @@
                         <div class="media-pane generated" id="generatedPane" style="display:none;">
                             <span class="media-pane-label">Generated</span>
                             <img id="lightboxGenImg" src="" alt="ComfyUI generation">
+                            <div class="gen-rating" id="genRating" role="group" aria-label="Rate this generation">
+                                <button type="button" class="gen-rate-btn discard" data-rating="-1" title="Discard — didn't work (X)" aria-label="Discard">
+                                    <i class="fa-solid fa-xmark"></i>
+                                </button>
+                                <button type="button" class="gen-rate-btn clear" data-rating="0" title="Clear rating (0)" aria-label="Unrated">
+                                    <i class="fa-solid fa-minus"></i>
+                                </button>
+                                <button type="button" class="gen-rate-btn keep" data-rating="1" title="Keep (1)" aria-label="Keep">
+                                    <i class="fa-solid fa-check"></i>
+                                </button>
+                                <button type="button" class="gen-rate-btn star" data-rating="2" title="Star — the reason you generated at all (2)" aria-label="Star">
+                                    <i class="fa-solid fa-star"></i>
+                                </button>
+                            </div>
                         </div>
                     </div>
                     <div class="media-badge-group">

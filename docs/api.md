@@ -52,6 +52,7 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/comfy/generate` | Queue ComfyUI Pro (ref) or txt2img |
 | `GET` | `/api/comfy/status` | ComfyUI job progress |
 | `GET` | `/api/generations` | Saved generations for a source photo |
+| `PUT` | `/api/generation/rate` | Rate one output: `-1` discard · `0` unrated · `1` keep · `2` star |
 | `GET` | `/media/<path>` | Full-resolution image or video |
 | `GET` | `/media/thumb/<path>` | Generated JPEG thumbnail |
 
@@ -81,7 +82,7 @@ every call — and `/api/stats` runs on every app init.
 ### `GET /api/insights`
 
 Phase 13 B1 quality dashboard. Read-only aggregates over data already on disk
-(prompt `manual_edit` / `history`, `generations_index.json`).
+(prompt `manual_edit` / `history`, the `generations` table).
 No new scoring jobs.
 
 ```json
@@ -100,13 +101,39 @@ No new scoring jobs.
     "total_outputs": 28,
     "avg_per_source": 2.333,
     "sources_with_multiple": 5,
-    "rated": 0,
-    "keep_rate": null
+    "rated": 17,
+    "kept": 11,
+    "discarded": 6,
+    "starred": 3,
+    "keep_rate": 0.6471,
+    "unreproducible": 4,
+    "by_prompt_version": {
+      "Ollama (qwen2.5vl:7b) v2-structured": {
+        "total": 20, "rated": 14, "kept": 10, "keep_rate": 0.7143
+      }
+    },
+    "by_workflow":   { "pro": { "total": 24, "rated": 15, "kept": 11, "keep_rate": 0.7333 } },
+    "by_checkpoint": { "juggernautXL_ragnarok.safetensors": { "…": "…" } },
+    "by_mode_e":     { "on":  { "…": "…" }, "off": { "…": "…" } }
   }
 }
 ```
 
-`keep_rate` stays null until A3 (rate outputs) lands.
+`keep_rate = kept / rated`, **not** `kept / total` — an unrated output is not
+evidence either way, and dividing by the total would make the number drift
+toward zero as the archive grows instead of measuring anything. It is `null`
+until something is rated, because `0.0` would read as a damning score for an
+archive nobody has judged yet.
+
+The four cuts are what make it actionable: one archive-wide rate says the loop
+is or is not working, but not which half to change. `by_mode_e` is not in
+[design_generation_loop.md](design_generation_loop.md) §3.3's list of three,
+but §3.3 names "is Mode E worth it" as a question the cuts should answer and
+none of the named three splits on it.
+
+`unreproducible` counts rows with `seed < 0` — generations imported from the
+pre-A0 JSON index, whose seed was never recorded and cannot be recovered. It is
+the only measure of success criterion #1 ("100% of new rows reproducible").
 
 A `classify` block reports the tier distribution over everything classified:
 
@@ -336,6 +363,28 @@ Outputs are saved under `_generations/<creator>/` and indexed in `generations_in
 ```json
 { "path": "…", "generations": [{ "primary_url": "/media/_generations/…", "files": [] }] }
 ```
+
+Reads the legacy `generations_index.json`, unchanged for lightbox back-compat.
+The `generations` table in `archive.db` is the source of truth for everything
+added since A0 (full prompts, real seed, rating).
+
+### `PUT /api/generation/rate`
+
+```json
+{ "gen_id": "8f3c…", "rating": 2 }
+```
+
+`rating` is one ordinal: `-1` discard · `0` unrated · `1` keep · `2` star.
+Setting `0` clears `rated_at` — a withdrawn verdict must not keep counting as
+rated.
+
+| Status | When |
+|--------|------|
+| `200` | `{"status":"ok","gen_id":…,"rating":…}` |
+| `400` | missing `gen_id`, or a rating off the scale. A **string** `"2"` is also 400 — the value is not coerced, so a client bug surfaces instead of storing something the caller did not mean |
+| `404` | unknown `gen_id` |
+
+Feeds `keep_rate` on [`GET /api/insights`](#get-apiinsights).
 
 ### `GET /api/following`
 

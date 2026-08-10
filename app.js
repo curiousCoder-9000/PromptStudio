@@ -22,6 +22,10 @@ const state = {
     comfyPollTimer: null,
     compareMode: false,
     currentGenerations: [],
+    // The generation currently shown in the compare pane, and its rating.
+    // Deliberately not a view pref: it is derived from whatever is on screen.
+    currentGenId: null,
+    currentGenRating: 0,
     promptDirty: false,
     lightboxIndex: -1,
     currentPromptData: null,
@@ -298,6 +302,7 @@ const elements = {
     promptHistory: document.getElementById('promptHistory'),
     promptHistoryList: document.getElementById('promptHistoryList'),
     lightboxGenImg: document.getElementById('lightboxGenImg'),
+    genRating: document.getElementById('genRating'),
     generatedPane: document.getElementById('generatedPane'),
     mediaCompare: document.getElementById('mediaCompare'),
     compareToggleBtn: document.getElementById('compareToggleBtn'),
@@ -2348,6 +2353,7 @@ async function loadGenerationsForPhoto(relPath) {
     state.currentGenerations = [];
     if (elements.compareToggleBtn) elements.compareToggleBtn.style.display = 'none';
     if (elements.lightboxGenImg) elements.lightboxGenImg.src = '';
+    setCurrentGeneration(null);
     try {
         const res = await fetch(`/api/generations?path=${encodeURIComponent(relPath)}`);
         const data = await res.json();
@@ -2360,9 +2366,91 @@ async function loadGenerationsForPhoto(relPath) {
                 elements.compareToggleBtn.style.display = 'inline-flex';
             }
         }
+        setCurrentGeneration(gens[0] || null);
     } catch (err) {
         console.error('Generations load failed', err);
     }
+}
+
+// ── generation rating (A3) ───────────────────────────────────────────
+// The rating is the only judgement the generation loop captures, so pressing
+// it has to be cheap: one ordinal, four keys, no dialog.
+
+function setCurrentGeneration(gen) {
+    const file = gen && gen.files && gen.files[0];
+    state.currentGenId = (gen && gen.gen_id) || (file && file.gen_id) || null;
+    const raw = gen && gen.rating !== undefined ? gen.rating : (file && file.rating);
+    state.currentGenRating = Number(raw) || 0;
+    renderGenRating();
+}
+
+function renderGenRating() {
+    if (!elements.genRating) return;
+    const enabled = Boolean(state.currentGenId);
+    elements.genRating.style.display = enabled ? 'flex' : 'none';
+    elements.genRating.classList.toggle('has-rating', enabled && state.currentGenRating !== 0);
+    elements.genRating.querySelectorAll('.gen-rate-btn').forEach((btn) => {
+        const value = Number(btn.dataset.rating);
+        btn.classList.toggle('active', enabled && value === state.currentGenRating);
+        btn.disabled = !enabled;
+    });
+}
+
+async function rateCurrentGeneration(rating) {
+    const genId = state.currentGenId;
+    if (!genId) return;
+    const previous = state.currentGenRating;
+    // Optimistic: the control is meant to feel like a keypress, and a failed
+    // rating rolls back rather than leaving the UI ahead of the store.
+    state.currentGenRating = rating;
+    renderGenRating();
+    // Nothing may be applied if the user has moved on. Two quick presses put
+    // two writes in flight, and a late reply from the first must not overwrite
+    // the second — the same stale-response rule the gallery fetches follow,
+    // just without an AbortController, since the write has already happened
+    // server-side and cancelling the read would not undo it.
+    const superseded = () =>
+        state.currentGenId !== genId || state.currentGenRating !== rating;
+    try {
+        const res = await fetch('/api/generation/rate', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ gen_id: genId, rating }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (superseded()) return;
+        const gen = state.currentGenerations[0];
+        if (gen && (gen.gen_id === genId || !gen.gen_id)) {
+            gen.rating = rating;
+            if (gen.files && gen.files[0]) gen.files[0].rating = rating;
+        }
+    } catch (err) {
+        console.error('Rating failed', err);
+        if (superseded()) return;
+        state.currentGenRating = previous;
+        renderGenRating();
+        showToast('Could not save rating');
+    }
+}
+
+function handleGenerationRatingKey(e) {
+    // Only while the generated pane is actually on screen — otherwise these
+    // four keys would be dead weight over the whole lightbox.
+    if (!state.compareMode || !state.currentGenId) return false;
+    const map = { '1': 1, '2': 2, '0': 0, x: -1 };
+    const rating = map[e.key.toLowerCase()];
+    if (rating === undefined) return false;
+    rateCurrentGeneration(rating);
+    return true;
+}
+
+function setupGenRatingListeners() {
+    if (!elements.genRating) return;
+    elements.genRating.addEventListener('click', (e) => {
+        const btn = e.target.closest('.gen-rate-btn');
+        if (!btn || btn.disabled) return;
+        rateCurrentGeneration(Number(btn.dataset.rating));
+    });
 }
 
 function setCompareMode(on) {
@@ -2481,6 +2569,9 @@ async function pollComfyStatus() {
                 elements.compareToggleBtn.style.display = 'inline-flex';
             }
             setCompareMode(true);
+            // Rateable immediately, before the reload below lands — the moment
+            // you want to press "star" is the moment the image appears.
+            setCurrentGeneration(data.result);
             if (state.lightboxIndex !== -1) {
                 loadGenerationsForPhoto(state.photos[state.lightboxIndex].rel_path);
             }
@@ -3870,6 +3961,7 @@ function setupEventListeners() {
     }
 
     setupClassifyListeners();
+    setupGenRatingListeners();
 
     // Lightbox Actions
     elements.lightboxDeleteBtn.addEventListener('click', () => {
@@ -4200,6 +4292,12 @@ function setupEventListeners() {
                 // otherwise be the only letter doing real work in a pile of
                 // forty rejects.
                 if (handleTriageKey(e)) {
+                    e.preventDefault();
+                    return;
+                }
+                // After triage, which owns K/R/X in review mode — a reject
+                // sweep must not be reinterpreted as rating a generation.
+                if (handleGenerationRatingKey(e)) {
                     e.preventDefault();
                     return;
                 }

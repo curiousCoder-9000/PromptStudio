@@ -101,6 +101,61 @@ def store():
     return ArchiveStore()
 
 
+@pytest.fixture(scope="session")
+def _api_server():
+    """The real handler on a real socket, bound to port 0.
+
+    Routes were previously reachable only from `tests/ui/` (a browser over CDP),
+    so status-code mapping — 400 vs 404 vs 200 — had no Python coverage at all.
+    Session-scoped: one bind for the run, and the server holds no state of its
+    own, so `clean_archive` between tests is still the isolation boundary.
+    """
+    import threading
+
+    from promptstudio.server.handler import (
+        GalleryRequestHandler,
+        ThreadingHTTPServer,
+    )
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), GalleryRequestHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+@pytest.fixture
+def api(_api_server):
+    """Call the HTTP API. Returns (status, payload) — never raises on 4xx/5xx,
+    because the status code is usually the thing under test."""
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    def _req(method, path, body=None):
+        data = None if body is None else _json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(
+            f"{_api_server}{path}",
+            data=data,
+            method=method,
+            headers={"Content-Type": "application/json"} if data else {},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                raw = resp.read()
+                status = resp.status
+        except urllib.error.HTTPError as e:
+            raw, status = e.read(), e.code
+        try:
+            return status, _json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return status, raw
+
+    return _req
+
+
 @pytest.fixture
 def fake_comfy(monkeypatch):
     """Run a Comfy job without ComfyUI, capturing the graph that would be queued.

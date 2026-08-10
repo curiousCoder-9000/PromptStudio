@@ -69,29 +69,21 @@ def _prompt_insights(cache: Optional[dict] = None) -> Dict[str, Any]:
 
 
 def _generation_insights() -> Dict[str, Any]:
-    from promptstudio.comfy.client import GenerationsIndex
+    """Output volume and the keep rate, from the `generations` table.
 
-    data = GenerationsIndex().load()
-    sources = 0
-    total_outputs = 0
-    multi = 0
-    for _key, items in (data or {}).items():
-        if not isinstance(items, list) or not items:
-            continue
-        sources += 1
-        n = len(items)
-        total_outputs += n
-        if n > 1:
-            multi += 1
-    return {
-        "sources_with_gens": sources,
-        "total_outputs": total_outputs,
-        "avg_per_source": round(total_outputs / sources, 3) if sources else 0.0,
-        "sources_with_multiple": multi,
-        # Rating is Phase 13 A3 — field will fill in once that lands.
-        "rated": 0,
-        "keep_rate": None,
-    }
+    Reads the table, not `generations_index.json` — the JSON is a rollback
+    parachute that A0 caps nowhere and A3 never writes ratings to.
+
+    `keep_rate = kept / rated`, deliberately **not** `kept / total`: an unrated
+    output is not evidence either way, and dividing by the total would make the
+    metric drift toward zero as the archive grows rather than measuring
+    anything. It is `None` until something is rated, because 0.0 would render
+    as a damning score for an archive nobody has judged yet.
+    """
+    from promptstudio.storage.db import ArchiveIndex
+
+    index = ArchiveIndex.get()
+    return index.generation_rating_summary()
 
 
 def _classify_insights() -> Dict[str, Any]:

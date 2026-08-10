@@ -557,6 +557,33 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"status": "ok", "path": rel_path, "favorite": fav})
             return
 
+        if parsed.path == "/api/generation/rate":
+            try:
+                data = self._read_json_body()
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON body")
+                return
+            gen_id = (data.get("gen_id") or "").strip()
+            if not gen_id:
+                self.send_error(400, "gen_id required")
+                return
+            from promptstudio.storage.db import ArchiveIndex
+
+            try:
+                # Passed through unconverted on purpose: int("2") would quietly
+                # accept a string and int(1.9) would round a nonsense value into
+                # range. rate_generation is the one place the scale is defined.
+                rating = data.get("rating")
+                ok = ArchiveIndex.get().rate_generation(gen_id, rating)
+            except ValueError as e:
+                self.send_error(400, str(e))
+                return
+            if not ok:
+                self.send_error(404, "Generation not found")
+                return
+            self._send_json({"status": "ok", "gen_id": gen_id, "rating": rating})
+            return
+
         self.send_error(404, "Not found")
         return
 
@@ -1842,7 +1869,52 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(400, "path required")
                 return
             rel_path = urllib.parse.unquote(rel_path)
-            gens = _comfy.index.list_for(rel_path)
+            from promptstudio.storage.db import ArchiveIndex
+
+            # Served from the `generations` table, not generations_index.json.
+            # The table is the source of truth since A0 — the JSON is a rollback
+            # parachute — and it is the only place a rating exists, which the
+            # lightbox needs to show a verdict after it reopens.
+            #
+            # Shape is kept: one row per output file becomes one record with a
+            # single-entry `files` list. A multi-image job therefore arrives as
+            # several records rather than one with several files; the lightbox
+            # reads `gens[0]` and its primary either way.
+            rows = ArchiveIndex.get().list_generations_for(rel_path)
+            gens = []
+            for row in rows:
+                rel = row["rel_path"]
+                url = "/media/" + "/".join(
+                    urllib.parse.quote(part) for part in rel.split("/")
+                )
+                gens.append(
+                    {
+                        "created_at": row["created_at"],
+                        "primary_url": url,
+                        "primary_rel": rel,
+                        "files": [
+                            {
+                                "filename": os.path.basename(rel),
+                                "rel_path": rel,
+                                "url": url,
+                                "gen_id": row["gen_id"],
+                                "rating": row["rating"],
+                            }
+                        ],
+                        "gen_id": row["gen_id"],
+                        "rating": row["rating"],
+                        "seed": row["seed"],
+                        "workflow": row["workflow"],
+                        "checkpoint": row["checkpoint"],
+                        "steps": row["steps"],
+                        "cfg": row["cfg"],
+                        "denoise": row["denoise"],
+                        "mode_e": bool(row["mode_e"]),
+                        "prompt_version": row["prompt_version"],
+                        "positive_prompt": row["positive_prompt"],
+                        "negative_prompt": row["negative_prompt"],
+                    }
+                )
             self._send_json({"path": rel_path, "generations": gens})
             return
 

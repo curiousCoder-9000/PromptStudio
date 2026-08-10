@@ -406,13 +406,50 @@ the route. Pre-existing gap, not introduced here.
 marks those rows `seed = -1` rather than inventing one, and A1 must show
 "seed not recorded" and disable regenerate-same-seed for them.
 
-### A3 — Rating
+### A3 — Rating ✅
 
-- `rating` / `rated_at` columns (already in the A0 schema), `PUT /api/generation/rate`.
-- Rating control in the existing lightbox generated-pane.
-- `keep_rate` exposed on `GET /api/insights` (B1).
+- ✅ `rating` / `rated_at` columns (already in the A0 schema), `PUT /api/generation/rate`.
+  Returning to `0` clears `rated_at`: a timestamp beside "unrated" claims a judgement
+  that was explicitly withdrawn, and `rated` counts key off `rating != 0`.
+- ✅ Rating control in the lightbox generated-pane, with `1` / `2` / `0` / `x`. The key
+  handler runs *after* `handleTriageKey` — in review mode `X` is a reject sweep and must
+  not be reinterpreted — and is inert unless the compare pane is actually open.
+- ✅ `keep_rate` on `GET /api/insights`, plus `by_prompt_version` / `by_workflow` /
+  `by_checkpoint` / `by_mode_e`.
+- ✅ Tests: `tests/test_generation_rating.py` (15) · `tests/test_api_generation_rate.py` (9) ·
+  `tests/ui/test_generation_rating.js` (19) · 7 rewritten/added in `tests/test_insights.py`.
 
-**Gate:** rating survives restart; `keep_rate` computes over a seeded fixture.
+**Gate:** rating survives restart ✅; `keep_rate` computes over a seeded fixture ✅.
+
+**Three things this needed that §3.3 did not mention.**
+
+1. **The record had no `gen_id`.** The lightbox rates what it just generated and has only
+   the job status to work from, so `_save_outputs` now stamps each file entry with its id.
+   Without it the control had nothing to send.
+2. **`GET /api/generations` had to move onto the table.** It read
+   `generations_index.json`, which has no rating column — so a rated output reopened with
+   an empty control, which reads as "the rating was lost". It now serves from the table
+   (one row per file becomes one record with a single-entry `files` list; the lightbox
+   reads `gens[0]` either way). The JSON remains the rollback parachute, no longer a read
+   path.
+3. **Two quick presses raced.** The optimistic write rolled back on failure without
+   checking whether anything had moved on, so a late 4xx from the first press overwrote
+   the second press's value. Now guarded on `(gen_id, rating)` still being current — the
+   same stale-response rule the gallery fetches use. **Found by the browser suite**, not
+   by reasoning: the keyboard test's fire-and-forget calls landed mid-assertion and left
+   the rating on a third value.
+
+**`by_mode_e` is a divergence.** §3.3 lists three cuts and separately names "is Mode E
+worth it" as a question they answer — but none of the three splits on `mode_e`, which is
+its own column. Added as a fourth cut rather than leaving the stated question unanswerable.
+
+**Also added:** `unreproducible` (rows with `seed < 0`) on the same block. Success
+criterion #1 is "100% of new rows reproducible" and nothing measured it.
+
+**A test-harness gap closed on the way.** Routes had no Python coverage at all — they were
+reachable only from `tests/ui/` over CDP — so status-code mapping (400 vs 404 vs 200) was
+untested. `tests/conftest.py` now has an `api` fixture: the real handler on a real socket,
+port 0, session-scoped. A1 adds three more routes and A2 three more; they inherit it.
 
 ### A1 — Outputs gallery
 

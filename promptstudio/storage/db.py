@@ -237,6 +237,11 @@ DEFAULT_SOURCE = "instagram"
 
 _PROMPTS_IMPORTED_KEY = "prompts_imported_from_json"
 _GENERATIONS_IMPORTED_KEY = "generations_imported_from_json"
+
+# -1 discard · 0 unrated · 1 keep · 2 star. Deliberately cheap to press: an
+# expensive rating UI collects no data, and no data is the whole problem A3
+# exists to fix.
+GENERATION_RATINGS = (-1, 0, 1, 2)
 _FTS_TOKEN = re.compile(r"[A-Za-z0-9_]+")
 
 
@@ -252,6 +257,18 @@ def _fts_query(raw: str) -> str:
     if not tokens:
         return ""
     return " AND ".join(f'"{t}"*' for t in tokens)
+
+
+def _ratio(num: int, den: int) -> Optional[float]:
+    """None, not 0.0, when the denominator is empty — "nothing measured yet"
+    and "measured as zero" are different answers.
+
+    Mirrors `insights._rate` (same 4-place rounding); duplicated rather than
+    imported because `insights` imports this module.
+    """
+    if den <= 0:
+        return None
+    return round(num / den, 4)
 
 
 def is_media_file(name: str) -> bool:
@@ -643,6 +660,103 @@ class ArchiveIndex:
             )
             self._conn.commit()
         return gid
+
+    def rate_generation(self, gen_id: str, rating: int) -> bool:
+        """Set the user's verdict on one output. False if `gen_id` is unknown.
+
+        One ordinal rather than a keep flag plus a star flag: the two would let
+        "starred but not kept" exist, which means nothing.
+
+        Returning to 0 clears `rated_at` — a timestamp beside "unrated" claims a
+        judgement that was explicitly withdrawn, and `rated` counts key off
+        `rating != 0`.
+        """
+        if isinstance(rating, bool) or not isinstance(rating, int):
+            raise ValueError(f"rating must be an int in {GENERATION_RATINGS}")
+        if rating not in GENERATION_RATINGS:
+            raise ValueError(f"rating must be one of {GENERATION_RATINGS}")
+        stamp = None if rating == 0 else datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE generations SET rating = ?, rated_at = ? WHERE gen_id = ?",
+                (rating, stamp, gen_id),
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def generation_rating_summary(self) -> Dict[str, Any]:
+        """Volume + keep-rate aggregates for `GET /api/insights` (B1).
+
+        One pass for the totals, then one grouped pass per cut. The cuts are
+        what make the number actionable: a single archive-wide keep rate says
+        the loop is or is not working, but not which half to change.
+        """
+        def _slice(rows: Sequence[sqlite3.Row]) -> Dict[str, Dict[str, Any]]:
+            out: Dict[str, Dict[str, Any]] = {}
+            for row in rows:
+                rated = int(row["rated"] or 0)
+                kept = int(row["kept"] or 0)
+                out[str(row["k"])] = {
+                    "total": int(row["total"] or 0),
+                    "rated": rated,
+                    "kept": kept,
+                    "keep_rate": _ratio(kept, rated),
+                }
+            return out
+
+        # `rated` counts a withdrawn verdict (0) as unrated, matching
+        # rate_generation clearing rated_at when it returns to 0.
+        agg = (
+            "COUNT(*) AS total, "
+            "SUM(CASE WHEN rating != 0 THEN 1 ELSE 0 END) AS rated, "
+            "SUM(CASE WHEN rating >= 1 THEN 1 ELSE 0 END) AS kept"
+        )
+        with self._lock:
+            totals = self._conn.execute(
+                f"SELECT {agg}, "
+                "SUM(CASE WHEN rating = -1 THEN 1 ELSE 0 END) AS discarded, "
+                "SUM(CASE WHEN rating = 2 THEN 1 ELSE 0 END) AS starred, "
+                "SUM(CASE WHEN seed < 0 THEN 1 ELSE 0 END) AS unreproducible, "
+                "COUNT(DISTINCT source_rel) AS sources "
+                "FROM generations"
+            ).fetchone()
+            multi = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM ("
+                "SELECT source_rel FROM generations "
+                "GROUP BY source_rel HAVING COUNT(*) > 1)"
+            ).fetchone()
+            cuts = {}
+            for name, expr in (
+                ("by_prompt_version", "COALESCE(prompt_version, 'unknown')"),
+                ("by_workflow", "COALESCE(workflow, 'unknown')"),
+                ("by_checkpoint", "COALESCE(checkpoint, 'unknown')"),
+                ("by_mode_e", "CASE WHEN mode_e = 1 THEN 'on' ELSE 'off' END"),
+            ):
+                cuts[name] = _slice(
+                    self._conn.execute(
+                        f"SELECT {expr} AS k, {agg} FROM generations GROUP BY k"
+                    ).fetchall()
+                )
+
+        total = int(totals["total"] or 0)
+        rated = int(totals["rated"] or 0)
+        kept = int(totals["kept"] or 0)
+        sources = int(totals["sources"] or 0)
+        return {
+            "total_outputs": total,
+            "sources_with_gens": sources,
+            "sources_with_multiple": int(multi["c"] or 0),
+            "avg_per_source": round(total / sources, 3) if sources else 0.0,
+            "rated": rated,
+            "kept": kept,
+            "discarded": int(totals["discarded"] or 0),
+            "starred": int(totals["starred"] or 0),
+            "keep_rate": _ratio(kept, rated),
+            # Legacy rows imported with seed = -1. Success criterion #1 is
+            # "100% of new rows reproducible" and nothing else measures it.
+            "unreproducible": int(totals["unreproducible"] or 0),
+            **cuts,
+        }
 
     def import_generations_from_json(
         self, path: str = GENERATIONS_INDEX_FILE

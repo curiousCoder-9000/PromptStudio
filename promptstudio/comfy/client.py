@@ -711,7 +711,10 @@ class ComfyJobManager:
         try:
             index = ArchiveIndex.get()
             for item in saved_files:
-                index.record_generation(
+                # Stamped back onto the file entry so the job status — which is
+                # all the lightbox has after a generate — can rate the output
+                # without a second round trip to look the id up.
+                item["gen_id"] = index.record_generation(
                     rel_path=item["rel_path"],
                     source_rel=source_rel,
                     creator=creator,

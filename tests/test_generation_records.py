@@ -157,3 +157,21 @@ def test_mode_e_and_prompt_version_reach_the_row(
     row = ArchiveIndex.get().list_generations_for(rel)[0]
     assert row["mode_e"] == 1
     assert row["prompt_version"] == "v2-structured"
+
+
+def test_the_saved_record_carries_the_gen_id_for_each_file(
+    make_photo, fake_comfy, run_comfy_job
+):
+    """The lightbox rates what it just generated, and it only has the job
+    status to work from — without `gen_id` on the record there is nothing to
+    send to PUT /api/generation/rate."""
+    rel, _ = make_photo(creator="gentest", name="rateable.jpg")
+
+    status = run_comfy_job(
+        source_rel=rel, positive="a", negative="b", workflow="pro", seed=7
+    )
+
+    files = status["result"]["files"]
+    assert files and all(f.get("gen_id") for f in files)
+    row = ArchiveIndex.get().list_generations_for(rel)[0]
+    assert row["gen_id"] == files[0]["gen_id"]
