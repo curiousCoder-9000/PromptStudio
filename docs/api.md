@@ -17,7 +17,7 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `GET` | `/api/creator/style` | Learned style prefix for a creator |
 | `POST` | `/api/creator/style/rebuild` | Rebuild style from cached prompts |
 | `GET` | `/api/following` | Accounts from local `following_list.json` |
-| `GET` | `/api/photos` | Paginated (`offset`, `limit`, `creator`, `search`, `unanalyzed`, `favorite`, `media_type`, `verdict`, `source`, `sort`) |
+| `GET` | `/api/photos` | Paginated (`offset`, `limit`, `creator`, `search`, `unanalyzed`, `favorite`, `media_type`, `verdict`, `source`, `sort`, `group`) |
 | `GET` | `/api/media/detail` | Reel/photo inspector (`path`): caption, IG link — not vision prompts |
 | `GET` | `/api/prompt` | Vision prompt bundle (`path`, optional `refresh`) — includes `history` |
 | `PUT` | `/api/prompt` | Save edited positive/negative prompts + tags |
@@ -553,9 +553,10 @@ Reads local `following_list.json` (no live Instagram call).
 
 ### `GET /api/photos`
 
-Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `verdict` (see below), `source` (`instagram` | `x` | `reddit` | omit/`all`), `sort` (`name` | `newest` | `oldest` | `posted` | `posted_oldest` | `tier`), `offset` (default 0), `limit` (default/max from config, typically 300).
+Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `verdict` (see below), `source` (`instagram` | `x` | `reddit` | omit/`all`), `sort` (`name` | `newest` | `oldest` | `posted` | `posted_oldest` | `tier`), `group` (`post` | omit), `offset` (default 0), `limit` (default/max from config, typically 300).
 
 - `source` — ANDs with `creator`, so a merged folder can be split by platform. An unregistered value is a **400**.
+- `group=post` — collapse a carousel into one post. See [Post grouping](#post-grouping) below; any other value is a **400**.
 
 - `newest` / `oldest` — archive ingest time (`added_at`; when the file was downloaded/indexed).
 - `posted` / `posted_oldest` — remote post time (`mtime`, which downloaders stamp to the post date); falls back to `added_at` when `mtime` is missing or zero.
@@ -589,13 +590,19 @@ Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), 
     }
   ],
   "total": 1134,
+  "rows": 60,
   "offset": 0,
   "limit": 60,
   "has_more": true,
   "sort": "newest",
-  "verdict": ""
+  "verdict": "",
+  "group": ""
 }
 ```
+
+- `rows` is **the paging unit** — what to add to `offset` for the next page. Ungrouped it
+  equals `photos.length`; grouped it is the number of *posts* on the page while `photos`
+  still carries every slide. Paging by `photos.length` when grouped skips content.
 
 - `verdict` is **absent** on rows that have never been classified — its presence is the "has a verdict" test.
 - `verdict.verdict` is derived server-side from `tier` against `CLASSIFY_REJECT_MAX_TIER` (or from `manual` when set). Clients must not re-derive it; the threshold is configurable and would drift.
@@ -624,6 +631,51 @@ Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), 
 `unusable` and `modest` are raw-tier views on purpose: they let a cautious cleanup
 pass act on the boundary nobody argues about without touching the one that has
 never been measured. A hand-kept file drops out of both.
+
+#### Post grouping
+
+`group=post` collapses an Instagram carousel (and the equivalent on X / Reddit) into one
+post. It is a **view** of `photos.post_id`, which is already populated and indexed —
+nothing on disk moves, and there is no ingest step.
+
+The response stays flat: a post's slides come back adjacent and in slide order, tagged
+with three extra fields, and the client draws one tile per `group_key`.
+
+| Field | Meaning |
+|-------|---------|
+| `group_key` | `creator/post_id`, falling back to `rel_path` when there is no post id. Creator-scoped because the three sources share no id namespace |
+| `group_count` | Slides in this post **after filtering** — `media_type=photo` on a carousel with a reel in it reports the stills only |
+| `group_index` | 0-based position within the post |
+
+```jsonc
+{
+  "photos": [
+    { "rel_path": "nadia/c2_1.jpg",  "group_key": "nadia/c2", "group_count": 11, "group_index": 0, /* … */ },
+    { "rel_path": "nadia/c2_2.jpg",  "group_key": "nadia/c2", "group_count": 11, "group_index": 1, /* … */ },
+    { "rel_path": "nadia/alone.jpg", "group_key": "nadia/alone.jpg", "group_count": 1, "group_index": 0 }
+  ],
+  "total": 2,      // posts
+  "rows": 2,       // posts on this page — add this to offset
+  "group": "post"
+}
+```
+
+Three things worth knowing:
+
+- **`total` and `has_more` count posts, not files.** They drive an infinite-scroll
+  sentinel; a file count against a post-rendering grid drifts one page at a time and
+  silently skips content. `rows` exists so the client never has to guess the unit.
+- A photo with no `post_id` is a **group of one**, so there is a single code path and no
+  "carousel or not" branch anywhere.
+- Slides are ordered naturally, not lexicographically — slide 2 precedes slide 10.
+  `group_concat` has no defined order in SQLite, so this is done in Python.
+- `sort=name` orders **posts by their group key**, not by the first slide's filename —
+  it is the same expression as the grouping, which is what lets the query use the index
+  (S10). Identical for a photo with no post id; a carousel sorts by its post id.
+
+`LIMIT` applies to posts, so a page of 60 can return several hundred photos. That is the
+point: the lightbox walks the slides the grid never drew, and they arrive as complete
+photo rows (favourite, verdict, prompt state) rather than bare paths.
 
 ### `PUT /api/favorite`
 

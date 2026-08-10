@@ -150,8 +150,8 @@ SUITES=("$@")
 if [ ${#SUITES[@]} -eq 0 ]; then
   SUITES=(test_delete_flow.js test_escaping.js test_jobs_and_prefs.js test_classify_review.js
           test_insights_and_pollers.js test_browse_and_paging.js test_source_filter.js
-          test_scrape_lanes.js test_generation_rating.js test_outputs_gallery.js
-          test_batch_generate.js)
+          test_post_grouping.js test_scrape_lanes.js test_generation_rating.js
+          test_outputs_gallery.js test_batch_generate.js)
 fi
 
 STATUS=0
@@ -171,6 +171,11 @@ for suite in "${SUITES[@]}"; do
   if [ "$suite" = "test_source_filter.js" ]; then
     PROMPTSTUDIO_ARCHIVE="$ARCHIVE" "$PYTHON" "$REPO_ROOT/tests/ui/seed_sources.py" "$ARCHIVE" \
       || { echo "FATAL: source seeding failed" >&2; STATUS=1; continue; }
+  fi
+  # Carousels need a shared post_id, which only a real Instagram scrape sets.
+  if [ "$suite" = "test_post_grouping.js" ]; then
+    PROMPTSTUDIO_ARCHIVE="$ARCHIVE" "$PYTHON" "$REPO_ROOT/tests/ui/seed_carousels.py" "$ARCHIVE" \
+      || { echo "FATAL: carousel seeding failed" >&2; STATUS=1; continue; }
   fi
   APP_URL="http://localhost:$TEST_PORT/" CDP_PORT="$CDP_PORT" \
     node "$REPO_ROOT/tests/ui/$suite" || STATUS=1

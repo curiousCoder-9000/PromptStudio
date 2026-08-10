@@ -483,7 +483,7 @@ workflow stops being the ceiling.
 | `BackgroundJob` base class, three managers migrated | S6 | **Done** `cebba18` |
 | Batch generate queue — `POST /api/comfy/batch` + status/cancel, `renderJobChip('generate', …)` | A2 | **Done** `71e6037` `855e421` |
 | Custom `workflow_api.json` import + slot-mapping UI (prompt / negative / seed / image) | A4 | Todo |
-| Post / carousel grouping in the gallery | C2 | Todo |
+| Post / carousel grouping in the gallery | C2 | **Done** `slice/c2-post-grouping` |
 | Pass-rate badge per filter + CI failure when one bucket exceeds 60% of outputs | B4 | Todo |
 
 **S6 shipped scoped, not whole.** `BatchPromptManager`, `ClassifyJobManager` and
@@ -511,9 +511,21 @@ That is right for img2img, where the reference image carries the subject, but
 reading the text would have batched every unanalyzed photo through one string.
 `GenerationParams.has_prompt_source` is what A2 skips on.
 
-C2 is near-free — but not via `group_by_post_id()` at `storage/metadata.py:91`,
-which walks sidecars per creator. `photos.post_id` is already a populated,
-indexed column; the gallery query is the only thing that ignores it.
+**C2 was near-free to build and is not free to run.** `photos.post_id` was
+already a populated, indexed column, so it needed no ingest step and no use of
+`group_by_post_id()` at `storage/metadata.py:91` (which walks sidecars per
+creator and would have been a filesystem scan). But grouping is a full pass by
+construction — an exact post count has to visit every matching row, while the
+flat query rides an index and stops at 60. Measured: **3x slower at 4 400 files,
+5x at 40 000**, or 10 ms vs 3 ms at the real archive size. Off by default, and
+the numbers are in
+[review_backend_architecture.md](review_backend_architecture.md) S10 along with
+the two formulation changes that halved it.
+
+The thing that had to be got right was not the grouping but the **paging**:
+`total` and `has_more` feed an infinite-scroll sentinel, so the response counts
+posts while `photos` still carries every slide, and names the unit (`rows`) so
+the client never has to infer it.
 
 B4 becomes standing policy from here — Phase 5's Sexy filter reached 92% pass
 rate with nothing to notice.

@@ -9,6 +9,13 @@ const state = {
     favoritesOnly: false,
     mediaType: 'all',
     sortMode: 'name',
+    // C2 — collapse a post's slides into one tile. state.photos stays FLAT
+    // (every slide, members adjacent); galleryTiles is what the grid draws.
+    // Deriving the tiles instead of collapsing the array is what keeps delete,
+    // favourite, triage, bulk select and the lightbox indexing the same list
+    // they always did.
+    groupPosts: false,
+    galleryTiles: [],
     // 'normal' | 'large' — was a bare DOM class, so it couldn't be restored
     gridSize: 'normal',
     selectMode: false,
@@ -155,6 +162,7 @@ const elements = {
     lightboxVideo: document.getElementById('lightboxVideo'),
     lightboxCreator: document.getElementById('lightboxCreator'),
     lightboxFilename: document.getElementById('lightboxFilename'),
+    lightboxSlideCount: document.getElementById('lightboxSlideCount'),
     lightboxPrev: document.getElementById('lightboxPrev'),
     lightboxNext: document.getElementById('lightboxNext'),
     lightboxDeleteBtn: document.getElementById('lightboxDeleteBtn'),
@@ -309,6 +317,7 @@ const elements = {
     triageAutoBtn: document.getElementById('triageAutoBtn'),
     batchPromptBtn: document.getElementById('batchPromptBtn'),
     unanalyzedFilterBtn: document.getElementById('unanalyzedFilterBtn'),
+    groupPostsBtn: document.getElementById('groupPostsBtn'),
     favoritesFilterBtn: document.getElementById('favoritesFilterBtn'),
     sortSelect: document.getElementById('sortSelect'),
     mediaTypeSelect: document.getElementById('mediaTypeSelect'),
@@ -429,7 +438,9 @@ const PREF_FIELDS = [
     'browseVerdict',
     // A filter, never a destructive mode, so restoring it on refresh is
     // helpful rather than hostile — same reasoning as browseVerdict.
-    'sourceFilter'
+    'sourceFilter',
+    // How the grid is shaped, not where you are — a view pref like grid size.
+    'groupPosts'
 ];
 
 function loadViewPrefs() {
@@ -476,7 +487,8 @@ function applyViewPrefsToControls() {
 
     const chips = [
         [elements.favoritesFilterBtn, state.favoritesOnly],
-        [elements.unanalyzedFilterBtn, state.unanalyzedOnly]
+        [elements.unanalyzedFilterBtn, state.unanalyzedOnly],
+        [elements.groupPostsBtn, state.groupPosts]
     ];
     chips.forEach(([btn, on]) => {
         if (btn) btn.classList.toggle('active', Boolean(on));
@@ -1025,7 +1037,9 @@ async function fetchPhotos({ append = false } = {}) {
     // Skeletons only on a fresh query; an append keeps the real cards visible.
     setGalleryLoading(true, { skeletons: !append });
     try {
-        const prevLen = append ? state.photos.length : 0;
+        // Tiles, not photos: grouped, one tile is a whole post, and the
+        // sentinel appends after the last *tile*.
+        const prevLen = append ? state.galleryTiles.length : 0;
         // Offset is only committed to state once the response lands, so an
         // aborted request cannot corrupt paging or blank out state.photos.
         const requestOffset = append ? state.photoOffset : 0;
@@ -1063,6 +1077,11 @@ async function fetchPhotos({ append = false } = {}) {
             }
             params.append('sort', state.sortMode || 'name');
         }
+        // Review mode deliberately opts out: triage adjudicates one file at a
+        // time, and a collapsed carousel would hide rejects behind a tile.
+        if (state.groupPosts && !state.reviewMode) {
+            params.append('group', 'post');
+        }
         params.append('offset', String(requestOffset));
         params.append('limit', String(state.photoLimit));
 
@@ -1076,7 +1095,14 @@ async function fetchPhotos({ append = false } = {}) {
             ? false
             : Boolean(data.has_more);
         state.photos = append ? state.photos.concat(page) : page;
-        state.photoOffset = state.photos.length;
+        // THE paging unit. Grouped, `total` counts posts while `page` carries
+        // every slide, so neither array length is it — the server names it.
+        // Advancing by state.photos.length here is exactly how an infinite
+        // scroll starts skipping content one page at a time.
+        const consumed = Array.isArray(data)
+            ? page.length
+            : Number(data.rows ?? page.length);
+        state.photoOffset = (append ? state.photoOffset : 0) + consumed;
         renderGallery({ append, fromIndex: prevLen });
     } catch (err) {
         // A superseded request is expected, not a failure — the newer one wins.
@@ -1183,6 +1209,7 @@ function removePhotosFromView(relPaths) {
     if (!targets.size) return 0;
 
     const removedByCreator = new Map();
+    const tilesBefore = state.galleryTiles.length;
     let removed = 0;
 
     state.photos = state.photos.filter((p) => {
@@ -1201,9 +1228,18 @@ function removePhotosFromView(relPaths) {
         if (card) card.remove();
     });
 
-    // Paging counters: offset tracks how many rows we've consumed from the server
-    state.photoOffset = Math.max(0, state.photoOffset - removed);
-    state.photoTotal = Math.max(0, (state.photoTotal || 0) - removed);
+    // Grouped, a card is a post: deleting slide 3 of 11 leaves the tile there
+    // with a stale badge, and deleting slide 1 removes a card whose other ten
+    // slides are still loaded. Cheaper to redraw the grid than to patch it.
+    rebuildGalleryTiles();
+    if (state.groupPosts) renderGallery();
+
+    // Paging counters are in the same unit the server pages in — tiles, which
+    // is posts when grouping and photos when not. Deleting one slide of a
+    // carousel removes no post, so neither counter moves.
+    const tilesRemoved = Math.max(0, tilesBefore - state.galleryTiles.length);
+    state.photoOffset = Math.max(0, state.photoOffset - tilesRemoved);
+    state.photoTotal = Math.max(0, (state.photoTotal || 0) - tilesRemoved);
 
     // Sidebar + stats counters, without hitting the O(archive) /api/stats route
     removedByCreator.forEach((n, creatorName) => {
@@ -1224,8 +1260,7 @@ function removePhotosFromView(relPaths) {
         }
     }
 
-    elements.galleryCount.textContent = `${state.photos.length}` +
-        (state.photoTotal ? ` / ${state.photoTotal}` : '') + ' photos';
+    elements.galleryCount.textContent = galleryCountLabel();
     elements.emptyState.style.display = state.photos.length === 0 ? 'flex' : 'none';
     updateBulkBar();
     return removed;
@@ -1964,12 +1999,45 @@ function observeLoadMoreSentinel(sentinel) {
     loadMoreObserver.observe(sentinel);
 }
 
+/**
+ * Derive the tiles the grid draws from the flat `state.photos`.
+ *
+ * Grouped, the server returns a post's slides adjacent and in order, tagged
+ * with a shared `group_key` — so one pass over the array is enough, and no
+ * second list has to be kept in sync with it. Ungrouped, every photo is its
+ * own tile and the rest of the renderer never learns the difference.
+ */
+function rebuildGalleryTiles() {
+    const tiles = [];
+    state.photos.forEach((photo, index) => {
+        const key = photo.group_key || null;
+        const previous = tiles[tiles.length - 1];
+        if (key && previous && previous.key === key) {
+            previous.count += 1;
+            return;
+        }
+        tiles.push({ key, index, count: 1 });
+    });
+    state.galleryTiles = tiles;
+    return tiles;
+}
+
+/** Label under the grid — posts and files are different units, so say which. */
+function galleryCountLabel() {
+    const shown = state.galleryTiles.length;
+    const total = state.photoTotal ? ` / ${state.photoTotal}` : '';
+    if (!state.groupPosts) return `${shown}${total} photos`;
+    return `${shown}${total} posts · ${state.photos.length} photos`;
+}
+
 function renderGallery({ append = false, fromIndex = 0 } = {}) {
     if (!append) {
         elements.galleryGrid.innerHTML = '';
     }
-    elements.galleryCount.textContent = `${state.photos.length}` +
-        (state.photoTotal ? ` / ${state.photoTotal}` : '') + ' photos';
+    // Always derived, never maintained. The scan is left to right, so the
+    // leading tiles are stable and an append can still slice from fromIndex.
+    rebuildGalleryTiles();
+    elements.galleryCount.textContent = galleryCountLabel();
 
     if (state.photos.length === 0) {
         elements.emptyState.style.display = 'flex';
@@ -1980,10 +2048,12 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
     elements.emptyState.style.display = 'none';
 
     const sliceStart = append ? fromIndex : 0;
-    const toRender = state.photos.slice(sliceStart);
+    const toRender = state.galleryTiles.slice(sliceStart);
 
-    toRender.forEach((p, i) => {
-        const index = sliceStart + i;
+    toRender.forEach((tile) => {
+        const index = tile.index;
+        const p = state.photos[index];
+        if (!p) return;
         const card = document.createElement('div');
         const selected = state.selectedPaths.has(p.rel_path);
         // Reject cards are tinted and desaturated so the grid scans without
@@ -2005,9 +2075,15 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
         const topBadge = isVideo
             ? `<span class="prompt-status-badge ready" title="Reel"><i class="fa-solid fa-film"></i> Reel</span>`
             : `<span class="prompt-status-badge ${status.cls}"><i class="fa-solid ${status.icon}"></i> ${status.label}</span>`;
+        // Count comes from the tile (what is on screen), not p.group_count
+        // (what the server found) — a deleted slide has to change the badge.
+        const groupBadge = tile.count > 1
+            ? `<span class="group-count-badge" title="${Number(tile.count)} slides in this post"><i class="fa-solid fa-layer-group"></i> ${Number(tile.count)}</span>`
+            : '';
         card.innerHTML = `
             <img src="${escapeHtml(imgSrc)}" alt="${escapeHtml(p.filename)}" loading="lazy" data-full="${escapeHtml(p.url)}">
             ${videoBadge}
+            ${groupBadge}
             <div class="photo-card-overlay">
                 <div class="overlay-top-actions">
                     ${state.selectMode
@@ -2048,7 +2124,11 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
                 const cb = card.querySelector('.card-select-cb');
                 if (cb) cb.checked = next;
             } else {
-                openLightbox(index);
+                // Resolved at click time, not captured: removePhotosFromView()
+                // shifts state.photos under cards it does not re-render, so a
+                // closed-over index opens the wrong photo after a delete.
+                const at = state.photos.findIndex((x) => x.rel_path === p.rel_path);
+                openLightbox(at >= 0 ? at : index);
             }
         });
         elements.galleryGrid.appendChild(card);
@@ -2339,6 +2419,25 @@ function wireLightboxVideoEvents() {
 }
 
 // Lightbox
+/**
+ * "3 / 11" while walking a carousel, hidden otherwise.
+ *
+ * Without it, `→` inside a post is indistinguishable from `→` to the next
+ * post — the grid said "11 slides" and then gave no sign of where you are.
+ */
+function renderSlideCounter(photo) {
+    const el = elements.lightboxSlideCount;
+    if (!el) return;
+    const count = Number(photo && photo.group_count) || 1;
+    if (!state.groupPosts || count < 2) {
+        el.style.display = 'none';
+        el.textContent = '';
+        return;
+    }
+    el.textContent = `${(Number(photo.group_index) || 0) + 1} / ${count}`;
+    el.style.display = '';
+}
+
 function openLightbox(index) {
     if (index < 0 || index >= state.photos.length) return;
 
@@ -2371,6 +2470,7 @@ function openLightbox(index) {
 
     elements.lightboxCreator.textContent = `@${photo.creator}`;
     elements.lightboxFilename.textContent = photo.filename;
+    renderSlideCounter(photo);
 
     resetPromptPanel();
     updateFavoriteButton(photo);
@@ -4213,6 +4313,17 @@ function setupEventListeners() {
             state.favoritesOnly = !state.favoritesOnly;
             elements.favoritesFilterBtn.classList.toggle('active', state.favoritesOnly);
             saveViewPrefs();
+            fetchPhotos();
+        });
+    }
+
+    if (elements.groupPostsBtn) {
+        elements.groupPostsBtn.addEventListener('click', () => {
+            state.groupPosts = !state.groupPosts;
+            elements.groupPostsBtn.classList.toggle('active', state.groupPosts);
+            saveViewPrefs();
+            // A full refetch, not a re-render: `total` and the paging unit both
+            // change with the grouping, and only the server knows them.
             fetchPhotos();
         });
     }

@@ -169,6 +169,42 @@ def _parse_source_filter(query: Dict[str, List[str]]) -> Optional[str]:
     return name
 
 
+def _expand_post_groups(reps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flatten grouped gallery rows into their slides, adjacent and in order.
+
+    The grid draws one tile per `group_key`, but the lightbox walks the whole
+    post — so the slides the grid never drew still have to arrive, as real
+    photo rows. Returning only the representative plus a list of paths would
+    leave slide 2 with no favourite, no verdict and no cached prompt.
+
+    Costs one extra query per page, and only when the page actually contains a
+    carousel: a group of one is already in hand.
+    """
+    extra = {
+        rel
+        for rep in reps
+        for rel in (rep.get("group_members") or ())
+        if rel != rep["rel_path"]
+    }
+    members = _archive.photos_for_rel_paths(sorted(extra)) if extra else {}
+
+    slides: List[Dict[str, Any]] = []
+    for rep in reps:
+        key = rep.get("group_key") or rep["rel_path"]
+        count = int(rep.get("group_count") or 1)
+        for position, rel in enumerate(rep.get("group_members") or [rep["rel_path"]]):
+            row = rep if rel == rep["rel_path"] else members.get(rel)
+            if row is None:
+                continue  # indexed row vanished between the two reads
+            slide = dict(row)
+            slide.pop("group_members", None)
+            slide["group_key"] = key
+            slide["group_count"] = count
+            slide["group_index"] = position
+            slides.append(slide)
+    return slides
+
+
 def _creator_queue_blocks_oneshot(source: str = "instagram") -> Optional[Dict[str, Any]]:
     """If this lane has pending jobs and is not paused, block one-shot sync.
 
@@ -1727,6 +1763,14 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 "tier",
             ):
                 sort = "name"
+            # Collapse a carousel into one tile. Anything other than `post` is
+            # a 400 rather than a silent fallback: ungrouped rows against a
+            # client that believes it is paging in posts drifts a page at a
+            # time and ends up skipping content.
+            group = (query.get("group", [""])[0] or "").strip().lower()
+            if group not in ("", "post"):
+                self.send_error(400, f"Unknown group '{group}'. Known: post")
+                return
             try:
                 offset = int(query.get("offset", ["0"])[0] or 0)
             except ValueError:
@@ -1749,7 +1793,14 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 sort=sort,
                 limit=limit,
                 offset=offset,
+                group_posts=group == "post",
             )
+            # What the caller must advance `offset` by. Grouped, `total` counts
+            # posts while `photos` carries every slide, so neither array length
+            # nor total is the paging unit — this is.
+            rows = len(photos)
+            if group == "post":
+                photos = _expand_post_groups(photos)
             photos = _prompt_cache.annotate_photos(photos)
             photos = _favorites.annotate_photos(photos)
             public_photos = [
@@ -1759,12 +1810,14 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 {
                     "photos": public_photos,
                     "total": total,
+                    "rows": rows,
                     "offset": offset,
                     "limit": limit,
-                    "has_more": offset + len(public_photos) < total,
+                    "has_more": offset + rows < total,
                     "sort": sort,
                     "verdict": verdict or "",
                     "source": source or "",
+                    "group": group,
                 }
             )
             return

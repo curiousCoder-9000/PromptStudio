@@ -201,6 +201,12 @@
                         <button class="filter-chip" id="unanalyzedFilterBtn" type="button" title="Show only photos needing analysis">
                             <i class="fa-solid fa-bolt"></i> Unanalyzed
                         </button>
+                        <!-- C2: a carousel is one post, not N unrelated tiles.
+                             Off by default — the flat grid is still the right
+                             default for triage-shaped browsing. -->
+                        <button class="filter-chip" id="groupPostsBtn" type="button" title="Collapse a post's slides into one tile — open it to walk them">
+                            <i class="fa-solid fa-layer-group"></i> Group posts
+                        </button>
                         <span class="control-label">Grid Size:</span>
                         <button class="icon-btn active" id="gridNormal"><i class="fa-solid fa-border-all"></i></button>
                         <button class="icon-btn" id="gridLarge"><i class="fa-solid fa-table-cells-large"></i></button>
@@ -425,6 +431,7 @@
                     <div class="media-badge-group">
                         <span class="media-badge" id="lightboxCreator">@username</span>
                         <span class="media-badge filename" id="lightboxFilename">filename.jpg</span>
+                        <span class="media-badge slide-count" id="lightboxSlideCount" style="display:none;"></span>
                         <button class="media-badge compare-toggle" id="compareToggleBtn" type="button" style="display:none;">
                             <i class="fa-solid fa-columns"></i> Compare
                         </button>

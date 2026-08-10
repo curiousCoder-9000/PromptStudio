@@ -4488,3 +4488,42 @@ body.review-mode .view-controls {
     border: 1px solid var(--border-glass);
     color: var(--text-secondary);
 }
+
+/* ── C2: carousel grouping ─────────────────────────────────────────
+   A grouped tile is one post, so it needs to say how many slides are
+   behind it. Top-right, opposite the verdict pill on the left, and
+   above the overlay gradient so it survives the hover state. */
+.group-count-badge {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    z-index: 4;
+    font-family: var(--font-sub);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    padding: 3px 8px;
+    border-radius: 20px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: #e2e8f0;
+    background: rgba(15, 23, 42, 0.82);
+    border: 1px solid var(--border-glass);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+}
+
+.photo-card:hover .group-count-badge {
+    border-color: var(--accent-purple);
+    color: #fff;
+}
+
+/* Where you are inside the post, next to the filename in the lightbox. */
+.media-badge.slide-count {
+    color: var(--accent-purple);
+    border-color: rgba(139, 92, 246, 0.5);
+    font-variant-numeric: tabular-nums;
+}

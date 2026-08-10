@@ -119,6 +119,11 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
 - Video type detection goes through `isVideoFilename()` — do not inline extension lists.
 - **Long jobs report progress in a chip, never a repeating toast.** `#jobChipStack` holds one chip per job kind — where **each scrape lane is its own kind**, because cancel and pause are lane-scoped. Batch and classify use `renderJobChip(kind, {...})` against static ids; scrape chips are cloned per lane from `#scrapeLaneChipTemplate` by `updateScrapeJobChip()` (Instagram keeps the unsuffixed `scrapeJobChip*` ids). Toast only on start and finish.
 - **Source is a view filter, from `photos.source` — never the folder name.** `state.sourceFilter` cross-filters the sidebar and gallery; `SCRAPE_FOLDER_SUFFIX=0` and manual uploads both make one folder multi-source.
+- **`state.photos` is always flat; `state.galleryTiles` is what the grid draws.** With
+  `state.groupPosts` on, a post's slides arrive adjacent and the tiles are *derived*
+  (`rebuildGalleryTiles()`), never maintained — so delete, favourite, triage, bulk select
+  and `openLightbox(index)` keep indexing the one array they always did, and `←`/`→` walk
+  a carousel before moving on. Page by `data.rows`, never `state.photos.length`.
 - **View prefs persist, navigation does not.** `PREF_FIELDS` + `saveViewPrefs()` keep sort/media/grid/filters in `localStorage`; selected creator, selection, and review mode (`state.reviewMode`) are deliberately *not* restored (landing in a destructive mode from a refresh is hostile). Call `saveViewPrefs()` in any new view-control handler.
 
 ---
@@ -204,7 +209,7 @@ Base: `http://localhost:5000`. Full schemas → [api.md](api.md).
 | GET | `/api/health` | Ollama + Comfy reachability |
 | GET | `/api/stats` | photos, creators, `prompts_ready` |
 | GET | `/api/creators` | folders + sync badges |
-| GET | `/api/photos` | `creator`, `search` (prompts **+ caption**), `unanalyzed`, `favorite`, `media_type` (`photo`/`video`), `verdict`, `sort` (incl. `tier`), `offset`, `limit` |
+| GET | `/api/photos` | `creator`, `search` (prompts **+ caption**), `unanalyzed`, `favorite`, `media_type` (`photo`/`video`), `verdict`, `sort` (incl. `tier`), `group=post` (carousels; pages in **posts** — use `rows`), `offset`, `limit` |
 | GET/PUT | `/api/prompt` | get bundle / save edits |
 | POST | `/api/prompt/restore` | history index |
 | POST | `/api/prompt/mode-e` | Mode E rewrite; `apply` |

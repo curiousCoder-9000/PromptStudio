@@ -157,6 +157,65 @@ _VERDICT_CASE = (
 
 VERDICT_FILTERS = ("keep", "reject", "unclassified", "error", "unusable", "modest")
 
+# C2 — carousel grouping. One tile per post instead of one per slide.
+#
+# `post_id` is already populated and indexed, so this is a query change and
+# nothing on disk moves. Two details that are not obvious:
+#
+# * NULLIF('') before the fallback. A blank post_id is "no post", not a post
+#   named "": without it every manual upload in the archive collapses into a
+#   single tile.
+# * The fallback is the file itself, so an ungrouped photo is a group of one
+#   and there is exactly one code path — the caller never branches on
+#   "carousel or not".
+#
+# Scoped by creator rather than post_id alone: ids come from three platforms
+# now, they share no namespace, and a collision would put two creators' media
+# behind one tile. For the fallback this changes nothing — creator || '/' ||
+# filename *is* rel_path.
+#
+# Two spellings of the same thing, and the split is load-bearing. Grouping on
+# the concatenated string costs a temp B-tree; grouping on the two columns can
+# ride `idx_photos_group_key`, which is an expression index over exactly this
+# pair. Measured at 20k rows: 59 ms -> 32 ms (docs/review_backend_architecture
+# .md S10). The concatenation survives only as the key the client sees, where a
+# readable "creator/post_id" is worth more than a tuple.
+_GROUP_BY_SQL = "p.creator, IFNULL(NULLIF(p.post_id, ''), p.filename)"
+_GROUP_KEY_SQL = "p.creator || '/' || IFNULL(NULLIF(p.post_id, ''), p.filename)"
+
+
+def _photo_select(verdict_case: str) -> Tuple[str, str]:
+    """(select list, FROM clause) shared by every gallery-shaped read.
+
+    Kept in one place so a row fetched by path is indistinguishable from a row
+    fetched by the gallery query — the lightbox is handed both.
+    """
+    return (
+        "p.*, v.tier AS v_tier, v.manual AS v_manual, v.reason AS v_reason, "
+        "v.media_kind AS v_media_kind, v.verdict_source AS v_source, "
+        "v.confidence AS v_confidence, v.prompt_version AS v_prompt_version, "
+        "v.sheet_path AS v_sheet_path, v.error AS v_error, "
+        f"v.classified_at AS v_classified_at, {verdict_case} AS v_verdict",
+        " FROM photos p LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path",
+    )
+
+
+_DIGITS = re.compile(r"(\d+)")
+
+
+def _natural_key(value: str) -> Tuple[Any, ...]:
+    """Sort key where slide 2 precedes slide 10.
+
+    SQLite's group_concat() has no defined order, so member ordering is done
+    here regardless — and plain lexicographic ordering would walk a carousel
+    as 1, 10, 11, 2 in the lightbox.
+    """
+    return tuple(
+        int(part) if part.isdigit() else part
+        for part in _DIGITS.split(value.lower())
+    )
+
+
 # Creators with no verdict row at all still need every key present, or the
 # sidebar has to guard each counter individually.
 _EMPTY_VERDICT_COUNTS: Dict[str, int] = {
@@ -1500,6 +1559,15 @@ class ArchiveIndex:
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_photos_added ON photos(added_at)"
         )
+        # Carousel grouping (C2). An expression index, matching _GROUP_BY_SQL
+        # term for term — idx_photos_post_id cannot serve it, because the group
+        # key falls back to the filename when there is no post_id and is scoped
+        # by creator. Measured: grouped page 59 ms -> 32 ms at 20k rows, for
+        # +23% on a bulk reindex (113 ms -> 139 ms, once).
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photos_group_key ON "
+            "photos(creator, IFNULL(NULLIF(post_id, ''), filename))"
+        )
         # Drives "re-score everything the old prompt judged" without a rescan.
 
     def _migrate_caption_search(self) -> None:
@@ -2334,7 +2402,16 @@ class ArchiveIndex:
         limit: Optional[int] = None,
         offset: int = 0,
         reject_cut: Optional[int] = None,
+        group_posts: bool = False,
     ) -> Tuple[List[Dict[str, Any]], int]:
+        """Gallery page + the total the caller pages against.
+
+        `group_posts` collapses a carousel into one row carrying `group_key`,
+        `group_count` and the member `rel_path`s. **The total then counts
+        groups, not files** — it is what drives the infinite-scroll sentinel,
+        and a file count against a group-rendering grid drifts a little further
+        every page until it silently skips content.
+        """
         where: List[str] = []
         params: List[Any] = []
         # Every predicate is table-qualified because of the media_verdicts join:
@@ -2437,26 +2514,100 @@ class ArchiveIndex:
                 "ORDER BY CASE WHEN v.tier IS NULL THEN 9 WHEN v.tier < 0 THEN 8 "
                 "ELSE v.tier END ASC, p.filename ASC"
             )
+        elif group_posts:
+            # Name order, but over the group key rather than the filename —
+            # which is the *same* expression the GROUP BY uses, so the whole
+            # temp B-tree disappears and LIMIT 60 stops after 60 groups instead
+            # of sorting all of them. Measured at 40k rows: 77 ms -> 0.3 ms.
+            #
+            # The cost, stated plainly: a carousel now sorts by its post id, not
+            # by the filename of its first slide. Both are chronological within
+            # a creator (ids and instaloader's date-stamped names both ascend),
+            # but a folder mixing carousels with un-scraped uploads will
+            # interleave them differently than the flat grid does. For a photo
+            # with no post id the key *is* the filename, so nothing moves.
+            order = f"ORDER BY {_GROUP_BY_SQL}"
         else:
             order = "ORDER BY p.creator ASC, p.filename ASC"
 
-        join = " FROM photos p LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path"
-        select_cols = (
-            "p.*, v.tier AS v_tier, v.manual AS v_manual, v.reason AS v_reason, "
-            "v.media_kind AS v_media_kind, v.verdict_source AS v_source, "
-            "v.confidence AS v_confidence, v.prompt_version AS v_prompt_version, "
-            "v.sheet_path AS v_sheet_path, v.error AS v_error, "
-            f"v.classified_at AS v_classified_at, {verdict_case} AS v_verdict"
-        )
+        select_cols, join = _photo_select(verdict_case)
+
+        group_sql = ""
+        total_sql = f"SELECT COUNT(*) AS c{join}{where_sql}"
+        if group_posts:
+            # MIN() is not decoration. Bare columns under GROUP BY are
+            # otherwise taken from whichever row SQLite happened to visit last,
+            # so the tile's thumbnail could differ between two identical
+            # queries. With exactly one min()/max() aggregate present, SQLite
+            # guarantees every bare column comes from *that* row — here, the
+            # lowest path, which is slide 1 under every naming scheme the
+            # downloaders produce.
+            select_cols += (
+                f", {_GROUP_KEY_SQL} AS group_key, COUNT(*) AS group_count, "
+                "MIN(p.rel_path) AS group_rep, "
+                "GROUP_CONCAT(p.rel_path, char(10)) AS group_members"
+            )
+            group_sql = f" GROUP BY {_GROUP_BY_SQL}"
+            # Counts groups, not files — see the docstring. LIMIT/OFFSET below
+            # apply after GROUP BY, so the page is already in the same unit.
+            # A grouped subquery rather than COUNT(DISTINCT concat) for the
+            # same reason the GROUP BY is two-term: this one can use the index.
+            total_sql = (
+                f"SELECT COUNT(*) AS c FROM "
+                f"(SELECT 1{join}{where_sql} GROUP BY {_GROUP_BY_SQL})"
+            )
+
         with self._lock:
-            total = self._conn.execute(
-                f"SELECT COUNT(*) AS c{join}{where_sql}", params
-            ).fetchone()["c"]
-            sql = f"SELECT {select_cols}{join}{where_sql} {order}"
+            total = self._conn.execute(total_sql, params).fetchone()["c"]
+            sql = f"SELECT {select_cols}{join}{where_sql}{group_sql} {order}"
             page_params = list(params)
             if limit is not None:
                 sql += " LIMIT ? OFFSET ?"
                 page_params.extend([int(limit), max(0, int(offset))])
             rows = self._conn.execute(sql, page_params).fetchall()
 
-        return [self._row_to_photo(r) for r in rows], int(total)
+        photos = [self._row_to_photo(r) for r in rows]
+        if group_posts:
+            for photo, row in zip(photos, rows, strict=True):
+                members = [
+                    m for m in (row["group_members"] or "").split("\n") if m
+                ]
+                members.sort(key=_natural_key)
+                photo["group_key"] = row["group_key"]
+                photo["group_count"] = int(row["group_count"])
+                photo["group_members"] = members
+        return photos, int(total)
+
+    def photos_for_rel_paths(
+        self,
+        rel_paths: Sequence[str],
+        *,
+        reject_cut: Optional[int] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Gallery rows for an explicit set of paths, keyed by rel_path.
+
+        Grouping hands back one row per post, but the lightbox walks the slides
+        the grid never drew — and those still need their favourite, verdict and
+        prompt state or the panel silently degrades on slide 2. Same select list
+        as `query_photos`, so a slide is indistinguishable from a tile.
+        """
+        wanted = [normalize_rel_path(r) for r in rel_paths if r]
+        if not wanted:
+            return {}
+        select_cols, join = _photo_select(
+            _VERDICT_CASE.format(cut=self._reject_cut(reject_cut))
+        )
+        out: Dict[str, Dict[str, Any]] = {}
+        with self._lock:
+            # Chunked: a page of carousels is small, but the parameter limit is
+            # a cliff rather than a slowdown when it is hit.
+            for start in range(0, len(wanted), 400):
+                chunk = wanted[start : start + 400]
+                marks = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"SELECT {select_cols}{join} WHERE p.rel_path IN ({marks})",
+                    chunk,
+                ).fetchall()
+                for row in rows:
+                    out[row["rel_path"]] = self._row_to_photo(row)
+        return out
