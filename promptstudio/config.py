@@ -48,6 +48,21 @@ def _env_csv(name: str, default: str) -> list[str]:
     return [k.strip() for k in raw.split(",") if k.strip()]
 
 
+def _env_num(name: str, default: float, cast=float):
+    """Numeric knob where **blank also means the default** (rule 14's trap).
+
+    `int(os.environ.get(NAME, "1"))` raises on a set-but-empty var, which is
+    exactly what `.env.example` shipping `NAME=` produces.
+    """
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return cast(default)
+    try:
+        return cast(raw)
+    except ValueError:
+        return cast(default)
+
+
 # Server
 PORT = int(os.environ.get("PROMPTSTUDIO_PORT", "5000"))
 
@@ -70,9 +85,29 @@ def resolve_host(raw: str | None) -> str:
 HOST = resolve_host(os.environ.get("PROMPTSTUDIO_HOST"))
 
 # Local image archive (never store personal media inside the git repo)
-SAVED_DIR = os.path.expanduser(
-    os.environ.get("PROMPTSTUDIO_ARCHIVE", "~/Pictures/InstagramSaved")
-)
+DEFAULT_ARCHIVE_DIR = "~/Pictures/InstagramSaved"
+ARCHIVE_DB_NAME = "archive.db"
+
+
+def resolve_archive_dir(raw: str | None) -> str:
+    """Archive root, defaulting when the value is unset **or blank**.
+
+    Same trap as `resolve_host`: a set-but-empty `PROMPTSTUDIO_ARCHIVE=` makes
+    `os.environ.get(name, default)` return `""`, and `""` expands to the
+    process working directory — which for a scrape means writing someone's
+    media into the git repo. Named so anything that needs to resolve an
+    archive other than this process's own (the E5a distribution guard reads
+    the developer's real archive while pytest runs against a temp one) does it
+    the same way instead of hardcoding the default.
+    """
+    return os.path.expanduser((raw or "").strip() or DEFAULT_ARCHIVE_DIR)
+
+
+def archive_db_file(archive_dir: str | None = None) -> str:
+    return os.path.join(resolve_archive_dir(archive_dir), ARCHIVE_DB_NAME)
+
+
+SAVED_DIR = resolve_archive_dir(os.environ.get("PROMPTSTUDIO_ARCHIVE"))
 
 # Instagram / Instaloader — no default username (must set for scrape features)
 SESSION_USER = (
@@ -97,7 +132,7 @@ SYNC_STATUS_FILE = os.path.join(SAVED_DIR, "sync_status.json")
 SYNC_STATE_FILE = os.path.join(SAVED_DIR, "sync_state.json")
 FOLLOWING_QUEUE_FILE = os.path.join(SAVED_DIR, "following_queue.json")
 CREATOR_SCRAPE_QUEUE_FILE = os.path.join(SAVED_DIR, "creator_scrape_queue.json")
-ARCHIVE_DB_FILE = os.path.join(SAVED_DIR, "archive.db")
+ARCHIVE_DB_FILE = os.path.join(SAVED_DIR, ARCHIVE_DB_NAME)
 
 # Full-scrape ceiling (downloaded media units). 0 = unlimited.
 FULL_SCRAPE_MAX_POSTS = int(os.environ.get("IG_FULL_SCRAPE_MAX_POSTS", "5000"))
@@ -266,6 +301,30 @@ CLASSIFY_REJECT_MAX_TIER = int(os.environ.get("CLASSIFY_REJECT_MAX_TIER", "1"))
 # actually looked at. `_classify` is in EXCLUDED_FOLDERS, so they stay out of
 # the gallery, the creator list and every rebuild.
 CLASSIFY_SHEET_DIR = os.path.join(SAVED_DIR, "_classify")
+
+# ── B4 distribution guard (platform rule, not a classifier one-off) ──
+#
+# A bucket holding more than this share of a distribution makes every filter
+# built on it close to a no-op: the previous classifier shipped with 85% of the
+# archive on one tier and the Sexy filter admitting ~92%, and nothing noticed
+# for three prompt versions. One number, read by the pass-rate badges
+# (`ArchiveIndex.verdict_facet_counts`), by `/api/insights`, and by the
+# `tests/test_distribution_guard.py` gate — so the UI warning and the failing
+# check can never disagree about where the line is.
+DISTRIBUTION_MAX_SHARE = _env_num("DISTRIBUTION_MAX_SHARE", 0.6)
+# Below these counts the guard reports "not measured" instead of a verdict.
+# Classified: a classify run walks the archive creator-by-creator
+# (`list_unclassified` orders by creator, then filename), so its first slice is
+# one or two creators and a single creator's style can saturate a tier without
+# the classifier being wrong. 100 spans several creators, and puts the 60% line
+# about ±10 points outside sampling noise instead of ±25.
+DISTRIBUTION_MIN_CLASSIFIED = _env_num("DISTRIBUTION_MIN_CLASSIFIED", 100, int)
+# Rated generations: these are entered by hand, one keypress at a time, so the
+# classified threshold would keep the generation half of the rule inert for
+# months — which is how a guard quietly becomes decorative. 30 is roughly one
+# rating sitting, and on the 3-value scale (discard / keep / star) a uniform
+# rater trips 60% about 0.2% of the time.
+DISTRIBUTION_MIN_RATED = _env_num("DISTRIBUTION_MIN_RATED", 30, int)
 
 # Video frame selection — used by `scraping/video_frames.py` for the classifier,
 # for video thumbnails (`storage/thumbs.py`) and for near-duplicate detection

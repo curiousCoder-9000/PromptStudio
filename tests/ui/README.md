@@ -37,6 +37,7 @@ Overridable env: `TEST_PORT`, `CDP_PORT`, `PHOTO_COUNT`, `PYTHON`, `CHROME_BIN`.
 | `test_delete_flow.js` | Soft delete, undo, trash modal, bulk delete, optimistic refresh |
 | `test_escaping.js` | `escapeHtml` at real render sites, search debounce, abort ordering |
 | `test_jobs_and_prefs.js` | Job chips, persisted view prefs, skeletons, sync-mode payloads |
+| `test_distribution_guard.js` | B4 pass-rate badges: the share matches `/api/photos?verdict=`, one round trip for all of them, saturation is visibly flagged |
 | `run.sh` | Fixture seeding + server/Chrome lifecycle |
 
 ## Writing a new suite

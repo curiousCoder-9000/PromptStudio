@@ -16,6 +16,13 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 TEST_ARCHIVE = tempfile.mkdtemp(prefix="promptstudio-tests-")
+# The E5a distribution guard is the one test that must read the *real*
+# archive: saturation is a property of the data, not of a fixture. Stash the
+# developer's path under a name the override below cannot eat. `setdefault`,
+# so pointing the guard elsewhere by hand still wins.
+os.environ.setdefault(
+    "PROMPTSTUDIO_GUARD_ARCHIVE", os.environ.get("PROMPTSTUDIO_ARCHIVE", "")
+)
 os.environ["PROMPTSTUDIO_ARCHIVE"] = TEST_ARCHIVE
 # Deterministic settings regardless of the developer's local .env
 os.environ["PROMPTSTUDIO_TRASH"] = "1"

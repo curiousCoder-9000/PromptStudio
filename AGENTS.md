@@ -44,12 +44,20 @@ These are the single source of truth — other docs point here rather than resta
     (`scripts/vendor_web_assets.py`). No CDN `<link>`, `<script src>` or `@import` in
     `index.html` — this is a local-first app and most of its buttons are icon-only.
 16. **IG sync:** multi-day pacing; stop on abort; never password-login every run.
+17. **Every score and every filter declares its distribution** (B4, standing policy since
+    Phase 14). Ship a new one and you ship two things with it: its pass rate on screen
+    where it is used, and a case in `tests/test_distribution_guard.py` — hand
+    `insights.saturation_report()` a bucket→count mapping over the metric's **own**
+    denominator (never a "not judged yet" bucket) and a minimum N. The previous
+    classifier put 85% of the archive on one tier for three prompt versions; the number
+    that would have caught it existed the whole time and nothing failed when it moved.
 
 ## Where to look
 
 | Task | File |
 |------|------|
 | Any API change | `promptstudio/server/handler.py` |
+| A new score or filter | `promptstudio/insights.py` `saturation_report` + `tests/test_distribution_guard.py` (rule 17) |
 | Vision / prompts | `promptstudio/prompts/engine.py` |
 | Keep/reject classify | `promptstudio/scraping/media_classifier.py` · job in `classify_job.py` |
 | Gallery index | `promptstudio/storage/db.py` |

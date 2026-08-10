@@ -218,12 +218,19 @@
                              forced on and made that click impossible. -->
                         <span class="review-bar-hint" id="reviewBarHint">Click any card to open triage · <kbd>K</kbd> keep <kbd>R</kbd> reject</span>
                     </div>
+                    <!-- Each chip carries its pass rate (B4): the share of the
+                         whole archive that filter admits, warning-styled once a
+                         single bucket is over the limit. A filter that selects
+                         almost everything carries no information, and the last
+                         classifier shipped three versions that way because the
+                         only place the number appeared was a panel nobody had
+                         open. Filled by updateReviewBar() from /api/stats. -->
                     <div class="review-bar-filters" id="reviewBarFilters">
-                        <button class="filter-chip review-chip active" type="button" data-verdict="reject">Rejects <span class="review-chip-n" data-count="reject">0</span></button>
-                        <button class="filter-chip review-chip" type="button" data-verdict="unusable">Unusable <span class="review-chip-n" data-count="unusable">0</span></button>
-                        <button class="filter-chip review-chip" type="button" data-verdict="modest">Modest <span class="review-chip-n" data-count="modest">0</span></button>
-                        <button class="filter-chip review-chip" type="button" data-verdict="keep">Keeps <span class="review-chip-n" data-count="keep">0</span></button>
-                        <button class="filter-chip review-chip" type="button" data-verdict="unclassified">Not classified <span class="review-chip-n" data-count="unclassified">0</span></button>
+                        <button class="filter-chip review-chip active" type="button" data-verdict="reject">Rejects <span class="review-chip-n" data-count="reject">0</span><span class="review-chip-share" data-share="reject" hidden></span></button>
+                        <button class="filter-chip review-chip" type="button" data-verdict="unusable">Unusable <span class="review-chip-n" data-count="unusable">0</span><span class="review-chip-share" data-share="unusable" hidden></span></button>
+                        <button class="filter-chip review-chip" type="button" data-verdict="modest">Modest <span class="review-chip-n" data-count="modest">0</span><span class="review-chip-share" data-share="modest" hidden></span></button>
+                        <button class="filter-chip review-chip" type="button" data-verdict="keep">Keeps <span class="review-chip-n" data-count="keep">0</span><span class="review-chip-share" data-share="keep" hidden></span></button>
+                        <button class="filter-chip review-chip" type="button" data-verdict="unclassified">Not classified <span class="review-chip-n" data-count="unclassified">0</span><span class="review-chip-share" data-share="unclassified" hidden></span></button>
                     </div>
                     <div class="review-bar-actions">
                         <span class="review-bar-count" id="reviewBarCount">0 selected</span>

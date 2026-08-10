@@ -172,3 +172,113 @@ def test_unreproducible_legacy_rows_are_counted(store, make_photo):
 
     g = compute_insights()["generations"]
     assert g["unreproducible"] == 1
+
+
+# ── B4 saturation, reported alongside the metric it invalidates ──────
+#
+# `top_tier_share` and `keep_rate` were already computed here. What was
+# missing is the *verdict*: a number on a dashboard is advisory, and the
+# person who needs to see a warning banner is the person who stopped opening
+# the panel. Both metrics now arrive with the guard's own answer attached, so
+# `/api/insights`, the pass-rate badges and the pytest gate cannot disagree.
+
+
+def test_classify_insights_carry_the_saturation_verdict(store, make_photo, monkeypatch):
+    from promptstudio import config
+    from promptstudio.storage.db import ArchiveIndex
+
+    monkeypatch.setattr(config, "DISTRIBUTION_MIN_CLASSIFIED", 5)
+    index = ArchiveIndex.get()
+    for i in range(9):
+        rel, _ = make_photo(name=f"m{i}.jpg")
+        index.set_verdict(rel, creator="test_creator", tier=3 if i else 0)
+
+    guard = compute_insights()["classify"]["saturation"]
+    assert guard["measured"] is True
+    assert guard["saturated"] is True
+    assert guard["top_bucket"] == "tier 3"
+    assert "tier 3" in guard["message"]
+
+
+def test_classify_saturation_is_not_judged_on_a_thin_archive(store, make_photo):
+    """The default minimum is 100; three photos must not read as healthy."""
+    from promptstudio.storage.db import ArchiveIndex
+
+    index = ArchiveIndex.get()
+    for i in range(3):
+        rel, _ = make_photo(name=f"m{i}.jpg")
+        index.set_verdict(rel, creator="test_creator", tier=3)
+
+    guard = compute_insights()["classify"]["saturation"]
+    assert guard["measured"] is False
+    assert guard["saturated"] is False
+
+
+def test_classify_saturation_ignores_failed_vision_calls(store, make_photo, monkeypatch):
+    """tier -1 is a retry, not a judgement — it must not dilute the share."""
+    from promptstudio import config
+    from promptstudio.storage.db import ArchiveIndex
+
+    monkeypatch.setattr(config, "DISTRIBUTION_MIN_CLASSIFIED", 4)
+    index = ArchiveIndex.get()
+    for i in range(4):
+        rel, _ = make_photo(name=f"ok{i}.jpg")
+        index.set_verdict(rel, creator="test_creator", tier=3)
+    for i in range(6):
+        rel, _ = make_photo(name=f"bad{i}.jpg")
+        index.set_verdict(rel, creator="test_creator", tier=-1, error="timeout")
+
+    guard = compute_insights()["classify"]["saturation"]
+    assert guard["n"] == 4
+    assert guard["saturated"] is True
+
+
+def test_generation_saturation_is_measured_over_rated_outputs_only(
+    store, make_photo, monkeypatch
+):
+    """Same denominator as `keep_rate`. Counting unrated outputs as a bucket
+    would fire on every archive nobody has judged yet."""
+    from promptstudio import config
+    from promptstudio.storage.db import ArchiveIndex
+
+    monkeypatch.setattr(config, "DISTRIBUTION_MIN_RATED", 4)
+    rel, _ = make_photo(name="src.jpg")
+    index = ArchiveIndex.get()
+    for i in range(20):
+        _gen(index, rel, f"unrated{i}.png")
+    for i in range(5):
+        index.rate_generation(_gen(index, rel, f"keep{i}.png"), 1)
+
+    g = compute_insights()["generations"]
+    assert g["rated"] == 5
+    assert g["saturation"]["n"] == 5
+    assert g["saturation"]["saturated"] is True
+    assert g["saturation"]["top_bucket"] == "keep"
+
+
+def test_generation_saturation_is_silent_while_nothing_is_rated(store, make_photo):
+    from promptstudio.storage.db import ArchiveIndex
+
+    rel, _ = make_photo(name="src.jpg")
+    index = ArchiveIndex.get()
+    for i in range(50):
+        _gen(index, rel, f"out{i}.png")
+
+    guard = compute_insights()["generations"]["saturation"]
+    assert guard["measured"] is False
+    assert guard["n"] == 0
+
+
+def test_a_spread_of_ratings_is_not_saturated(store, make_photo, monkeypatch):
+    from promptstudio import config
+    from promptstudio.storage.db import ArchiveIndex
+
+    monkeypatch.setattr(config, "DISTRIBUTION_MIN_RATED", 5)
+    rel, _ = make_photo(name="src.jpg")
+    index = ArchiveIndex.get()
+    for i, rating in enumerate([-1, -1, 1, 1, 2, 2]):
+        index.rate_generation(_gen(index, rel, f"out{i}.png"), rating)
+
+    guard = compute_insights()["generations"]["saturation"]
+    assert guard["measured"] is True
+    assert guard["saturated"] is False

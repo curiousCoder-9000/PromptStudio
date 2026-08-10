@@ -149,9 +149,9 @@ wait_for "http://127.0.0.1:$CDP_PORT/json/version" "chrome" "$CHROME_PID" \
 SUITES=("$@")
 if [ ${#SUITES[@]} -eq 0 ]; then
   SUITES=(test_delete_flow.js test_escaping.js test_jobs_and_prefs.js test_classify_review.js
-          test_insights_and_pollers.js test_browse_and_paging.js test_source_filter.js
-          test_scrape_lanes.js test_generation_rating.js test_outputs_gallery.js
-          test_batch_generate.js)
+          test_insights_and_pollers.js test_distribution_guard.js test_browse_and_paging.js
+          test_source_filter.js test_scrape_lanes.js test_generation_rating.js
+          test_outputs_gallery.js test_batch_generate.js)
 fi
 
 STATUS=0
@@ -162,7 +162,8 @@ for suite in "${SUITES[@]}"; do
   rm -rf "$ARCHIVE"/_trash "$ARCHIVE"/_thumbs
   # Classify verdicts live in SQLite and there is no API to write one without
   # running the vision model, so this suite gets its fixture seeded directly.
-  if [ "$suite" = "test_classify_review.js" ] || [ "$suite" = "test_insights_and_pollers.js" ]; then
+  if [ "$suite" = "test_classify_review.js" ] || [ "$suite" = "test_insights_and_pollers.js" ] \
+     || [ "$suite" = "test_distribution_guard.js" ]; then
     PROMPTSTUDIO_ARCHIVE="$ARCHIVE" "$PYTHON" "$REPO_ROOT/tests/ui/seed_verdicts.py" "$ARCHIVE" \
       || { echo "FATAL: verdict seeding failed" >&2; STATUS=1; continue; }
   fi

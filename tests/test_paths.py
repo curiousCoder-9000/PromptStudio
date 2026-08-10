@@ -10,7 +10,12 @@ import os
 
 import pytest
 
-from promptstudio.config import SAVED_DIR
+from promptstudio.config import (
+    DEFAULT_ARCHIVE_DIR,
+    SAVED_DIR,
+    archive_db_file,
+    resolve_archive_dir,
+)
 from promptstudio.storage.db import normalize_rel_path
 
 
@@ -85,3 +90,29 @@ def test_backslashes_do_not_bypass_containment(store):
 )
 def test_normalize_rel_path(raw, expected):
     assert normalize_rel_path(raw) == expected
+
+
+# ── resolving the archive root itself ────────────────────────────────
+#
+# `resolve_host`'s trap applies to every path knob too: `PROMPTSTUDIO_ARCHIVE=`
+# is a *set but empty* variable, and the old inline
+# `os.environ.get(name, "~/Pictures/...")` returned `""` for it — which expands
+# to the process working directory, i.e. the git repo.
+
+
+@pytest.mark.parametrize("raw", [None, "", "   ", "\t"])
+def test_blank_archive_resolves_to_the_default(raw):
+    assert resolve_archive_dir(raw) == os.path.expanduser(DEFAULT_ARCHIVE_DIR)
+
+
+def test_blank_archive_never_resolves_to_the_repo(raw=""):
+    assert resolve_archive_dir(raw) != os.getcwd()
+
+
+def test_explicit_archive_is_respected_and_expanded(tmp_path):
+    assert resolve_archive_dir(str(tmp_path)) == str(tmp_path)
+    assert resolve_archive_dir("  ~/somewhere  ") == os.path.expanduser("~/somewhere")
+
+
+def test_archive_db_file_hangs_off_the_resolved_root(tmp_path):
+    assert archive_db_file(str(tmp_path)) == os.path.join(str(tmp_path), "archive.db")
