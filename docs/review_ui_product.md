@@ -6,7 +6,7 @@
 | **Scope** | Frontend (`index.html` · `app.js` · `style.css`), UX, and product gaps not covered elsewhere |
 | **Companions** | [`product_review.md`](product_review.md) — value chain, Themes A/B/C/E · [`review_backend_architecture.md`](review_backend_architecture.md) — durability, storage, observability |
 | **Why a third review** | Neither companion audits the UI, and both rest on one premise (§0) that turned out to be false |
-| **Status** | Stage 1 shipped (§5) · Stage 2 shipped (§6) |
+| **Status** | Stage 1 shipped (§5) · Stage 2 shipped (§6) · review-mode trap fixed (§8), U13–U16 deferred |
 
 ---
 
@@ -49,6 +49,10 @@ template. Fixed in §5.
 | **U9** | 🟡 | **Responsive half-commits.** Three breakpoints plus a `viewport` meta, but the lightbox is a two-pane layout that can't degrade to a phone. Commit to tablet or drop the breakpoints. | `style.css:3363,3383,3419` |
 | **U10** | 🟡 | **One empty state for every empty.** Same copy for a fresh install, a filter that matched nothing, and a review pile with zero rejects. The first-run case is where a next action matters most and offers none. Not the onboarding investment §7 cut — one conditional string and a button. | `index.html:216-220` |
 | **U11** | 🟢 | **Card overlay density.** Four affordances in a 200px tile, three hover-only. Survivable now; tips when U4 puts verdict badges in the normal gallery. | `app.js:1491` |
+| **U12** | 🔴 | **Review mode could not review** — see §8. Entry forced select mode on, which routes a card click to a checkbox instead of the lightbox; the lightbox is the only home of Keep/Reject/Auto and `K`/`R`/`X`. Fixed in §8. | `app.js:5974`, `:1988` |
+| **U13** | 🟠 | **Bulk-delete with no bulk-keep.** Reviewing a reject pile is mostly about *rescuing* false rejects, and the only bulk verb in the strip is Delete. `POST /api/classify/verdict` takes a single `rel_path`, so rescuing 30 good shots is 30 open-decide-close cycles against one click to destroy all 30. The destructive path is the ergonomic one. | `handler.py:1153-1162`, `index.html:220-232` |
+| **U14** | 🟡 | **"Select non-favourites" silently means "on this page."** It sweeps `state.photos`, which holds only what infinite scroll has loaded. On a 400-item pile the button reads as a pile-wide action, selects the loaded 60, and the count beside it (`N selected of <photoTotal>`) invites reading the rest as covered. | `app.js:6048-6059` |
+| **U15** | 🟡 | **Switching verdict chips discards the selection without a word.** `setVerdictFilter` calls `clearSelection()`; ten minutes of curation vanishes on a mis-click. | `app.js:5992` |
 
 ### Built, tested, and invisible (U3 detail)
 
@@ -163,6 +167,58 @@ suite silently drove *the stranger's* browser against *the stranger's* archive: 
 failures across 4 suites, and it can produce a false pass just as easily. Ports are now
 auto-picked from what is free, an explicitly pinned port that is taken is a hard error, and
 `wait_for` takes the child PID so a dead server fails fast instead of adopting a squatter.
+
+## 8. Fix log — review mode was a trap (U12)
+
+Reported from use: *"after classification, clicking Review rejects lands on a page where
+auto-select is on by default, I can't review the posts, and there's no way out."*
+
+**One line caused all of it.** `enterReviewMode()` ended with `setSelectMode(true)`, and
+select mode is precisely what makes a card click stop opening anything:
+
+```
+app.js:5974   enterReviewMode()  → setSelectMode(true)
+app.js:1988   card click         → if (state.selectMode) toggle checkbox; else openLightbox()
+app.js:6194   handleTriageKey()  → returns false unless state.lightboxIndex >= 0
+index.html    #triageKeepBtn / #triageRejectBtn / #triageAutoBtn live *inside* the lightbox
+```
+
+So the one mode built for triage could do everything except triage. Keep, Reject, Auto and
+every `K`/`R`/`X` shortcut sat behind a door the mode itself locked, and bulk delete was the
+only reachable verb — in a mode entered straight from a machine-generated reject list. The
+escape hatch was hidden too: `body.review-mode .view-controls { display: none }` (added in
+§6 for a good reason) hides `#selectModeBtn`, the only toggle select mode had.
+
+The line was vestigial from `1dd161c`, which introduced the classifier. `selectNonFavourites()`
+calls `setSelectMode(true)` itself, so nothing ever depended on entry-time select mode — and
+the strip's own hint read *"Click any card to open triage"*, documenting the behaviour the
+code prevented.
+
+| Fix | Status | What changed |
+|-----|--------|--------------|
+| **U12a** Triage reachable | ✅ | `enterReviewMode()` sets select mode **off**. A click opens the lightbox and triage, which is what the strip always claimed. |
+| **U12b** A way out | ✅ | New `#reviewSelectToggleBtn` in the strip — same button in and out, `Select` ⇄ `Selecting`, cyan `.filter-chip.active` matching `#selectModeBtn` so "selecting" looks identical in both surfaces. Plus `#reviewClearBtn`, which appears only with a live selection (the normal `#bulkBar` had a Clear; the review strip did not). |
+| **U12c** Escape unwinds | ✅ | The select-mode branch used to sit *below* `if (state.creatorPanelOpen) { …; return; }`, and `enterReviewMode` sets `creatorPanelOpen` — so on the exact route out of a finished classify, the keyboard escape hatch was dead. Transient gallery modes now unwind before the persistent side panel, one layer per press: selection → select mode → review mode → creator panel. |
+| **U12d** Honest hint | ✅ | `#reviewBarHint` is rewritten per state by `updateReviewBar()`. One fixed string had to be lying in one of the two modes. |
+
+Regression tests: 30 new checks in `tests/ui/test_classify_review.js` (72 total, all passing).
+The suite had covered this area for months and passed throughout, because it reached the
+panel with a direct `openLightbox(0)` — **it tested the destination and never the route.**
+The new checks click a real `.photo-card` and drive the real handler; they were confirmed
+failing against pre-fix `HEAD` (`clicking a card opens the lightbox (none)`, click selected 1
+item instead) before the fix was written.
+
+### Deferred — the same review surface, still rough
+
+U13 is the one worth doing next: it is the difference between a reject pile you curate and
+one you rubber-stamp.
+
+| ID | Plan | Cost |
+|----|------|------|
+| **U13** bulk keep/reject | Accept `rel_paths[]` alongside `rel_path` on `POST /api/classify/verdict`; add `set_manual_verdicts()` to `ArchiveIndex` in one transaction; **Keep selected** / **Reject selected** beside Delete in the strip. Makes the non-destructive path as cheap as the destructive one. Touches `handler.py`, `storage/db.py`, `docs/api.md`, pytest + browser suite. | S/M |
+| **U14** paged select honesty | Relabel to **Select non-favourites on this page**, and when `photoHasMore` is true say so in the count. Alternative — a real pile-wide select — needs a server-side path-list endpoint; not worth it before U13. | S |
+| **U15** selection-loss guard | Keep the selection across a verdict-chip switch (paths are stable), or confirm before dropping a non-empty one. Prefer keeping: the chips are views over one pile. | S |
+| **U16** grid-level triage | Keep/Reject directly on the card in review mode, so a decision costs one click instead of open → decide → close. Deliberately last: it lands on `.photo-card`, which U11 already calls crowded at four affordances in a 200px tile, and U13 removes most of the pressure for it. | M |
 
 ### U2 measurement
 
