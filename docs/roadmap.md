@@ -480,24 +480,40 @@ workflow stops being the ceiling.
 
 | Deliverable | ID | Status |
 |-------------|----|--------|
-| Batch generate queue — `POST /api/comfy/batch` + status/cancel, `renderJobChip('generate', …)` | A2 | Todo |
+| `BackgroundJob` base class, three managers migrated | S6 | **Done** `cebba18` |
+| Batch generate queue — `POST /api/comfy/batch` + status/cancel, `renderJobChip('generate', …)` | A2 | **Done** `71e6037` `855e421` |
 | Custom `workflow_api.json` import + slot-mapping UI (prompt / negative / seed / image) | A4 | Todo |
 | Post / carousel grouping in the gallery | C2 | Todo |
 | Pass-rate badge per filter + CI failure when one bucket exceeds 60% of outputs | B4 | Todo |
 
-Clone the `BatchPromptManager` shape for A2 — cooperative cancel, progress chip
-and resume-after-refresh are already built and tested; only the runner changes.
-A2 must respect the existing single-flight rule on the Comfy resource.
+**S6 shipped scoped, not whole.** `BatchPromptManager`, `ClassifyJobManager` and
+the new `ComfyBatchManager` are on `BackgroundJob`; `SyncManager` and
+`CreatorScrapeQueue` deliberately are not — pause/resume, multi-day pacing and
+per-lane queue state are a different shape, and widening the base to cover them
+would have meant deleting scaffolding the review itself called cosmetic at the
+cost of an abstraction that describes nothing.
 
-**A2 is the sixth job manager.** The lease half of
-[review_backend_architecture.md](review_backend_architecture.md) S6 is **done**
-(`promptstudio/jobs.py`), so A2 declares `comfy` and acquires it rather than
-adding another round of pairwise `is_running()` checks. The `BackgroundJob`
-base class is still deferred — A2 is the point where extracting it finally pays,
-since it would be the fifth copy of the same singleton/status/cancel scaffolding.
+The migration found a **third lease bug** of the same family as the two the
+lease work turned up, present in every hand-rolled manager: acquire-then-check-
+`running` meant a duplicate start request released the lease out from under the
+job still holding it, and the next contender sailed through. Details in
+[review_backend_architecture.md](review_backend_architecture.md) S6.
 
-C2 is near-free: `post_id` is in every sidecar and `group_by_post_id()` already
-exists at `storage/metadata.py:100`; only the gallery ignores it.
+**A2 also forced two extractions**, and they were most of the work:
+`comfy/params.py` (the ninety inline lines of prompt assembly that lived in
+`/api/comfy/generate` and had no test coverage at all) and `comfy/runner.py`
+(`ComfyRunner` — upload, queue, poll, download, save, index). One-shot and batch
+now share one per-item code path instead of two that would have drifted.
+
+Mode E turned out to make "has this photo been analyzed" undecidable from the
+resolved prompt: its fallback fills an empty one with a generic styling string.
+That is right for img2img, where the reference image carries the subject, but
+reading the text would have batched every unanalyzed photo through one string.
+`GenerationParams.has_prompt_source` is what A2 skips on.
+
+C2 is near-free — but not via `group_by_post_id()` at `storage/metadata.py:91`,
+which walks sidecars per creator. `photos.post_id` is already a populated,
+indexed column; the gallery query is the only thing that ignores it.
 
 B4 becomes standing policy from here — Phase 5's Sexy filter reached 92% pass
 rate with nothing to notice.
