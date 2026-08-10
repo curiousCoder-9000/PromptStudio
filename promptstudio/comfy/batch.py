@@ -31,6 +31,7 @@ from promptstudio.comfy.params import (
     NoPromptError,
     resolve_generation_params,
 )
+from promptstudio.comfy.registry import get_workflow
 from promptstudio.comfy.runner import ComfyRunner
 from promptstudio.config import COMFY_BATCH_MAX, IMAGE_EXTENSIONS
 from promptstudio.jobs import COMFY, BackgroundJob
@@ -101,6 +102,12 @@ class ComfyBatchManager(BackgroundJob):
         query rather than inventing a second filter language is the point: what
         you see in the gallery is what the batch runs on.
         """
+        # Checked once, before the selection query: an unknown workflow is one
+        # error about the request, not the same error repeated per photo.
+        wanted = str(overrides.get("workflow") or "").strip()
+        if wanted:
+            get_workflow(wanted)
+
         candidates = (
             self._paths_to_rel(paths)
             if paths

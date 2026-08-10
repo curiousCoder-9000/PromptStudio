@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from promptstudio.comfy.batch import ComfyBatchManager
 from promptstudio.comfy.client import ComfyJobManager, check_comfy_health
 from promptstudio.comfy.params import NoPromptError, resolve_generation_params
+from promptstudio.comfy.registry import WorkflowError
 from promptstudio.config import (
     CLASSIFY_REJECT_MAX_TIER,
     CREATOR_SCRAPE_QUEUE_ENABLED,
@@ -1433,6 +1434,12 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 except NoPromptError as exc:
                     self.send_error(400, str(exc))
                     return
+                except WorkflowError as exc:
+                    # An unnamed or misspelled workflow. 400 with the registry's
+                    # own message, which names what is available — the generic
+                    # "Invalid JSON body" below would be a lie about the fault.
+                    self.send_error(400, str(exc))
+                    return
 
                 if _comfy.start(
                     source_rel=rel_path,
@@ -1491,7 +1498,11 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 return
             # No is_running() pre-check, same as the one-shot route: start()
             # takes the ComfyUI lease and flips status under one lock.
-            result = _comfy_batch.start(**_batch_generate_args(data))
+            try:
+                result = _comfy_batch.start(**_batch_generate_args(data))
+            except WorkflowError as exc:
+                self.send_error(400, str(exc))
+                return
             self._send_json(result, 409 if result.get("status") == "busy" else 200)
             return
 
@@ -1798,6 +1809,21 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             from promptstudio.scraping.sources import source_info
 
             self._send_json({"sources": source_info(), "default": "instagram"})
+            return
+
+        if path == "/api/workflows":
+            # A4 registry, for the generate picker. Only name/label/kind: the
+            # client has no business knowing node ids, and shipping them would
+            # invite a second injector in JavaScript.
+            from promptstudio.comfy import registry
+
+            entries = [spec.summary() for spec in registry.list_workflows()]
+            self._send_json(
+                {
+                    "workflows": entries,
+                    "default": registry.default_workflow([e["name"] for e in entries]),
+                }
+            )
             return
 
         if path == "/api/prompt":

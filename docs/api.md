@@ -54,6 +54,7 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/comfy/batch` | Batch generate — `paths[]` or `/api/photos` filters |
 | `GET` | `/api/comfy/batch/status` | Batch generate progress |
 | `POST` | `/api/comfy/batch/cancel` | Cooperative cancel + in-flight interrupt |
+| `GET` | `/api/workflows` | ComfyUI workflow registry — `name`, `label`, `kind` |
 | `GET` | `/api/generations` | Saved generations for a source photo |
 | `GET` | `/api/generations/list` | Outputs gallery — filter, sort, paginate |
 | `PUT` | `/api/generation/rate` | Rate one output: `-1` discard · `0` unrated · `1` keep · `2` star |
@@ -352,8 +353,16 @@ Requires ComfyUI at `COMFYUI_URL` (default `http://127.0.0.1:8188`). Defaults `u
 }
 ```
 
-- **`workflow: "pro"`** (default) — uploads the archive photo to ComfyUI and runs `modelToimage_pro` (IPAdapter face+body, OpenPose, img2img denoise, FaceDetailer) using `promptstudio/comfy/workflows/modelToimage_pro.api.json`. Checkpoint defaults to `juggernautXL_ragnarok.safetensors`.
-- **`workflow: "txt2img"`** — legacy bare CheckpointLoader → EmptyLatent graph (used when `variant` is `sdxl` / `flux` / `pony`).
+`workflow` is a **registry name** from [`GET /api/workflows`](#get-apiworkflows) — an
+unknown one is a `400` naming what is available, not a silent fall-through to txt2img.
+Two ship with the package:
+
+- **`workflow: "pro"`** (default) — `kind: img2img`. Uploads the archive photo to ComfyUI and runs the `modelToimage_pro` graph (IPAdapter face+body, OpenPose, img2img denoise, FaceDetailer) from `promptstudio/comfy/workflows/pro/`. Checkpoint defaults to `juggernautXL_ragnarok.safetensors`.
+- **`workflow: "txt2img"`** — `kind: txt2img`. Bare CheckpointLoader → EmptyLatent graph (what `variant` `sdxl` / `flux` / `pony` used to force).
+
+Which defaults apply — `steps` / `cfg` / `denoise`, and whether Mode E runs — follows the
+workflow's declared `kind`, not its name, so a third `img2img` entry behaves like `pro`
+without a code change.
 
 Outputs are saved under `_generations/<creator>/` and indexed in `generations_index.json`.
 
@@ -440,6 +449,39 @@ Both are right: a half-written prompt poisons the cache, whereas nothing here is
 persisted until the image is downloaded.
 
 `{ "status": "idle" }` when no batch is running.
+
+### `GET /api/workflows`
+
+The A4 workflow registry, for the generate picker.
+
+```json
+{
+  "workflows": [
+    { "name": "pro",     "label": "Pro (reference)",       "kind": "img2img" },
+    { "name": "txt2img", "label": "Txt2img (no reference)", "kind": "txt2img" }
+  ],
+  "default": "pro"
+}
+```
+
+A workflow is a directory of two files — `graph.json` (a ComfyUI **Export (API)**
+dump, untouched) and `slots.json` (where this app's runtime values go). Built-ins
+live in `promptstudio/comfy/workflows/`; the user's own live in
+`COMFY_WORKFLOWS_DIR` (default `<archive>/_workflows`) and **shadow** a built-in
+of the same name.
+
+Node ids are deliberately not in the response: the client picks a name, the
+server owns the injection. A directory that fails validation is left out of the
+list and the reason logged — `pro` staying usable matters more than surfacing a
+broken import here.
+
+`default` is always one of `workflows`, so the picker can never preselect a name
+that is not offered.
+
+There is **no import route yet** (design §3.6's upload → propose → remap flow).
+Its gate needs a running ComfyUI for `/object_info` validation, so it is deferred;
+today a workflow is installed by dropping the two files into
+`COMFY_WORKFLOWS_DIR`, and E1's `workflows` kind backs them up.
 
 ### `GET /api/generations?path=creator/file.jpg`
 

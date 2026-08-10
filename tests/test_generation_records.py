@@ -97,7 +97,10 @@ def test_a_full_job_records_the_row_with_the_seed_it_rendered_with(
 ):
     """The end-to-end gate from §4: a mocked generate, read back from the
     table, reproduces the seed that reached the graph."""
-    from promptstudio.comfy.client import PRO_NODE_SAMPLER
+    from promptstudio.comfy.registry import get_workflow
+
+    # The sampler's node id is the slot map's business now, not a constant.
+    sampler = get_workflow("pro").slots["seed"][0].node
 
     rel, _ = make_photo(creator="gentest", name="e2e.jpg")
 
@@ -112,7 +115,7 @@ def test_a_full_job_records_the_row_with_the_seed_it_rendered_with(
     assert status["error"] is None, status["error"]
     rows = ArchiveIndex.get().list_generations_for(rel)
     assert len(rows) == 1
-    assert rows[0]["seed"] == fake_comfy["graph"][PRO_NODE_SAMPLER]["inputs"]["seed"]
+    assert rows[0]["seed"] == fake_comfy["graph"][sampler]["inputs"]["seed"]
     assert rows[0]["workflow"] == "pro"
     assert rows[0]["creator"] == "gentest"
 

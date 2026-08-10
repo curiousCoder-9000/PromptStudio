@@ -600,7 +600,7 @@ promptstudio/
 │                creator_queue classify_job media_classifier
 │   └── sources/ base instagram_source gallery_dl_source
 ├── prompts/     cache engine styles batch comfy_mode
-├── comfy/       client + workflows/modelToimage_pro.api.json
+├── comfy/       client params runner batch registry + workflows/<name>/
 └── server/      handler multipart
 
 scripts/                   # Thin CLI wrappers

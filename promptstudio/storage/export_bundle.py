@@ -2,8 +2,9 @@
 
 Derived state is everything the archive cannot re-download: prompts and
 keep/reject verdicts that cost GPU hours, favourites and generation ratings
-that are the user's own judgement, creator styles, perceptual hashes, and the
-generation index with its seeds.
+that are the user's own judgement, creator styles, perceptual hashes, the
+generation index with its seeds, and the A4 workflows the user imported and
+slotted by hand.
 
 **Media is not in the bundle.** It is the one thing that can be fetched again,
 and including it would turn a portable file into a second copy of the archive.
@@ -46,9 +47,11 @@ DERIVED_KINDS = (
     "verdicts",
     "phashes",
     "generations",
+    "workflows",
 )
 
-# The kinds backed directly by a table.
+# The kinds backed directly by a table. `favorites`, `styles` and `workflows`
+# are file-backed and each has a branch in `_collect` / `_apply` instead.
 _TABLE_FOR_KIND = {
     "prompts": "prompts",
     "verdicts": "media_verdicts",
@@ -71,6 +74,59 @@ def _resolve_kinds(kinds: Optional[Iterable[str]]) -> List[str]:
     return [k for k in DERIVED_KINDS if k in wanted]
 
 
+def _collect_workflows() -> Dict[str, Dict[str, Any]]:
+    """A4 registry entries the *user* owns, as `{name: {slots, graph}}`.
+
+    Built-ins are skipped: `pro` and `txt2img` ship with the package, so a copy
+    in the bundle would only ever restore a stale version of a file the checkout
+    already has — and, because a user entry shadows a built-in, that stale copy
+    would win. What is worth carrying is the graph the user exported out of
+    ComfyUI and slotted by hand, which no reinstall brings back.
+    """
+    from promptstudio.comfy import registry
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for spec in registry.list_workflows():
+        if spec.builtin:
+            continue
+        try:
+            with open(
+                os.path.join(spec.directory, registry.SLOTS_FILE), "r", encoding="utf-8"
+            ) as f:
+                slots = json.load(f)
+            out[spec.name] = {"slots": slots, "graph": spec.load_graph()}
+        except (OSError, ValueError) as exc:
+            log.warning("skipping workflow %s in export: %s", spec.name, exc)
+    return out
+
+
+def _apply_workflows(payload: Any) -> int:
+    from promptstudio.comfy import registry
+    from promptstudio.config import COMFY_WORKFLOWS_DIR
+
+    applied = 0
+    for name, entry in (payload or {}).items():
+        # The bundle names directories, and a bundle is a file from elsewhere.
+        # Anything with a separator in it would *write* outside the registry
+        # root, so it is refused rather than sanitised — one containment rule,
+        # the registry's.
+        safe = str(name).strip()
+        if not registry.is_valid_name(safe):
+            log.warning("refusing workflow name %r from bundle", name)
+            continue
+        if not isinstance(entry, dict) or "slots" not in entry or "graph" not in entry:
+            log.warning("workflow %r in bundle has no slots/graph pair", safe)
+            continue
+        directory = os.path.join(COMFY_WORKFLOWS_DIR, safe)
+        os.makedirs(directory, exist_ok=True)
+        # atomic_write_json, not open(..., "w"): a truncated slots.json reads as
+        # a workflow that has no slots (hard rule 9).
+        atomic_write_json(os.path.join(directory, registry.SLOTS_FILE), entry["slots"])
+        atomic_write_json(os.path.join(directory, registry.GRAPH_FILE), entry["graph"])
+        applied += 1
+    return applied
+
+
 def _collect(kind: str) -> Any:
     from promptstudio.prompts.styles import CreatorStyleStore
     from promptstudio.storage.db import ArchiveIndex
@@ -80,6 +136,8 @@ def _collect(kind: str) -> Any:
         return sorted(FavoritesStore().load())
     if kind == "styles":
         return CreatorStyleStore().load()
+    if kind == "workflows":
+        return _collect_workflows()
     return ArchiveIndex.get().dump_table(_TABLE_FOR_KIND[kind])
 
 
@@ -158,6 +216,8 @@ def _apply(kind: str, payload: Any) -> int:
         merged.update(payload or {})
         store.save(merged)
         return len(payload or {})
+    if kind == "workflows":
+        return _apply_workflows(payload)
 
     applied = ArchiveIndex.get().load_table(_TABLE_FOR_KIND[kind], payload or [])
     if kind == "prompts":

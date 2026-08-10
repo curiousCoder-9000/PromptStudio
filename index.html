@@ -373,6 +373,7 @@
             <button class="btn btn-secondary" id="bulkReanalyzeBtn" type="button">
                 <i class="fa-solid fa-wand-magic-sparkles"></i> Re-analyze
             </button>
+            <select id="bulkWorkflowSelect" class="sort-select" title="Which ComfyUI workflow the batch runs"></select>
             <button class="btn btn-secondary" id="bulkGenerateBtn" type="button" title="Batch generate through ComfyUI">
                 <i class="fa-solid fa-palette"></i> Generate
             </button>
@@ -592,8 +593,12 @@
                                 <button class="copy-btn secondary" id="copySdxlBtn" type="button"><i class="fa-solid fa-copy"></i> SDXL</button>
                                 <button class="copy-btn secondary" id="copyPonyBtn" type="button"><i class="fa-solid fa-copy"></i> Pony</button>
                             </div>
-                            <div class="sync-status-label" style="margin-top:10px;">ComfyUI Pro</div>
+                            <div class="sync-status-label" style="margin-top:10px;">ComfyUI</div>
                             <div class="comfy-pro-controls" id="comfyProControls">
+                                <label class="comfy-denoise-label" title="Which ComfyUI graph to run — from &lt;archive&gt;/_workflows">
+                                    Workflow
+                                    <select id="comfyWorkflowSelect" class="sort-select comfy-workflow-select"></select>
+                                </label>
                                 <label class="comfy-denoise-label" title="Mode E: raise to change outfit more">
                                     Denoise
                                     <input type="number" id="comfyDenoiseInput" class="comfy-denoise-input"
@@ -624,14 +629,14 @@
                                 <button class="copy-btn secondary" id="applyModeEBtn" type="button" title="Rewrite editor prompts for reference-image generation">
                                     <i class="fa-solid fa-scissors"></i> Apply Mode E
                                 </button>
-                                <button class="copy-btn" id="comfyProBtn" type="button" title="Upload reference + run modelToimage_pro">
-                                    <i class="fa-solid fa-wand-magic-sparkles"></i> Generate Pro
+                                <button class="copy-btn" id="comfyProBtn" type="button" title="Run the selected workflow">
+                                    <i class="fa-solid fa-wand-magic-sparkles"></i> Generate
                                 </button>
-                                <button class="copy-btn secondary" id="comfySdxlBtn" type="button" title="Bare txt2img (no reference)">
-                                    <i class="fa-solid fa-play"></i> Txt2img
+                                <button class="copy-btn secondary" id="comfySdxlBtn" type="button" title="Selected workflow, SDXL prompt export">
+                                    <i class="fa-solid fa-play"></i> SDXL prompt
                                 </button>
-                                <button class="copy-btn secondary" id="comfyFluxBtn" type="button" title="Txt2img with Flux-style prompt">
-                                    <i class="fa-solid fa-play"></i> Flux txt2img
+                                <button class="copy-btn secondary" id="comfyFluxBtn" type="button" title="Selected workflow, Flux prompt export">
+                                    <i class="fa-solid fa-play"></i> Flux prompt
                                 </button>
                             </div>
                             <div class="comfy-status" id="comfyStatusText"></div>
