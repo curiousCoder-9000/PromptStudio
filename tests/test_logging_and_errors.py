@@ -189,3 +189,17 @@ def test_log_message_survives_broken_stderr(monkeypatch):
             return "01/Jan/2026 00:00:00"
 
     _Probe().log_message('"%s" %s %s', "GET /api/classify/status HTTP/1.1", "200", "-")
+
+
+# ── unknown API routes ───────────────────────────────────────────────
+
+
+def test_an_unknown_api_route_is_404_for_every_verb(api):
+    """GET and PUT already fell through to a 404. POST and DELETE called
+    `super().do_POST()` / `super().do_DELETE()`, which SimpleHTTPRequestHandler
+    does not define — so the AttributeError hit the error boundary and a typo in
+    a URL was reported as a server fault.
+    """
+    for method in ("GET", "POST", "PUT", "DELETE"):
+        status, _ = api(method, "/api/definitely-not-a-route")
+        assert status == 404, f"{method} returned {status}"

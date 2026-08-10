@@ -424,7 +424,7 @@ Theme A items are specified in
 | **`logging` + rotating file handler** — 34 `print()` converted; `except: pass` sweep still open | S3 | **Done** |
 | `export --derived` / import — prompts, favorites, styles, generation index | E1 | Todo |
 | Rate generations (keep / discard / ⭐) — `PUT /api/generation/rate`, `keep_rate` on `/api/insights` | A3 | **Done** |
-| Outputs gallery — `GET /api/generations/list`, filter by creator/date/checkpoint/rating, full provenance | A1 | Todo |
+| Outputs gallery — `GET /api/generations/list`, filter by creator/date/checkpoint/rating, full provenance | A1 | **Done** |
 
 **B1 first.** `parameters.manual_edit` (`handler.py:358`) and prompt `history`
 have been written since Phase 4 and read by nothing — edit rate is a free,

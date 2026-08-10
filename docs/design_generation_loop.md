@@ -451,16 +451,52 @@ reachable only from `tests/ui/` over CDP — so status-code mapping (400 vs 404 
 untested. `tests/conftest.py` now has an `api` fixture: the real handler on a real socket,
 port 0, session-scoped. A1 adds three more routes and A2 three more; they inherit it.
 
-### A1 — Outputs gallery
+### A1 — Outputs gallery ✅
 
-- `GET /api/generations/list` — filter/sort/paginate, mirroring `/api/photos` query
-  vocabulary and its `offset`/`limit`/`has_more` response shape.
-- Outputs nav section, grid, detail view, compare, copy-params, both regenerate actions.
-- `DELETE /api/generation` (permanent, confirmed).
-- Keep `GET /api/generations?path=` untouched for the lightbox.
+- ✅ `GET /api/generations/list` — filter/sort/paginate, mirroring `/api/photos` query
+  vocabulary and its `offset`/`limit`/`has_more` response shape, plus `facets` and
+  `seed_recorded`.
+- ✅ Outputs nav section, grid, detail view, compare, copy-params, both regenerate actions.
+- ✅ `DELETE /api/generation` (permanent, confirmed).
+- ✅ `GET /api/generations?path=` still serves the lightbox — though A3 had already moved
+  it onto the table, since the JSON index has no rating column.
+- ✅ Tests: `tests/test_generations_query.py` (17) · `tests/test_api_generations_list.py`
+  (12) · `tests/ui/test_outputs_gallery.js` (27).
 
-**Gate:** 1,000 generations paginate without a full-table scan; regenerate-same-seed
-produces a byte-identical image on a fixed checkpoint.
+**Gate:** 1,000 generations paginate without a full-table scan ✅ — asserted as a query
+plan rather than a stopwatch, because a timing assertion on a shared machine is noise.
+Regenerate-same-seed byte-identical ⬜ — **not verifiable here**: it needs a running
+ComfyUI and a pinned checkpoint. The wiring is tested (the request carries the recorded
+seed; a legacy row disables the button), the image equality is not.
+
+**Composite index, measured (rule 13).** Paging orders by `(created_at, id)` — the `id`
+tiebreaker is what stops two rows sharing a timestamp from swapping between pages. Against
+A0's `created_at`-only index SQLite walked the index then built a temp b-tree for the last
+`ORDER BY` term:
+
+| Rows | Deep page, `created_at` only | With `idx_gen_created_id` |
+|-----:|-----------------------------:|--------------------------:|
+| 1,000 | 0.73 ms | — (both under a ms) |
+| 10,000 | 5.64 ms | — |
+| 50,000 | **33.31 ms** | **1.93 ms** |
+
+Nothing at the gate, 17× at 50k. Added because A2 exists to multiply this table, so 50k is
+the direction of travel. `idx_gen_created` is dropped **by name** rather than redefined:
+`CREATE INDEX IF NOT EXISTS` is a no-op on an existing DB, so reusing the name would leave
+older archives silently on the slower shape.
+
+**Delete is permanent and the confirm copy says why**, per §3.4 — the row carries seed,
+prompt and checkpoint, so the image is reproducible and a restore path would be dead
+weight. The row is dropped first and the file second, and the file only through
+`ArchiveStore.resolve_path`: the row is ours but it is still data, and a hand-edited
+`rel_path` must not become an arbitrary unlink. A row without its file is recoverable; the
+reverse is not.
+
+**Found on the way, unrelated to A1 but adjacent to it.** Unknown **POST** and **DELETE**
+routes returned **500**, not 404 — `super().do_POST()` and `super().do_DELETE()` do not
+exist on `SimpleHTTPRequestHandler`, so the `AttributeError` hit the error boundary and a
+mistyped URL was reported as a server fault. GET and PUT already answered 404. Fixed with
+a test across all four verbs, because adding a DELETE branch is what surfaced it.
 
 ### A2 — Batch generate *(after S6)*
 

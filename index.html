@@ -50,6 +50,11 @@
                 <button id="trashBtn" class="btn btn-secondary" title="Restore or permanently remove deleted media" style="display:none;">
                     <i class="fa-solid fa-trash-can"></i> Trash <span class="nav-count-badge" id="trashCountBadge">0</span>
                 </button>
+                <!-- Outputs is a sibling view, not a modal: it is a gallery in
+                     its own right and gets scrolled, filtered and paged. -->
+                <button id="outputsBtn" class="btn btn-secondary" title="Browse everything ComfyUI has generated">
+                    <i class="fa-solid fa-images"></i> Outputs
+                </button>
                 <button id="insightsBtn" class="btn btn-secondary" title="Prompt edit rate, generation counts">
                     <i class="fa-solid fa-chart-line"></i> Insights
                 </button>
@@ -252,6 +257,102 @@
                     <p>Try selecting a different creator or clearing your search query.</p>
                 </div>
             </main>
+
+            <!-- Outputs gallery (A1). Sibling of the photo gallery so both keep
+                 their own scroll position and paging state. -->
+            <main class="gallery-container outputs-container" id="outputsView" style="display:none;">
+                <div class="gallery-header">
+                    <div class="gallery-title-group">
+                        <h2><i class="fa-solid fa-images"></i> Outputs</h2>
+                        <span class="photo-badge" id="outputsCount">0 items</span>
+                        <span class="photo-badge keep-rate" id="outputsKeepRate" title="Kept ÷ rated. Unrated outputs are not counted either way.">—</span>
+                    </div>
+                    <div class="view-controls">
+                        <label class="control-label" for="outputsSort">Sort</label>
+                        <select id="outputsSort" class="sort-select" title="Sort outputs">
+                            <option value="newest">Newest</option>
+                            <option value="oldest">Oldest</option>
+                            <option value="rating">Rating (best first)</option>
+                            <option value="source">Source photo</option>
+                        </select>
+                        <select id="outputsRating" class="sort-select" title="Filter by rating">
+                            <option value="">Any rating</option>
+                            <option value="rated">Rated (any)</option>
+                            <option value="2">★ Starred</option>
+                            <option value="1">✓ Kept</option>
+                            <option value="0">Unrated</option>
+                            <option value="-1">✕ Discarded</option>
+                        </select>
+                        <select id="outputsWorkflow" class="sort-select" title="Filter by workflow">
+                            <option value="">Any workflow</option>
+                        </select>
+                        <select id="outputsCheckpoint" class="sort-select" title="Filter by checkpoint">
+                            <option value="">Any checkpoint</option>
+                        </select>
+                        <select id="outputsCreator" class="sort-select" title="Filter by creator">
+                            <option value="">Any creator</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="gallery-grid" id="outputsGrid"></div>
+
+                <div class="empty-state" id="outputsEmpty" style="display:none;">
+                    <i class="fa-solid fa-wand-magic-sparkles empty-icon"></i>
+                    <h3>Nothing generated yet</h3>
+                    <p>Open a photo, generate with ComfyUI, and every output lands here.</p>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- Output detail: source vs output, full provenance, regenerate. -->
+    <div class="modal-dialog-container" id="outputDetailModal" style="display:none;">
+        <div class="modal-overlay" id="outputDetailOverlay"></div>
+        <div class="modal-card wide">
+            <div class="sync-modal-header">
+                <div class="modal-icon purple"><i class="fa-solid fa-wand-magic-sparkles"></i></div>
+                <div class="sync-modal-titles">
+                    <h3>Generation</h3>
+                    <p class="sync-modal-sub">Everything recorded about this output — enough to reproduce it.</p>
+                </div>
+                <button type="button" class="icon-btn" id="closeOutputDetail" title="Close" aria-label="Close">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+            <div class="output-detail">
+                <div class="output-compare">
+                    <figure class="output-compare-pane">
+                        <figcaption>Source</figcaption>
+                        <img id="outputDetailSource" src="" alt="Source photo">
+                    </figure>
+                    <figure class="output-compare-pane">
+                        <figcaption>Generated</figcaption>
+                        <img id="outputDetailImage" src="" alt="Generated image">
+                    </figure>
+                </div>
+                <div class="output-meta" id="outputDetailMeta"></div>
+                <div class="output-prompts">
+                    <label class="control-label">Positive</label>
+                    <pre class="output-prompt-text" id="outputDetailPositive"></pre>
+                    <label class="control-label">Negative</label>
+                    <pre class="output-prompt-text" id="outputDetailNegative"></pre>
+                </div>
+            </div>
+            <div class="modal-actions output-detail-actions">
+                <button class="btn btn-secondary" id="outputCopyParams" type="button">
+                    <i class="fa-solid fa-copy"></i> Copy parameters
+                </button>
+                <button class="btn btn-secondary" id="outputRegenSameSeed" type="button">
+                    <i class="fa-solid fa-rotate"></i> Regenerate — same seed
+                </button>
+                <button class="btn btn-primary" id="outputRegenNewSeed" type="button">
+                    <i class="fa-solid fa-dice"></i> Regenerate — new seed
+                </button>
+                <button class="btn btn-danger" id="outputDelete" type="button">
+                    <i class="fa-solid fa-trash-can"></i> Delete
+                </button>
+            </div>
         </div>
     </div>
 

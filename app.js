@@ -26,6 +26,15 @@ const state = {
     // Deliberately not a view pref: it is derived from whatever is on screen.
     currentGenId: null,
     currentGenRating: 0,
+    // Outputs gallery (A1). Its own paging state so switching views does not
+    // discard the photo gallery's, and vice versa.
+    outputsView: false,
+    outputs: [],
+    outputsOffset: 0,
+    outputsTotal: 0,
+    outputsHasMore: false,
+    outputsRequest: null,
+    outputDetail: null,
     promptDirty: false,
     lightboxIndex: -1,
     currentPromptData: null,
@@ -303,6 +312,28 @@ const elements = {
     promptHistoryList: document.getElementById('promptHistoryList'),
     lightboxGenImg: document.getElementById('lightboxGenImg'),
     genRating: document.getElementById('genRating'),
+    outputsBtn: document.getElementById('outputsBtn'),
+    outputsView: document.getElementById('outputsView'),
+    outputsGrid: document.getElementById('outputsGrid'),
+    outputsEmpty: document.getElementById('outputsEmpty'),
+    outputsCount: document.getElementById('outputsCount'),
+    outputsKeepRate: document.getElementById('outputsKeepRate'),
+    outputsSort: document.getElementById('outputsSort'),
+    outputsRating: document.getElementById('outputsRating'),
+    outputsWorkflow: document.getElementById('outputsWorkflow'),
+    outputsCheckpoint: document.getElementById('outputsCheckpoint'),
+    outputsCreator: document.getElementById('outputsCreator'),
+    outputDetailModal: document.getElementById('outputDetailModal'),
+    outputDetailImage: document.getElementById('outputDetailImage'),
+    outputDetailSource: document.getElementById('outputDetailSource'),
+    outputDetailMeta: document.getElementById('outputDetailMeta'),
+    outputDetailPositive: document.getElementById('outputDetailPositive'),
+    outputDetailNegative: document.getElementById('outputDetailNegative'),
+    closeOutputDetail: document.getElementById('closeOutputDetail'),
+    outputCopyParams: document.getElementById('outputCopyParams'),
+    outputRegenSameSeed: document.getElementById('outputRegenSameSeed'),
+    outputRegenNewSeed: document.getElementById('outputRegenNewSeed'),
+    outputDelete: document.getElementById('outputDelete'),
     generatedPane: document.getElementById('generatedPane'),
     mediaCompare: document.getElementById('mediaCompare'),
     compareToggleBtn: document.getElementById('compareToggleBtn'),
@@ -2444,6 +2475,355 @@ function handleGenerationRatingKey(e) {
     return true;
 }
 
+// ── outputs gallery (A1) ─────────────────────────────────────────────
+// A sibling view rather than a modal: it is a gallery in its own right, with
+// its own scroll position, filters and paging. Switching views deliberately
+// does not reset the other one.
+
+const OUTPUTS_PAGE = 60;
+let outputsObserver = null;
+
+function outputsFilters() {
+    const rating = elements.outputsRating ? elements.outputsRating.value : '';
+    const params = new URLSearchParams();
+    params.set('limit', String(OUTPUTS_PAGE));
+    params.set('offset', String(state.outputsOffset));
+    params.set('sort', elements.outputsSort ? elements.outputsSort.value : 'newest');
+    // "rated" is a different question from any single rating value, so it maps
+    // to its own parameter rather than a magic rating number.
+    if (rating === 'rated') params.set('rated_only', '1');
+    else if (rating !== '') params.set('rating', rating);
+    for (const [key, el] of [
+        ['workflow', elements.outputsWorkflow],
+        ['checkpoint', elements.outputsCheckpoint],
+        ['creator', elements.outputsCreator],
+    ]) {
+        if (el && el.value) params.set(key, el.value);
+    }
+    return params;
+}
+
+async function fetchOutputs({ append = false } = {}) {
+    if (!append) state.outputsOffset = 0;
+    if (state.outputsRequest) state.outputsRequest.abort();
+    const controller = new AbortController();
+    state.outputsRequest = controller;
+    try {
+        const res = await fetch(`/api/generations/list?${outputsFilters()}`, {
+            signal: controller.signal,
+        });
+        const data = await res.json();
+        const rows = data.generations || [];
+        state.outputs = append ? state.outputs.concat(rows) : rows;
+        // Offset commits only on a response, so an aborted page cannot corrupt
+        // paging — the same rule fetchPhotos follows.
+        state.outputsOffset = state.outputs.length;
+        state.outputsHasMore = Boolean(data.has_more);
+        state.outputsTotal = Number(data.total) || 0;
+        populateOutputFacets(data.facets || {});
+        renderOutputs({ append });
+    } catch (err) {
+        if (err.name === 'AbortError') return;
+        console.error('Outputs load failed', err);
+    } finally {
+        if (state.outputsRequest === controller) state.outputsRequest = null;
+    }
+}
+
+function populateOutputFacets(facets) {
+    for (const [key, el] of [
+        ['workflows', elements.outputsWorkflow],
+        ['checkpoints', elements.outputsCheckpoint],
+        ['creators', elements.outputsCreator],
+    ]) {
+        const values = facets[key] || [];
+        if (!el) continue;
+        // Preserve the active choice across refreshes; rebuilding the list
+        // under the user mid-filter would silently reset it.
+        const current = el.value;
+        const first = el.options[0];
+        el.innerHTML = '';
+        el.appendChild(first);
+        values.forEach((v) => {
+            const opt = document.createElement('option');
+            opt.value = v;
+            opt.textContent = v;
+            el.appendChild(opt);
+        });
+        if (values.includes(current)) el.value = current;
+    }
+}
+
+function renderOutputs({ append = false } = {}) {
+    const grid = elements.outputsGrid;
+    if (!grid) return;
+    if (!append) grid.innerHTML = '';
+    const start = append ? grid.querySelectorAll('.output-card').length : 0;
+    const frag = document.createDocumentFragment();
+    state.outputs.slice(start).forEach((gen) => frag.appendChild(outputCard(gen)));
+    grid.appendChild(frag);
+
+    if (elements.outputsCount) {
+        elements.outputsCount.textContent = `${state.outputsTotal} item${state.outputsTotal === 1 ? '' : 's'}`;
+    }
+    if (elements.outputsEmpty) {
+        elements.outputsEmpty.style.display = state.outputs.length ? 'none' : 'flex';
+    }
+    attachOutputsSentinel();
+}
+
+function outputCard(gen) {
+    const card = document.createElement('div');
+    card.className = 'photo-card output-card';
+    card.dataset.genId = gen.gen_id;
+    const rating = Number(gen.rating) || 0;
+    // Third-party text: the creator handle and the prompt both originate
+    // outside this app, so neither reaches innerHTML unescaped.
+    card.innerHTML = `
+        <div class="photo-thumb-wrap">
+            <img class="photo-thumb" loading="lazy" src="${escapeHtml(gen.thumb_url)}" alt="">
+            ${rating ? `<span class="output-rating-badge r${rating}">${ratingGlyph(rating)}</span>` : ''}
+            ${gen.seed_recorded ? '' : '<span class="output-flag" title="Seed was never recorded — cannot be reproduced">no seed</span>'}
+        </div>
+        <div class="photo-meta">
+            <span class="photo-creator">@${escapeHtml(gen.creator || '')}</span>
+            <span class="photo-filename">${escapeHtml(gen.workflow || '')}</span>
+        </div>`;
+    card.addEventListener('click', () => openOutputDetail(gen.gen_id));
+    return card;
+}
+
+function ratingGlyph(rating) {
+    return { '-1': '✕', 1: '✓', 2: '★' }[String(rating)] || '';
+}
+
+function attachOutputsSentinel() {
+    const grid = elements.outputsGrid;
+    if (!grid) return;
+    const existing = grid.querySelector('#outputsLoadMore');
+    if (existing) existing.remove();
+    if (!state.outputsHasMore) return;
+    // Same element and class the photo grid uses, so it inherits the existing
+    // "Scroll for more" styling rather than needing a parallel rule.
+    const sentinel = document.createElement('div');
+    sentinel.id = 'outputsLoadMore';
+    sentinel.className = 'gallery-load-more';
+    sentinel.textContent = 'Scroll for more';
+    grid.appendChild(sentinel);
+    if (!('IntersectionObserver' in window)) {
+        sentinel.style.cursor = 'pointer';
+        sentinel.addEventListener('click', () => fetchOutputs({ append: true }));
+        return;
+    }
+    if (!outputsObserver) {
+        outputsObserver = new IntersectionObserver((entries) => {
+            if (entries.some((e) => e.isIntersecting)) fetchOutputs({ append: true });
+        }, { rootMargin: '600px 0px' });
+    }
+    outputsObserver.disconnect();
+    outputsObserver.observe(sentinel);
+}
+
+function showOutputsView(on) {
+    state.outputsView = on;
+    const gallery = document.querySelector('.gallery-container:not(.outputs-container)');
+    if (gallery) gallery.style.display = on ? 'none' : 'flex';
+    if (elements.outputsView) elements.outputsView.style.display = on ? 'flex' : 'none';
+    if (elements.outputsBtn) elements.outputsBtn.classList.toggle('active', on);
+    if (on && !state.outputs.length) fetchOutputs();
+    if (on) refreshOutputsKeepRate();
+}
+
+async function refreshOutputsKeepRate() {
+    if (!elements.outputsKeepRate) return;
+    try {
+        const res = await fetch('/api/insights');
+        const data = await res.json();
+        const g = (data && data.generations) || {};
+        elements.outputsKeepRate.textContent = g.keep_rate === null || g.keep_rate === undefined
+            ? 'unrated'
+            : `keep ${Math.round(g.keep_rate * 100)}% of ${g.rated}`;
+    } catch (err) {
+        console.error('keep rate load failed', err);
+    }
+}
+
+function setupOutputsListeners() {
+    if (elements.outputsBtn) {
+        elements.outputsBtn.addEventListener('click', () => showOutputsView(!state.outputsView));
+    }
+    [elements.outputsSort, elements.outputsRating, elements.outputsWorkflow,
+     elements.outputsCheckpoint, elements.outputsCreator].forEach((el) => {
+        if (el) el.addEventListener('change', () => fetchOutputs());
+    });
+}
+
+// ── output detail (A1) ───────────────────────────────────────────────
+
+function openOutputDetail(genId) {
+    const gen = state.outputs.find((g) => g.gen_id === genId);
+    if (!gen || !elements.outputDetailModal) return;
+    state.outputDetail = gen;
+
+    elements.outputDetailImage.src = gen.url;
+    // The source may have been deleted since; /media 404s and the browser
+    // shows a broken pane, which is honest — the provenance panel still says
+    // which file it was.
+    elements.outputDetailSource.src = '/media/' + gen.source_rel
+        .split('/').map(encodeURIComponent).join('/');
+    elements.outputDetailPositive.textContent = gen.positive_prompt || '';
+    elements.outputDetailNegative.textContent = gen.negative_prompt || '';
+
+    const rows = [
+        ['Source', gen.source_rel],
+        ['Created', gen.created_at],
+        ['Workflow', gen.workflow],
+        ['Checkpoint', gen.checkpoint || '—'],
+        ['Seed', gen.seed_recorded ? String(gen.seed) : 'not recorded'],
+        ['Steps', gen.steps],
+        ['CFG', gen.cfg],
+        ['Denoise', gen.denoise === null ? '—' : gen.denoise],
+        ['Mode E', gen.mode_e ? 'on' : 'off'],
+        ['Prompt engine', gen.prompt_version || '—'],
+        ['Batch', gen.batch_id || '—'],
+    ];
+    elements.outputDetailMeta.innerHTML = rows
+        .map(([k, v]) => `<div class="output-meta-row"><span>${escapeHtml(k)}</span>` +
+            `<strong>${escapeHtml(String(v === null || v === undefined ? '—' : v))}</strong></div>`)
+        .join('');
+
+    // Legacy rows imported from the pre-A0 JSON index never had their seed
+    // written down. Offering "same seed" there would be a button that cannot
+    // do what it says, so it is disabled and says why.
+    if (elements.outputRegenSameSeed) {
+        elements.outputRegenSameSeed.disabled = !gen.seed_recorded;
+        elements.outputRegenSameSeed.title = gen.seed_recorded
+            ? `Re-run with seed ${gen.seed}`
+            : 'This generation predates seed recording and cannot be reproduced';
+    }
+    elements.outputDetailModal.style.display = 'flex';
+}
+
+function closeOutputDetail() {
+    if (elements.outputDetailModal) elements.outputDetailModal.style.display = 'none';
+    state.outputDetail = null;
+}
+
+function copyOutputParams() {
+    const gen = state.outputDetail;
+    if (!gen) return;
+    const text = [
+        `positive: ${gen.positive_prompt || ''}`,
+        `negative: ${gen.negative_prompt || ''}`,
+        `workflow: ${gen.workflow}`,
+        `checkpoint: ${gen.checkpoint || ''}`,
+        `seed: ${gen.seed_recorded ? gen.seed : 'not recorded'}`,
+        `steps: ${gen.steps}  cfg: ${gen.cfg}  denoise: ${gen.denoise ?? ''}`,
+        `mode_e: ${gen.mode_e ? 'on' : 'off'}`,
+    ].join('\n');
+    copyToClipboard(text, 'Copied parameters');
+}
+
+async function regenerateOutput({ sameSeed }) {
+    const gen = state.outputDetail;
+    if (!gen) return;
+    if (sameSeed && !gen.seed_recorded) return;
+    try {
+        const res = await fetch('/api/comfy/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                path: gen.source_rel,
+                workflow: gen.workflow,
+                positive_prompt: gen.positive_prompt,
+                negative_prompt: gen.negative_prompt,
+                checkpoint: gen.checkpoint || undefined,
+                steps: gen.steps,
+                cfg_scale: gen.cfg,
+                denoise: gen.denoise,
+                // Omitted entirely for a new roll — sending null would be
+                // indistinguishable from "no opinion" and is what the server
+                // already treats as unpinned.
+                seed: sameSeed ? gen.seed : undefined,
+                use_mode_e: gen.mode_e,
+            }),
+        });
+        const data = await res.json();
+        if (res.status === 409) {
+            showToast(data.message || 'ComfyUI is busy');
+            return;
+        }
+        if (!res.ok) throw new Error(data.message || `HTTP ${res.status}`);
+        showToast(sameSeed ? `Re-running seed ${gen.seed}` : 'Re-running with a new seed');
+        closeOutputDetail();
+        // pollComfyStatus is self-arming — one call re-creates its own interval
+        // while a job is running and clears it when there is not.
+        pollComfyStatus();
+    } catch (err) {
+        console.error('Regenerate failed', err);
+        showToast('Could not start the generation');
+    }
+}
+
+async function deleteOutput() {
+    const gen = state.outputDetail;
+    if (!gen) return;
+    // Permanent, and the copy says so — this is the one delete in the app that
+    // does not route through _trash, because the row can rebuild the image.
+    const ok = window.confirm(
+        'Delete this generation permanently?\n\n'
+        + 'Generations are not moved to Trash — the prompt, seed and checkpoint '
+        + 'are all recorded, so it can be generated again.'
+    );
+    if (!ok) return;
+    try {
+        const res = await fetch(`/api/generation?gen_id=${encodeURIComponent(gen.gen_id)}`, {
+            method: 'DELETE',
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        state.outputs = state.outputs.filter((g) => g.gen_id !== gen.gen_id);
+        state.outputsTotal = Math.max(0, state.outputsTotal - 1);
+        // Optimistic removal, like the photo gallery: no full refetch, so the
+        // scroll position and loaded pages survive.
+        const card = elements.outputsGrid
+            && elements.outputsGrid.querySelector(`[data-gen-id="${CSS.escape(gen.gen_id)}"]`);
+        if (card) card.remove();
+        if (elements.outputsCount) {
+            elements.outputsCount.textContent = `${state.outputsTotal} item${state.outputsTotal === 1 ? '' : 's'}`;
+        }
+        if (elements.outputsEmpty && !state.outputs.length) {
+            elements.outputsEmpty.style.display = 'flex';
+        }
+        closeOutputDetail();
+        showToast('Generation deleted');
+        refreshOutputsKeepRate();
+    } catch (err) {
+        console.error('Delete failed', err);
+        showToast('Could not delete the generation');
+    }
+}
+
+function setupOutputDetailListeners() {
+    if (elements.closeOutputDetail) {
+        elements.closeOutputDetail.addEventListener('click', closeOutputDetail);
+    }
+    // Clicking the backdrop closes, like every other dialog here.
+    const overlay = document.getElementById('outputDetailOverlay');
+    if (overlay) overlay.addEventListener('click', closeOutputDetail);
+    if (elements.outputCopyParams) {
+        elements.outputCopyParams.addEventListener('click', copyOutputParams);
+    }
+    if (elements.outputRegenSameSeed) {
+        elements.outputRegenSameSeed.addEventListener('click', () => regenerateOutput({ sameSeed: true }));
+    }
+    if (elements.outputRegenNewSeed) {
+        elements.outputRegenNewSeed.addEventListener('click', () => regenerateOutput({ sameSeed: false }));
+    }
+    if (elements.outputDelete) {
+        elements.outputDelete.addEventListener('click', deleteOutput);
+    }
+}
+
 function setupGenRatingListeners() {
     if (!elements.genRating) return;
     elements.genRating.addEventListener('click', (e) => {
@@ -3962,6 +4342,8 @@ function setupEventListeners() {
 
     setupClassifyListeners();
     setupGenRatingListeners();
+    setupOutputsListeners();
+    setupOutputDetailListeners();
 
     // Lightbox Actions
     elements.lightboxDeleteBtn.addEventListener('click', () => {
@@ -4234,6 +4616,17 @@ function setupEventListeners() {
         if (elements.deleteConfirmModal.style.display === 'flex') {
             if (e.key === 'Escape') {
                 closeDeleteModal();
+                return;
+            }
+        }
+
+        // Above the lightbox: the output detail can be opened from the outputs
+        // view with no lightbox behind it, and a modal with no keyboard exit is
+        // the same trap review mode was.
+        if (elements.outputDetailModal
+            && elements.outputDetailModal.style.display === 'flex') {
+            if (e.key === 'Escape') {
+                closeOutputDetail();
                 return;
             }
         }

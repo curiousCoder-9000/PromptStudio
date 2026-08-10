@@ -150,7 +150,7 @@ SUITES=("$@")
 if [ ${#SUITES[@]} -eq 0 ]; then
   SUITES=(test_delete_flow.js test_escaping.js test_jobs_and_prefs.js test_classify_review.js
           test_insights_and_pollers.js test_browse_and_paging.js test_source_filter.js
-          test_scrape_lanes.js test_generation_rating.js)
+          test_scrape_lanes.js test_generation_rating.js test_outputs_gallery.js)
 fi
 
 STATUS=0

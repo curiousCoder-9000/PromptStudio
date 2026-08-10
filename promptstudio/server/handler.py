@@ -510,7 +510,11 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             )
             return
 
-        return super().do_DELETE()
+        # Not super().do_DELETE() — SimpleHTTPRequestHandler has no such method,
+        # so the AttributeError hit the error boundary and reported a mistyped
+        # URL as a server fault. GET and PUT already answered 404 here.
+        self.send_error(404, "Not found")
+        return
 
     @_error_boundary
     def do_PUT(self):
@@ -1519,7 +1523,9 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(400, "Invalid JSON body")
             return
 
-        return super().do_POST()
+        # Same as do_DELETE: there is no SimpleHTTPRequestHandler.do_POST.
+        self.send_error(404, "Not found")
+        return
 
     @_error_boundary
     def do_GET(self):
