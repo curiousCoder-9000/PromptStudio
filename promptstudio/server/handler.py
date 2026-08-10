@@ -463,6 +463,53 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                         return
             self.send_error(404, "Photo not found")
             return
+
+        if parsed.path == "/api/generation":
+            from promptstudio.storage.db import ArchiveIndex
+
+            query = urllib.parse.parse_qs(parsed.query)
+            gen_id = (query.get("gen_id", [""])[0] or "").strip()
+            if not gen_id:
+                self.send_error(400, "gen_id required")
+                return
+            index = ArchiveIndex.get()
+            # Permanent, no trash — unlike DELETE /api/photo. Archive media is
+            # unrecoverable; a generation carries its own seed, prompt and
+            # checkpoint, so it is reproducible by construction and a restore
+            # path would be dead weight. The confirm copy says so.
+            rel = index.delete_generation(gen_id)
+            if rel is None:
+                self.send_error(404, "Generation not found")
+                return
+            # Row first, file second, and the file only through the shared
+            # containment check: the row is ours but it is still data, and a
+            # hand-edited or migrated rel_path must not become an arbitrary
+            # unlink. A row without its file is recoverable; the reverse is not.
+            full_path = _archive.resolve_path(rel)
+            removed = False
+            if full_path:
+                try:
+                    os.remove(full_path)
+                    removed = True
+                    from promptstudio.storage.thumbs import resolve_thumb_file
+
+                    thumb = resolve_thumb_file(rel)
+                    if thumb and os.path.isfile(thumb):
+                        os.remove(thumb)
+                except OSError as e:
+                    log.warning("removing generation %s: %s", rel, e)
+            else:
+                log.warning("generation %s is outside the archive; row only", rel)
+            self._send_json(
+                {
+                    "status": "deleted",
+                    "gen_id": gen_id,
+                    "rel_path": rel,
+                    "file_removed": removed,
+                }
+            )
+            return
+
         return super().do_DELETE()
 
     @_error_boundary
@@ -1861,6 +1908,73 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         if path == "/api/comfy/status":
             self._send_json(_comfy.get_status())
+            return
+
+        if path == "/api/generations/list":
+            from promptstudio.storage.db import ArchiveIndex
+            from promptstudio.storage.thumbs import thumb_url
+
+            try:
+                offset = max(0, int(query.get("offset", ["0"])[0] or 0))
+            except ValueError:
+                offset = 0
+            try:
+                limit = int(query.get("limit", [str(MAX_PHOTOS_API_PAGE)])[0]
+                            or MAX_PHOTOS_API_PAGE)
+            except ValueError:
+                limit = MAX_PHOTOS_API_PAGE
+            limit = max(1, min(limit, MAX_PHOTOS_API_PAGE))
+
+            def _q(name):
+                return (query.get(name, [""])[0] or "").strip() or None
+
+            rating = _q("rating")
+            try:
+                # "" means no filter; "0" means the *unrated*, which is a real
+                # filter — so this cannot collapse to a truthiness test.
+                rating = None if rating is None else int(rating)
+            except ValueError:
+                self.send_error(400, "rating must be an integer")
+                return
+
+            index = ArchiveIndex.get()
+            rows, total = index.list_generations(
+                creator=_q("creator"),
+                workflow=_q("workflow"),
+                checkpoint=_q("checkpoint"),
+                batch_id=_q("batch_id"),
+                source_rel=_q("source"),
+                rating=rating,
+                rated_only=(query.get("rated_only", [""])[0] or "") in ("1", "true"),
+                since=_q("since"),
+                sort=(query.get("sort", ["newest"])[0] or "newest"),
+                limit=limit,
+                offset=offset,
+            )
+            out = []
+            for row in rows:
+                rel = row["rel_path"]
+                item = dict(row)
+                item["url"] = "/media/" + "/".join(
+                    urllib.parse.quote(part) for part in rel.split("/")
+                )
+                item["thumb_url"] = thumb_url(rel)
+                item["mode_e"] = bool(row["mode_e"])
+                # -1 is the legacy "never recorded" marker from the A0 import.
+                # Surfaced as a flag so the UI can disable regenerate-same-seed
+                # instead of offering a button that cannot reproduce anything.
+                item["seed_recorded"] = int(row["seed"]) >= 0
+                out.append(item)
+            self._send_json(
+                {
+                    "generations": out,
+                    "total": total,
+                    "offset": offset,
+                    "limit": limit,
+                    "has_more": offset + len(out) < total,
+                    "facets": index.generation_facets(),
+                }
+            )
             return
 
         if path == "/api/generations":

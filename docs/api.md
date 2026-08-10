@@ -52,7 +52,9 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/comfy/generate` | Queue ComfyUI Pro (ref) or txt2img |
 | `GET` | `/api/comfy/status` | ComfyUI job progress |
 | `GET` | `/api/generations` | Saved generations for a source photo |
+| `GET` | `/api/generations/list` | Outputs gallery — filter, sort, paginate |
 | `PUT` | `/api/generation/rate` | Rate one output: `-1` discard · `0` unrated · `1` keep · `2` star |
+| `DELETE` | `/api/generation` | Delete one output — **permanent, no trash** |
 | `GET` | `/media/<path>` | Full-resolution image or video |
 | `GET` | `/media/thumb/<path>` | Generated JPEG thumbnail |
 
@@ -367,6 +369,66 @@ Outputs are saved under `_generations/<creator>/` and indexed in `generations_in
 Reads the legacy `generations_index.json`, unchanged for lightbox back-compat.
 The `generations` table in `archive.db` is the source of truth for everything
 added since A0 (full prompts, real seed, rating).
+
+### `GET /api/generations/list`
+
+The outputs gallery (A1). Mirrors `/api/photos`: same `offset` / `limit` /
+`has_more` / `total` contract, so the existing paging works unchanged.
+
+Query: `creator`, `workflow`, `checkpoint`, `batch_id`, `source` (a source
+`rel_path`), `rating` (`-1|0|1|2`), `rated_only=1`, `since` (ISO), `sort`,
+`offset`, `limit`.
+
+`rating=0` filters to the **unrated**; omitting the parameter means no filter.
+`rated_only=1` is the different question — everything judged either way.
+
+`sort` ∈ `newest` (default) · `oldest` · `rating` · `source`. An unrecognised
+value falls back to `newest` rather than erroring: it is whitelisted against an
+`ORDER BY` fragment, which cannot be parameterised, so a stale bookmark must not
+be able to reach SQL or 500.
+
+```json
+{
+  "generations": [{
+    "gen_id": "8f3c…", "rel_path": "_generations/nina/x_gen_1.png",
+    "url": "/media/_generations/…", "thumb_url": "/media/thumb/_generations/…",
+    "source_rel": "nina/photo.jpg", "creator": "nina",
+    "seed": 987654321, "seed_recorded": true,
+    "workflow": "pro", "checkpoint": "…", "steps": 32, "cfg": 6.0,
+    "denoise": 0.7, "mode_e": true, "prompt_version": "…",
+    "positive_prompt": "…", "negative_prompt": "…",
+    "rating": 2, "rated_at": "…", "batch_id": null, "created_at": "…"
+  }],
+  "total": 412, "offset": 0, "limit": 200, "has_more": true,
+  "facets": { "creators": [], "workflows": [], "checkpoints": [] }
+}
+```
+
+`seed_recorded` is `false` for rows imported from the pre-A0 JSON index, whose
+seed was never written down (`seed = -1`). The UI must show "seed not recorded"
+and disable regenerate-same-seed for those rather than offering a button that
+cannot reproduce anything.
+
+`facets` lists the values actually present, so a checkpoint since removed from
+ComfyUI still appears as a filter for the outputs it produced.
+
+### `DELETE /api/generation?gen_id=…`
+
+**Permanent. Does not use `_trash/`** — the deliberate asymmetry with
+`DELETE /api/photo`. Archive media is unrecoverable; a generation carries its
+own seed, prompt and checkpoint and is reproducible by construction, so a
+restore path would be dead weight. Say so in the confirm copy.
+
+Row is dropped first, file second, and the file only through
+`ArchiveStore.resolve_path` — a row whose `rel_path` escapes the archive drops
+the row and unlinks nothing (`file_removed: false`). A row without its file is
+recoverable; the reverse is not.
+
+| Status | When |
+|--------|------|
+| `200` | `{"status":"deleted","gen_id":…,"rel_path":…,"file_removed":true}` |
+| `400` | missing `gen_id` |
+| `404` | unknown `gen_id` |
 
 ### `PUT /api/generation/rate`
 

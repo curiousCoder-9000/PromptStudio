@@ -204,10 +204,21 @@ CREATE TABLE IF NOT EXISTS generations (
   rated_at         TEXT,
   error            TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_gen_created ON generations(created_at DESC);
+-- Composite, not created_at alone. Paging orders by (created_at, id) — the id
+-- tiebreaker is what stops two rows sharing a timestamp from swapping between
+-- pages and being served twice or not at all. Against a created_at-only index
+-- SQLite walks the index and then builds a temp b-tree for the last ORDER BY
+-- term, which measured 33.3ms on a 50k-row deep page against 1.93ms here.
+-- (At the 1k rows §4 actually gates on, both are under a millisecond.)
+CREATE INDEX IF NOT EXISTS idx_gen_created_id ON generations(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_gen_source ON generations(source_rel);
 CREATE INDEX IF NOT EXISTS idx_gen_rating ON generations(rating);
 CREATE INDEX IF NOT EXISTS idx_gen_batch ON generations(batch_id);
+-- Superseded by the composite above, whose leading column serves every query
+-- the old one did. Dropped by name rather than redefined: CREATE INDEX IF NOT
+-- EXISTS is a no-op on an existing DB, so reusing the name would silently
+-- leave older archives on the slower shape.
+DROP INDEX IF EXISTS idx_gen_created;
 """
 
 # Standalone rather than an external-content FTS table: the content table is
@@ -683,6 +694,147 @@ class ArchiveIndex:
             )
             self._conn.commit()
             return cur.rowcount > 0
+
+    # Whitelist, because `sort` arrives from a query string and goes into an
+    # ORDER BY, which cannot be parameterised. An unknown value falls back to
+    # newest rather than erroring — a stale bookmark should not 500.
+    _GEN_SORTS = {
+        "newest": "created_at DESC, id DESC",
+        "oldest": "created_at ASC, id ASC",
+        "rating": "rating DESC, created_at DESC",
+        "source": "source_rel ASC, created_at DESC",
+    }
+
+    def _generations_where(
+        self,
+        *,
+        creator: Optional[str],
+        workflow: Optional[str],
+        checkpoint: Optional[str],
+        batch_id: Optional[str],
+        source_rel: Optional[str],
+        rating: Optional[int],
+        rated_only: bool,
+        since: Optional[str],
+    ) -> Tuple[str, List[Any]]:
+        where: List[str] = []
+        params: List[Any] = []
+        for column, value in (
+            ("creator", creator),
+            ("workflow", workflow),
+            ("checkpoint", checkpoint),
+            ("batch_id", batch_id),
+        ):
+            if value:
+                where.append(f"{column} = ?")
+                params.append(value)
+        if source_rel:
+            where.append("source_rel = ?")
+            params.append(normalize_rel_path(source_rel))
+        # `rating=0` means "the unrated"; `rated_only` means "everything I have
+        # judged". Two different questions, so `rating is not None` rather than
+        # a truthiness test — `if rating:` would silently drop the 0 case.
+        if rating is not None:
+            where.append("rating = ?")
+            params.append(int(rating))
+        if rated_only:
+            where.append("rating != 0")
+        if since:
+            where.append("created_at >= ?")
+            params.append(since)
+        return (" WHERE " + " AND ".join(where)) if where else "", params
+
+    def list_generations(
+        self,
+        *,
+        creator: Optional[str] = None,
+        workflow: Optional[str] = None,
+        checkpoint: Optional[str] = None,
+        batch_id: Optional[str] = None,
+        source_rel: Optional[str] = None,
+        rating: Optional[int] = None,
+        rated_only: bool = False,
+        since: Optional[str] = None,
+        sort: str = "newest",
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Outputs for the A1 gallery. Returns `(rows, total)`.
+
+        `total` is the count *before* paging, matching `query_photos` — the
+        frontend derives `has_more` from it, so a page-sized total would stop
+        infinite scroll after the first page.
+        """
+        where_sql, params = self._generations_where(
+            creator=creator,
+            workflow=workflow,
+            checkpoint=checkpoint,
+            batch_id=batch_id,
+            source_rel=source_rel,
+            rating=rating,
+            rated_only=rated_only,
+            since=since,
+        )
+        order = self._GEN_SORTS.get(sort or "newest", self._GEN_SORTS["newest"])
+        sql = f"SELECT * FROM generations{where_sql} ORDER BY {order}"
+        page_params = list(params)
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            page_params.extend([int(limit), max(0, int(offset))])
+        with self._lock:
+            total = self._conn.execute(
+                f"SELECT COUNT(*) AS c FROM generations{where_sql}", params
+            ).fetchone()["c"]
+            rows = self._conn.execute(sql, page_params).fetchall()
+        return [dict(r) for r in rows], int(total)
+
+    def explain_generations_query(self, sort: str = "newest") -> str:
+        """Query plan for the default gallery page — the §4 pagination gate is
+        a claim about the plan, so it is checkable as one."""
+        order = self._GEN_SORTS.get(sort or "newest", self._GEN_SORTS["newest"])
+        with self._lock:
+            rows = self._conn.execute(
+                f"EXPLAIN QUERY PLAN SELECT * FROM generations "
+                f"ORDER BY {order} LIMIT 50 OFFSET 900"
+            ).fetchall()
+        return " | ".join(str(r["detail"]) for r in rows)
+
+    def delete_generation(self, gen_id: str) -> Optional[str]:
+        """Drop one generation row. Returns its `rel_path`, or None if unknown.
+
+        The row only — unlinking the file is the caller's job, because the
+        containment check for "is this path inside the archive" lives in
+        `ArchiveStore` and must not be duplicated here (the A0 lesson).
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT rel_path FROM generations WHERE gen_id = ?", (gen_id,)
+            ).fetchone()
+            if not row:
+                return None
+            self._conn.execute("DELETE FROM generations WHERE gen_id = ?", (gen_id,))
+            self._conn.commit()
+            return str(row["rel_path"])
+
+    def generation_facets(self) -> Dict[str, List[str]]:
+        """Distinct workflows / checkpoints / creators present, for filter UI.
+
+        Built from the data rather than the registry: a checkpoint the user has
+        since removed from ComfyUI still has outputs worth filtering to.
+        """
+        out: Dict[str, List[str]] = {}
+        with self._lock:
+            for key, column in (
+                ("creators", "creator"),
+                ("workflows", "workflow"),
+                ("checkpoints", "checkpoint"),
+            ):
+                rows = self._conn.execute(
+                    f"SELECT DISTINCT {column} AS v FROM generations "
+                    f"WHERE {column} IS NOT NULL AND {column} != '' ORDER BY v"
+                ).fetchall()
+                out[key] = [str(r["v"]) for r in rows]
+        return out
 
     def generation_rating_summary(self) -> Dict[str, Any]:
         """Volume + keep-rate aggregates for `GET /api/insights` (B1).
