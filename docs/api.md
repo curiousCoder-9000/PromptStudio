@@ -70,7 +70,16 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 ```json
 { "total_photos": 1134, "total_videos": 82, "total_creators": 147,
   "prompts_ready": 420, "unclassified_total": 311,
-  "trash_enabled": true, "trash_count": 3 }
+  "trash_enabled": true, "trash_count": 3,
+  "verdict_facets": {
+    "total": 1216,
+    "reject_max_tier": 1,
+    "warn_above": 0.6,
+    "counts": { "keep": 481, "reject": 331, "unclassified": 400,
+                "error": 4, "unusable": 91, "modest": 240 },
+    "shares": { "keep": 0.3956, "reject": 0.2722, "unclassified": 0.3289,
+                "error": 0.0033, "unusable": 0.0748, "modest": 0.1974 }
+  } }
 ```
 
 `unclassified_total` is media with no `media_verdicts` row, **archive-wide and never
@@ -78,6 +87,18 @@ scoped** — it is what the navbar Classify All button counts, and that job igno
 source filter. Reading the sidebar's per-creator `unclassified_count` instead (which
 `/api/creators?source=` does narrow) made the button disable itself claiming everything
 was classified while another platform's backlog was untouched.
+
+`verdict_facets` is the **B4 pass rate** of every verdict filter: one grouped query for
+all six buckets, from the same predicates `/api/photos?verdict=` filters with, so a
+chip's badge can never describe a filter nobody is running. Rides on this route rather
+than getting its own because the refresh points already match — app init, and the end of
+a classify run. Archive-wide and never scoped for the same reason `unclassified_total`
+is: saturation is a property of the classifier over everything it has judged, and a
+share that moved as the user clicked between creators could not be compared against the
+guard at all. `shares` are `null` on an empty archive (nothing measured yet is not the
+same answer as measured at zero), and `warn_above` is served rather than hardcoded in
+`app.js` so the badge, the panel and the pytest gate cannot drift apart
+(`DISTRIBUTION_MAX_SHARE`).
 
 All the counters are single indexed SQL aggregates. `prompts_ready` reads the
 `has_prompt` column (maintained write-through by `PromptCache`) rather than
@@ -152,7 +173,13 @@ A `classify` block reports the tier distribution over everything classified:
     "labels": { "0": "Unusable", "1": "Fully modest", "…": "…" },
     "reject_rate": 0.4077,
     "top_tier_share": 0.3916,
-    "error_rate": 0.0049
+    "error_rate": 0.0049,
+    "saturation": {
+      "what": "classified tier", "n": 812, "min_n": 100, "threshold": 0.6,
+      "measured": true, "saturated": false,
+      "top_bucket": "tier 2", "top_count": 318, "top_share": 0.3916,
+      "message": "classified tier: tier 2 holds 39.2% of 812 (limit 60%)"
+    }
   }
 }
 ```
@@ -160,6 +187,14 @@ A `classify` block reports the tier distribution over everything classified:
 `top_tier_share` is the number to watch. Above ~0.6 the classifier is barely
 discriminating whatever the prompt claims — the previous one shipped at 0.85 and
 nothing was reading it. See [design_media_classifier.md](design_media_classifier.md) §5.
+
+`saturation` is that number with the **B4 verdict** attached, from the one rule in
+`insights.saturation_report`. `generations` carries the same block over rated outputs
+only — `keep_rate`'s own denominator, because counting unrated rows as a bucket would
+fire on every archive nobody has judged yet. `measured` is `false` below `min_n`
+(`DISTRIBUTION_MIN_CLASSIFIED` / `DISTRIBUTION_MIN_RATED`), which is a different answer
+from "measured and fine"; `message` names the bucket, its share and the denominator, so
+the failing check in `tests/test_distribution_guard.py` tells you where to look.
 
 ### `POST /api/classify/start`
 

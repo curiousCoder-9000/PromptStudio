@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from promptstudio.config import (
     ARCHIVE_DB_FILE,
     CLASSIFY_REJECT_MAX_TIER,
+    DISTRIBUTION_MAX_SHARE,
     EXCLUDED_FOLDERS,
     FTS_SEARCH,
     GENERATIONS_INDEX_FILE,
@@ -215,6 +216,27 @@ def _natural_key(value: str) -> Tuple[Any, ...]:
         for part in _DIGITS.split(value.lower())
     )
 
+
+def _verdict_predicate(name: str, cut: int) -> Tuple[str, List[Any]]:
+    """SQL for one verdict filter, as (clause, params). Unknown name => no-op.
+
+    Shared by `query_photos` and `verdict_facet_counts` so a chip's pass-rate
+    badge cannot end up describing a different filter than the chip runs.
+
+    `unusable` (tier 0) and `modest` (tier 1) are the two halves of `reject`,
+    split because the 0 boundary is a quality gate anyone would accept while
+    the 1 boundary is a taste call that has never been measured. Both ignore
+    rows the user has overridden by hand — a manual verdict is not the
+    classifier's output and must not be counted as evidence about it.
+    """
+    case = _VERDICT_CASE.format(cut=cut)
+    if name in ("keep", "reject", "unclassified", "error"):
+        return f"{case} = ?", [name]
+    if name == "unusable":
+        return "v.manual IS NULL AND v.tier = 0", []
+    if name == "modest":
+        return "v.manual IS NULL AND v.tier = 1", []
+    return "", []
 
 # Creators with no verdict row at all still need every key present, or the
 # sidebar has to guard each counter individually.
@@ -1437,6 +1459,55 @@ class ArchiveIndex:
         )
         return sql, params
 
+    def verdict_facet_counts(self, *, cut: Optional[int] = None) -> Dict[str, Any]:
+        """Share of the archive each verdict filter selects — the B4 pass rate.
+
+        One grouped pass over `photos` for every filter, not one COUNT per
+        chip: the review strip has five and the browse dropdown seven, and a
+        round trip each is how a badge meant to be glanced at turns into a
+        reason not to render it. The predicates come from
+        `_verdict_predicate`, the same source `query_photos` filters with.
+
+        **Archive-wide, never scoped** — same stance as `unclassified_total`,
+        for a different reason. Saturation is a property of the classifier
+        over everything it has judged; a share that moved as the user clicked
+        between creators or platforms could not be compared against the 60%
+        rule at all.
+
+        `shares` are None on an empty archive: nothing measured yet is not the
+        same answer as measured at zero.
+
+        Measured (rule 13) at 20k photos / 16k verdicts: **12.6 ms**, taking
+        `stats()` from ~15 ms to ~28 ms. Six `SUM(CASE …)` over one join scan —
+        a COUNT per chip would pay that scan six times over.
+        """
+        cut_v = self._reject_cut(cut)
+        selects = ["COUNT(*) AS total"]
+        params: List[Any] = []
+        for name in VERDICT_FILTERS:
+            clause, clause_params = _verdict_predicate(name, cut_v)
+            selects.append(f"SUM(CASE WHEN {clause} THEN 1 ELSE 0 END) AS n_{name}")
+            params.extend(clause_params)
+
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT " + ", ".join(selects) + " FROM photos p "
+                "LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path",
+                params,
+            ).fetchone()
+
+        total = int(row["total"] or 0)
+        counts = {name: int(row[f"n_{name}"] or 0) for name in VERDICT_FILTERS}
+        return {
+            "total": total,
+            "reject_max_tier": cut_v,
+            # Served rather than hardcoded in app.js: the badge, /api/insights
+            # and the pytest gate all have to mean the same 0.6.
+            "warn_above": DISTRIBUTION_MAX_SHARE,
+            "counts": counts,
+            "shares": {name: _ratio(n, total) for name, n in counts.items()},
+        }
+
     def list_unclassified(
         self,
         creator: str,
@@ -2338,13 +2409,18 @@ class ArchiveIndex:
             }
         return out
 
-    def stats(self) -> Dict[str, int]:
+    def stats(self) -> Dict[str, Any]:
         """Gallery counters for /api/stats — all indexed, no filesystem walk.
 
         `prompts_ready` reads the `has_prompt` column (idx_photos_prompt), which
         PromptCache maintains write-through via update_prompt_flags. The old
         count_prompts_ready() iterated every photo in the archive and loaded the
         whole prompt cache on each call, and /api/stats is on the init path.
+
+        `verdict_facets` rides along rather than getting its own route: the
+        pass-rate badges want the same refresh points this already has (app
+        init, and the end of a classify run), and B4 is only useful if the
+        number is on screen without asking for it.
         """
         video_case = " OR ".join(
             "LOWER(filename) LIKE ?" for _ in VIDEO_EXTENSIONS
@@ -2366,6 +2442,7 @@ class ArchiveIndex:
             "total_creators": int(row["creators"] or 0),
             "prompts_ready": int(row["prompts_ready"] or 0),
             "unclassified_total": self.unclassified_total(),
+            "verdict_facets": self.verdict_facet_counts(),
         }
 
     def unclassified_total(self) -> int:
@@ -2438,16 +2515,16 @@ class ArchiveIndex:
 
         cut = self._reject_cut(reject_cut)
         verdict_case = _VERDICT_CASE.format(cut=cut)
-        if verdict in ("keep", "reject", "unclassified", "error"):
-            where.append(f"{verdict_case} = ?")
-            params.append(verdict)
-        elif verdict == "unusable":
-            # Tier 0 alone: no woman / man in frame / poster / unusable quality.
-            # Split out from `reject` so a cautious cleanup pass can act on the
-            # boundary that is a quality gate, not a taste call.
-            where.append("v.manual IS NULL AND v.tier = 0")
-        elif verdict == "modest":
-            where.append("v.manual IS NULL AND v.tier = 1")
+        if verdict:
+            # Same predicate the pass-rate badge counts with — see
+            # `_verdict_predicate`. Tier 0 alone is "no woman / man in frame /
+            # poster / unusable quality", split from `reject` so a cautious
+            # cleanup pass can act on the boundary that is a quality gate
+            # rather than a taste call.
+            clause, clause_params = _verdict_predicate(verdict, cut)
+            if clause:
+                where.append(clause)
+                params.extend(clause_params)
 
         if search:
             q = search.lower().strip()

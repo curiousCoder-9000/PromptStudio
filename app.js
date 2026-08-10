@@ -82,6 +82,11 @@ const state = {
     // Archive-wide unclassified count from /api/stats. Deliberately separate
     // from the sidebar's per-creator counters, which the source filter narrows.
     archiveUnclassified: 0,
+    // {total, counts, shares, warn_above} from /api/stats — the B4 pass rate
+    // of every verdict filter. Archive-wide on purpose: the badge answers
+    // "does this filter still tell me anything", which is a property of the
+    // classifier, not of whichever creator happens to be selected.
+    verdictFacets: null,
     tierLabels: null,
     healthPollTimer: null,
     // Poller keys stopped because the tab went to the background, so only
@@ -768,8 +773,13 @@ async function fetchStats() {
         // Archive-wide, never narrowed by the source filter — the navbar
         // Classify All button needs the number its job actually covers.
         state.archiveUnclassified = Number(data.unclassified_total) || 0;
+        // Pass rates for the verdict filters (B4). Rides on /api/stats rather
+        // than a chip-by-chip round trip, and refreshes exactly where it
+        // matters: app init and the end of a classify run both call this.
+        state.verdictFacets = data.verdict_facets || null;
         updateTrashButtonUi();
         updateClassifyAllButton();
+        renderVerdictPassRates();
     } catch (err) {
         console.error('Error fetching stats:', err);
     }
@@ -884,6 +894,20 @@ function classifySaturationWarning(topShare) {
         </div>`;
 }
 
+/**
+ * Is the tier distribution saturated?
+ *
+ * Prefer the server's answer: /api/insights runs the same B4 rule the pytest
+ * gate does, minimum-N and all, so the panel cannot contradict the check that
+ * fails the build. Falls back to the raw share for payloads from before the
+ * rule existed — the panel is also rendered directly from tests and tools.
+ */
+function classifySaturated(data, topShare) {
+    const guard = data && data.saturation;
+    if (guard && typeof guard.saturated === 'boolean') return guard.saturated;
+    return Number(topShare || 0) > TOP_TIER_SHARE_WARN;
+}
+
 /** Tier distribution as labelled bars — the guard metric, made legible. */
 function renderClassifyInsights(c) {
     const data = c || {};
@@ -898,7 +922,7 @@ function renderClassifyInsights(c) {
     const errors = Number(data.errors || 0);
     const cut = classifyRejectCut(data);
     const topShare = Number(data.top_tier_share || 0);
-    const saturated = topShare > TOP_TIER_SHARE_WARN;
+    const saturated = classifySaturated(data, topShare);
 
     return classifyMetrics(data, { classified, errors, cut, saturated })
         + (saturated ? classifySaturationWarning(topShare) : '')
@@ -4392,6 +4416,9 @@ function setupEventListeners() {
         elements.verdictFilterSelect.addEventListener('change', () => {
             state.browseVerdict = elements.verdictFilterSelect.value || '';
             elements.verdictFilterSelect.classList.toggle('is-active', Boolean(state.browseVerdict));
+            // The saturated styling follows the *selected* option, so it has
+            // to be repainted on every change, not only when stats land.
+            renderVerdictSelectPassRates();
             saveViewPrefs();
             fetchPhotos();
         });
@@ -6834,6 +6861,86 @@ function setVerdictFilter(verdict) {
     fetchPhotos();
 }
 
+/**
+ * B4 — every verdict filter advertises the share of the archive it selects.
+ *
+ * The pass rate is the one number that would have caught the previous
+ * classifier: 85% of the archive on one tier, the Sexy filter admitting ~92%,
+ * three prompt versions shipped before anyone noticed. It was computable the
+ * whole time; it just never appeared anywhere the user was looking. So it goes
+ * on the chips themselves, not only in the insights panel.
+ *
+ * Archive-wide, from /api/stats — never the scoped sidebar sum. "Does this
+ * filter still discriminate" is a property of the classifier over everything
+ * it has judged; a number that moved as you clicked between creators could not
+ * be compared against the guard limit at all.
+ */
+function verdictPassRate(key) {
+    const shares = state.verdictFacets && state.verdictFacets.shares;
+    const share = shares ? Number(shares[key]) : NaN;
+    return Number.isFinite(share) ? share : null;
+}
+
+/** The single saturation limit, served rather than hardcoded here, so the
+ *  badge, the insights panel and the pytest gate cannot drift apart. */
+function saturationLimit() {
+    const limit = Number(state.verdictFacets && state.verdictFacets.warn_above);
+    return Number.isFinite(limit) && limit > 0 ? limit : TOP_TIER_SHARE_WARN;
+}
+
+function passRateTitle(share) {
+    const pct = (share * 100).toFixed(1);
+    const cap = Math.round(saturationLimit() * 100);
+    return share > saturationLimit()
+        ? `Selects ${pct}% of the archive — past the ${cap}% guard, so this filter`
+          + ' is close to a no-op. Re-check the prompt or the reject cut.'
+        : `Selects ${pct}% of the archive (guard: ${cap}%)`;
+}
+
+/** Paint every pass-rate badge. textContent only — the rule is the rule even
+ *  when the value is a number we computed ourselves. */
+function renderVerdictPassRates() {
+    const limit = saturationLimit();
+    document.querySelectorAll('.review-chip-share').forEach((el) => {
+        const share = verdictPassRate(el.dataset.share);
+        const chip = el.closest('.review-chip');
+        if (share === null) {
+            el.hidden = true;
+            el.textContent = '';
+            if (chip) chip.classList.remove('is-saturated');
+            return;
+        }
+        el.hidden = false;
+        el.textContent = `${Math.round(share * 100)}%`;
+        el.title = passRateTitle(share);
+        el.classList.toggle('is-saturated', share > limit);
+        if (chip) chip.classList.toggle('is-saturated', share > limit);
+    });
+    renderVerdictSelectPassRates();
+}
+
+/**
+ * The browse dropdown carries the same number. Review mode is a deliberate
+ * detour, and a guard that only shows up once you have gone looking is the
+ * insights panel all over again.
+ */
+function renderVerdictSelectPassRates() {
+    const sel = elements.verdictFilterSelect;
+    if (!sel) return;
+    let activeSaturated = false;
+    Array.from(sel.options).forEach((opt) => {
+        if (!opt.dataset.baseLabel) opt.dataset.baseLabel = opt.textContent;
+        const share = opt.value ? verdictPassRate(opt.value) : null;
+        opt.textContent = share === null
+            ? opt.dataset.baseLabel
+            : `${opt.dataset.baseLabel} · ${Math.round(share * 100)}%`;
+        if (share !== null && share > saturationLimit() && opt.value === sel.value) {
+            activeSaturated = true;
+        }
+    });
+    sel.classList.toggle('is-saturated', activeSaturated);
+}
+
 function updateReviewBar() {
     if (!elements.reviewBar) return;
     const on = Boolean(state.reviewMode);
@@ -6872,6 +6979,10 @@ function updateReviewBar() {
             const n = chip.querySelector('.review-chip-n');
             if (n) n.textContent = String(counts[key] ?? 0);
         });
+        // The count is scoped to what you are reviewing; the badge beside it
+        // is the archive-wide pass rate. Different questions, so they are
+        // rendered by different code and the tooltip says which is which.
+        renderVerdictPassRates();
     }
 
     const selected = state.selectedPaths.size;

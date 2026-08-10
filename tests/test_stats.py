@@ -6,6 +6,7 @@ the archive and load the entire prompt cache; it now reads the indexed
 from the exact one.
 """
 
+from promptstudio.config import DISTRIBUTION_MAX_SHARE
 from promptstudio.prompts.batch import count_prompts_ready
 from promptstudio.prompts.cache import PromptCache
 from promptstudio.prompts.engine import ENGINE_ID
@@ -147,3 +148,102 @@ def test_an_errored_verdict_still_counts_as_classified(store, make_photo):
     rel, _ = make_photo(name="boom.jpg")
     ArchiveIndex.get().set_verdict(rel, creator="test_creator", tier=-1, error="timeout")
     assert store.stats()["unclassified_total"] == 0
+
+
+# ── B4 pass-rate facets ──────────────────────────────────────────────
+#
+# Every verdict filter advertises the share of the archive it selects, so a
+# filter that has quietly become a no-op says so where the user is standing
+# rather than in a panel they stopped opening. One grouped pass serves all of
+# them: five chips in the review strip plus seven options in the browse
+# dropdown is twelve round trips otherwise, on a route that runs at app init.
+
+
+def _seed_tiers(make_photo, tiers, creator="tester"):
+    """One photo per entry; None means "never classified"."""
+    index = ArchiveIndex.get()
+    for i, tier in enumerate(tiers):
+        rel, _ = make_photo(creator=creator, name=f"m_{i:03d}.jpg")
+        if tier is not None:
+            index.set_verdict(rel, creator=creator, tier=tier)
+    return index
+
+
+def test_verdict_facet_counts_match_the_filter_each_one_labels(make_photo):
+    """The badge and the page it describes must come from the same predicate.
+
+    A facet computed its own way is worse than no facet: it would report a
+    pass rate for a filter nobody is running.
+    """
+    index = _seed_tiers(make_photo, [0, 0, 1, 2, 3, 4, -1, None, None])
+    facets = index.verdict_facet_counts()
+
+    assert facets["total"] == 9
+    for name, count in facets["counts"].items():
+        _rows, total = index.query_photos(verdict=name)
+        assert total == count, f"{name}: facet {count} vs filter {total}"
+
+
+def test_verdict_facet_shares_are_that_count_over_the_whole_archive(make_photo):
+    index = _seed_tiers(make_photo, [0, 0, 1, 2])
+    facets = index.verdict_facet_counts()
+
+    assert facets["counts"]["reject"] == 3  # tiers 0, 0, 1 against cut=1
+    assert facets["shares"]["reject"] == 0.75
+    assert facets["shares"]["keep"] == 0.25
+    assert facets["shares"]["unclassified"] == 0.0
+    assert facets["warn_above"] == DISTRIBUTION_MAX_SHARE
+
+
+def test_verdict_facet_shares_are_none_on_an_empty_archive():
+    """Nothing measured yet is not the same answer as measured at zero."""
+    facets = ArchiveIndex.get().verdict_facet_counts()
+    assert facets["total"] == 0
+    assert all(share is None for share in facets["shares"].values())
+
+
+def test_verdict_facets_are_one_query_not_one_per_chip(make_photo):
+    index = _seed_tiers(make_photo, [0, 1, 2, 3])
+    statements = []
+    index._conn.set_trace_callback(statements.append)
+    try:
+        index.verdict_facet_counts()
+    finally:
+        index._conn.set_trace_callback(None)
+
+    selects = [s for s in statements if s.strip().upper().startswith("SELECT")]
+    assert len(selects) == 1, statements
+
+
+def test_verdict_facets_ignore_the_source_filter(make_photo):
+    """Archive-wide on purpose, like `unclassified_total` above it.
+
+    Saturation is a property of the classifier over everything it has judged.
+    A share that moved as the user clicked between platforms could not be
+    compared against the 60% rule at all.
+    """
+    index = ArchiveIndex.get()
+    rel_ig, _ = make_photo(creator="mixed", name="ig.jpg")
+    rel_x, _ = make_photo(creator="mixed", name="x.jpg")
+    index.upsert_photo(rel_ig, source="instagram")
+    index.upsert_photo(rel_x, source="x")
+    index.set_verdict(rel_ig, creator="mixed", tier=4)
+    index.set_verdict(rel_x, creator="mixed", tier=0)
+
+    facets = index.verdict_facet_counts()
+    assert facets["total"] == 2
+    assert facets["counts"]["keep"] == 1
+    assert facets["counts"]["reject"] == 1
+
+
+def test_stats_route_carries_the_verdict_facets(api, make_photo):
+    _seed_tiers(make_photo, [0, 0, 0, 1])
+    status, payload = api("GET", "/api/stats")
+
+    assert status == 200
+    facets = payload["verdict_facets"]
+    assert facets["total"] == 4
+    assert facets["counts"]["reject"] == 4
+    assert facets["shares"]["reject"] == 1.0
+    assert facets["shares"]["unusable"] == 0.75
+    assert facets["warn_above"] == DISTRIBUTION_MAX_SHARE

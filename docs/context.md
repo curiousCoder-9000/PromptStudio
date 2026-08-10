@@ -105,6 +105,8 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
   # storage:            test_atomic_write, test_prompt_store, test_trash, test_dedupe,
   #                     test_sort_newest, test_index_sidecar_reads, test_journal, test_stats
   # jobs / runtime:     test_job_leases, test_batch_job, test_logging_and_errors, test_insights
+  # quality gates:      test_distribution_guard (B4/E5a — reads the REAL archive,
+  #                     skips under DISTRIBUTION_MIN_*; fails a local run on saturation)
   # scraping:           test_filters, test_sources, test_source_dispatch,
   #                     test_source_identity, test_scrape_options
   # comfy:              test_comfy_seed
@@ -179,6 +181,8 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
 | `CLASSIFY_REJECT_MAX_TIER` | `1` | Tiers `0..N` are rejects. Only the tier is stored, so changing this re-thresholds the archive with no re-classify |
 | `CLASSIFY_REEL_SHEET` | `1` | Score reels from a whole-timeline contact sheet (`0` = ranked frames) |
 | `CLASSIFY_*` | see `.env.example` | Vision request shape, reel contact sheet, frame ranking, retries |
+| `DISTRIBUTION_MAX_SHARE` | `0.6` | **B4 platform rule.** One bucket over this share makes every filter on it a no-op. Read by the pass-rate badges, `/api/insights` and the `tests/test_distribution_guard.py` gate — one number, three readers |
+| `DISTRIBUTION_MIN_CLASSIFIED` · `DISTRIBUTION_MIN_RATED` | `100` · `30` | Below these the guard says "not measured" instead of judging — what keeps it inert in CI and on a fresh checkout |
 | `PROMPTSTUDIO_TRASH` | `1` | Soft delete to `_trash/` (`0` = immediate unlink) |
 | `PROMPTSTUDIO_TRASH_DAYS` | `30` | Retention window for `purge expired` |
 | `INSTAGRAM_SESSION_USER` | _(empty)_ | Instaloader session name — set in `.env` |

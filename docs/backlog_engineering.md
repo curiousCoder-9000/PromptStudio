@@ -5,7 +5,7 @@
 | **Date** | 2026-08-09 |
 | **Source** | [`review_ui_product.md`](review_ui_product.md) §3 |
 | **Relationship to S1–S8** | [`review_backend_architecture.md`](review_backend_architecture.md) owns the Python side (durability, storage, leases, logging). These are the items it does not cover — frontend runtime, the UI-side monolith, and gaps in the verification net. |
-| **Status** | E1 done (Stage 1). E5b done (Stage 2). E2, E3, E4, E5a Todo. |
+| **Status** | E1 done (Stage 1). E5b done (Stage 2). E5a done (Phase 14, with B4). E2, E3, E4 Todo. |
 
 ---
 
@@ -113,19 +113,51 @@ the model's own least-certain calls are the first thing reviewed.
 CI on two Python versions. `pytest` is 556 green. That is genuinely above the bar for a
 personal project.
 
-### E5a — Nothing fails when the distribution saturates
+### E5a — Nothing fails when the distribution saturates ✅ done
 
-`top_tier_share` is computed per run (journal), archive-wide (`/api/insights`), and — since
-Stage 1 — rendered with a warning above 0.6. But it is **advisory**. `product_review.md` B4
-makes "CI fails if any single bucket exceeds 60% of outputs" standing policy from Phase 14,
-and it is still Todo.
+**Was.** `top_tier_share` was computed per run (journal), archive-wide (`/api/insights`),
+and — since Stage 1 — rendered with a warning above 0.6. All **advisory**. The previous
+classifier reached 85% on one tier with nothing to notice, and a warning banner is strictly
+better than nothing and strictly worse than a failing check, because the person who needs to
+see it is the person who stopped opening the panel.
 
-The previous classifier reached 85% on one tier with nothing to notice. A warning banner is
-strictly better than nothing and strictly worse than a failing check, because the person who
-needs to see it is the person who stopped opening the panel.
+**Now.** `tests/test_distribution_guard.py` fails a local `pytest` run when any single bucket
+holds more than `DISTRIBUTION_MAX_SHARE` (0.6) of the population. Shipped with B4, as the
+sequence table said, so the rule exists once:
 
-**Proposal.** A test that reads the archive-wide histogram and fails above the threshold,
-skipped when fewer than N items are classified. Runs locally, not in CI (CI has no archive).
+- **One rule, three readers.** `insights.saturation_report(counts, what=, min_n=)` takes any
+  bucket→count mapping and answers "is one value eating this distribution", with a message
+  that names the bucket, its share and the denominator. `/api/insights` attaches it to
+  `classify` and `generations`; the pass-rate badges read the same `DISTRIBUTION_MAX_SHARE`
+  off `/api/stats`; the gate calls it directly. Nobody re-implements 0.6.
+- **A platform rule, not a classifier one-off.** Generation ratings get the same gate. Its
+  denominator is `keep_rate`'s own — rated outputs only. A bucket for "not rated yet" would
+  fire on every archive nobody has judged, and a guard with a standing false alarm is a
+  guard that gets switched off. Same reason tier -1 (a failed vision call) is excluded from
+  the classifier's denominator: a broken Ollama must not be able to hide a flat classifier.
+- **The caller owns the denominator** — that is the whole interface. Everything else about
+  the rule is generic, so the next scoring feature gets its gate in three lines.
+- **Inert by default.** `pytest.skip` below `DISTRIBUTION_MIN_CLASSIFIED` (100) and
+  `DISTRIBUTION_MIN_RATED` (30). 100 because a classify run walks the archive
+  creator-by-creator, so its first slice is one or two creators, and a single creator's
+  style can saturate a tier without the classifier being wrong; 100 spans several and puts
+  the 60% line ±10 points outside noise rather than ±25. 30 for ratings because those are
+  entered by hand one keypress at a time and the same bar would keep that half inert for
+  months. CI has no archive, so both skip there.
+- **It reads the real archive**, not the pytest temp one — saturation is a property of the
+  data, so a fixture-only gate would prove nothing. `conftest` stashes the developer's path
+  in `PROMPTSTUDIO_GUARD_ARCHIVE` before it points everything else at the temp dir, and the
+  gate opens that DB `mode=ro`: `ArchiveIndex`'s constructor creates tables and runs
+  migrations, and a test must not be able to write to the archive it is auditing.
+- **Proven to bite.** A guard that can only pass is not a guard. The suite runs the gate body
+  over a saturated fixture and requires it to raise naming the bucket, end-to-end through
+  `tier_histogram()` and `generation_rating_summary()`, and pins its read-only SQL against
+  those same aggregates so the two definitions cannot drift. Verified against a purpose-built
+  archive: `classified tier: tier 3 holds 91.7% of 120 — over the 60% limit …`.
+
+**Still open (small).** `classify_job.py` computes its own per-run `top_tier_share` for the
+live chip. That one is a running counter over an incomplete run, not a verdict, so it was
+left alone — but it is a third place with the same arithmetic.
 
 ### E5b — No performance regression test ✅ done
 
@@ -154,5 +186,5 @@ are noise. That matches how the existing measurements in
 | 1 | **E4** confidence-first review | Hours. Sorting the reject pile by ascending confidence needs no new data. |
 | 2 | **E5b** benchmark script | Needed *before* F1 lands, so the caption change has a baseline to be measured against. |
 | 3 | **E3** reject-cut control | Small, and it completes the workflow the classifier was designed around. |
-| 4 | **E5a** saturation gate | Do it with, or just after, B4 in Phase 14 rather than twice. |
+| — | **E5a** saturation gate | ✅ Done in Phase 14, shipped with B4 as planned. |
 | 5 | **E2** `app.js` ownership | Continuous, inside feature PRs — same terms as S7. |

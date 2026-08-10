@@ -219,13 +219,36 @@ Keyboard-driven contact sheet; ~20 minutes for 300 items. Labels land in a `labe
 - **Seed from signals that already exist:** `photos.favorite` as positives, `_trash/` as negatives.
 - **Touches:** new `labels` table, `GET/POST /api/labels`, a dedicated labeling view.
 
-#### B4 — Distribution guard as a platform rule (S)
+#### B4 — Distribution guard as a platform rule (S) ✅ shipped (Phase 14)
 
 Every score or filter surfaces its pass rate in the UI, and CI fails if any single bucket exceeds
 60% of outputs.
 
 - **Why:** prevents P3 from recurring on the next classifier version.
 - **Touches:** assertion in the eval harness; a pass-rate badge next to each filter chip.
+
+**As built.** Both halves landed together with [E5a](backlog_engineering.md#e5a--nothing-fails-when-the-distribution-saturates);
+three deviations from the sketch above, each deliberate:
+
+- **The badge is archive-wide, not view-scoped.** `ArchiveIndex.verdict_facet_counts()` answers
+  every chip in one grouped query, off the same `_verdict_predicate` that `/api/photos?verdict=`
+  filters with, and rides on `/api/stats` (already fetched at init and at the end of a classify
+  run) rather than a round trip per chip. Scoping it to the selected creator would have made a
+  number that moves as you click — uncomparable against a fixed 60% line. Both the review chips
+  and the browse dropdown carry it, because review mode is opt-in and a guard you have to go
+  looking for is the insights panel again. Cost, measured per AGENTS.md rule 13: **12.6 ms**
+  at 20k photos / 16k verdicts, taking `/api/stats` from ~15 ms to ~28 ms — six
+  `SUM(CASE …)` over one join scan, where a COUNT per chip would pay that scan six times.
+- **"CI fails" is really "the local run fails."** CI has no archive, so the gate lives in
+  `tests/test_distribution_guard.py`, reads the developer's real archive read-only, and skips
+  below a minimum N. This is the same call E5b made about benchmarks: a check that can only be
+  meaningful where the data is.
+- **It is genuinely a platform rule now.** The same `insights.saturation_report()` gates
+  generation ratings against `keep_rate`'s own denominator (rated outputs only). The next score
+  or filter wires in by handing it a bucket→count mapping and a minimum N.
+
+The one thing this does *not* do is make the tier distribution itself better — it makes a flat one
+impossible to ship unnoticed, which is what P3 was actually about.
 
 ### Theme C — Navigate at scale
 
@@ -341,7 +364,9 @@ and is standing policy from that point on.
 
 **Continuous**
 
-- **B4** distribution guards on every new scoring or filtering feature.
+- **B4** distribution guards on every new scoring or filtering feature. Standing policy since
+  Phase 14: hand the new distribution to `insights.saturation_report()` and add a case to
+  `tests/test_distribution_guard.py`. Both are three lines; the rule already exists.
 - Backend review **S7** (router refactor) incrementally, inside feature PRs — never as a standalone
   project. `app.js` at 5,074 lines needs the same treatment on the same terms.
 
