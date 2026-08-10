@@ -816,6 +816,76 @@ class ArchiveIndex:
             self._conn.commit()
             return str(row["rel_path"])
 
+    # Tables the E1 bundle may round-trip. A whitelist, not a free-form table
+    # name: the value reaches an unparameterisable position in the SQL, and
+    # `photos` is deliberately absent — it is rebuilt from the media on disk,
+    # so restoring it would resurrect rows for files that are not there.
+    EXPORTABLE_TABLES = ("prompts", "media_verdicts", "phashes", "generations")
+
+    def dump_table(self, table: str) -> List[Dict[str, Any]]:
+        """Every row of one derived table, as plain dicts."""
+        if table not in self.EXPORTABLE_TABLES:
+            raise ValueError(f"table {table!r} is not exportable")
+        with self._lock:
+            rows = self._conn.execute(f"SELECT * FROM {table}").fetchall()
+        # `id` is a local autoincrement with no meaning on another machine, and
+        # carrying it would collide on import into a non-empty table.
+        return [{k: v for k, v in dict(r).items() if k != "id"} for r in rows]
+
+    def load_table(self, table: str, rows: Sequence[Dict[str, Any]]) -> int:
+        """Upsert rows into one derived table. Returns the number applied.
+
+        Idempotent by construction — every exportable table has a natural key
+        (`rel_path`, or `gen_id` for generations), so a re-run of a half-finished
+        restore overwrites rather than duplicating.
+        """
+        if table not in self.EXPORTABLE_TABLES:
+            raise ValueError(f"table {table!r} is not exportable")
+        if not rows:
+            return 0
+        applied = 0
+        with self._lock:
+            existing = {
+                r[1] for r in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            for row in rows:
+                # Ignore columns this build does not have: an older archive
+                # importing a newer bundle should restore what it understands
+                # rather than failing outright on one unknown field.
+                cols = [c for c in row if c in existing]
+                if not cols:
+                    continue
+                placeholders = ",".join("?" for _ in cols)
+                self._conn.execute(
+                    f"INSERT OR REPLACE INTO {table}({','.join(cols)}) "
+                    f"VALUES ({placeholders})",
+                    [row[c] for c in cols],
+                )
+                applied += 1
+            self._conn.commit()
+        if table == "prompts":
+            self.reindex_all_prompts()
+        return applied
+
+    def reindex_all_prompts(self) -> None:
+        """Re-derive the photos.has_prompt / prompt_search columns and the FTS
+        mirror after a bulk prompt write.
+
+        `load_table` bypasses `prompt_set`, which is what normally keeps those
+        in step — without this a restored archive looks like it has no prompts.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT rel_path, payload FROM prompts"
+            ).fetchall()
+            for row in rows:
+                try:
+                    entry = json.loads(row["payload"])
+                except (ValueError, TypeError):
+                    continue
+                self._reindex_prompt(str(row["rel_path"]), entry)
+            self._conn.commit()
+
     def generation_facets(self) -> Dict[str, List[str]]:
         """Distinct workflows / checkpoints / creators present, for filter UI.
 

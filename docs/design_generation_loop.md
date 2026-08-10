@@ -2,7 +2,7 @@
 
 | Field | Value |
 |-------|--------|
-| **Status** | Draft — accepted for implementation as roadmap **Phase 13–14** |
+| **Status** | **A0 · A1 · A3 shipped** (roadmap Phase 13, closed). A2 · A4 remain, as Phase 14. |
 | **Date** | 2026-08-09 |
 | **Problem** | The product acquires 4,400 images and can render them one at a time, through a lightbox, with one hardcoded workflow, into a directory nobody can browse. The user's verdict on the output is never captured. |
 | **Source** | [`product_review.md`](product_review.md) Theme A · [`roadmap.md`](roadmap.md) Phases 13–14 |
@@ -497,6 +497,20 @@ routes returned **500**, not 404 — `super().do_POST()` and `super().do_DELETE(
 exist on `SimpleHTTPRequestHandler`, so the `AttributeError` hit the error boundary and a
 mistyped URL was reported as a server fault. GET and PUT already answered 404. Fixed with
 a test across all four verbs, because adding a DELETE branch is what surfaced it.
+
+**Four defects an audit of the first cut found**, all silent rather than loud, and all
+from the outputs view and review mode not knowing about each other:
+
+| Was | Why it mattered |
+|-----|-----------------|
+| `body.review-mode .view-controls { display: none }` also hid the **outputs** filter bar | The rule is F5's, scoped to the photo gallery; the outputs header reuses `.view-controls`, so entering Outputs from review mode blanked the sort and filters with no explanation |
+| Entering review mode from Outputs left it with no surface | The classify toast can fire while browsing generations. `state.reviewMode` went true, the review strip stayed off-screen behind the hidden photo gallery |
+| Reopening Outputs never refetched | `if (on && !state.outputs.length)`. The gesture this view exists for is "generate, then go look" — the grid would be missing exactly the output you came to see, while the keep-rate badge beside it refreshed anyway |
+| Delete did not decrement `outputsOffset` | Offset counts rows consumed from the server, so after a delete the next page started one row late and skipped a generation. `removePhotosFromView` already did this correctly for photos |
+
+Fixed structurally rather than with CSS overrides: the two views are now mutually
+exclusive, each leaving the other on entry. All four are regression checks in
+`tests/ui/test_outputs_gallery.js` (35 checks).
 
 ### A2 — Batch generate *(after S6)*
 

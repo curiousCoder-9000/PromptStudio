@@ -406,7 +406,7 @@ contention. Detail in [design_scrape_lanes.md](design_scrape_lanes.md) §12.
 
 ---
 
-## Phase 13 — Instrument, then close the loop 🔜
+## Phase 13 — Instrument, then close the loop ✅
 
 **Goal:** measure whether the pipeline works, stop losing what it produces, and
 let the user see and judge output for the first time.
@@ -422,7 +422,7 @@ Theme A items are specified in
 | **Atomic JSON writes everywhere** — `storage/atomic.py`, applied to all ten writers | S1 | **Done** |
 | **Top-level error boundary** — unhandled route errors return JSON 500 instead of dropping the connection | S2 | **Done** |
 | **`logging` + rotating file handler** — 34 `print()` converted; `except: pass` sweep still open | S3 | **Done** |
-| `export --derived` / import — prompts, favorites, styles, generation index | E1 | Todo |
+| `export --derived` / import — prompts, favorites, styles, verdicts, phashes, generations | E1 | **Done** |
 | Rate generations (keep / discard / ⭐) — `PUT /api/generation/rate`, `keep_rate` on `/api/insights` | A3 | **Done** |
 | Outputs gallery — `GET /api/generations/list`, filter by creator/date/checkpoint/rating, full provenance | A1 | **Done** |
 
@@ -443,6 +443,33 @@ source. Full evidence in
 
 **A3 before A1**, so the outputs gallery ships with ranking rather than gaining
 it later.
+
+**What A0 turned out to be worth.** The seed defect was the headline, but three
+more fell out of the same 60 lines once something read them: output filenames
+used a *second*-resolution stamp, so two generations of one photo inside a
+second silently overwrote each other on disk; `GET /api/generations` had to move
+onto the table because the JSON index has no rating column, so a rated output
+reopened blank; and unknown `POST`/`DELETE` routes answered **500** rather than
+404, because `super().do_POST()` does not exist on `SimpleHTTPRequestHandler`.
+None appear in the design.
+
+**E1 diverged from its own spec, because the spec predates two decisions.**
+`product_review.md` E1 lists "glam scores" (the whole subsystem was removed in
+`1cc0f44`) and "labels" (B3, Phase 15, not built). What ships covers what exists
+and is expensive: prompts, favourites, styles, **verdicts**, phashes and
+generations. Verdicts are the addition that matters — Phase 12c made them the
+second GPU-hours-expensive thing in the archive, and E1 was written before it.
+`photos` is deliberately **not** exportable: it is an index *of* the media and
+`rebuild()` re-derives it, so restoring it would resurrect rows for files that
+are not on disk.
+
+**Not met, and recorded rather than glossed:** the second half of A1's gate,
+"regenerate-same-seed produces a byte-identical image", needs a running ComfyUI
+and a pinned checkpoint. The wiring is tested; the image equality is not.
+
+The B4 pass-rate gate and E5a's saturation check remain Todo in Phase 14 and
+[backlog_engineering.md](backlog_engineering.md) — `keep_rate` now exists for
+them to gate on, which it did not before.
 
 ---
 

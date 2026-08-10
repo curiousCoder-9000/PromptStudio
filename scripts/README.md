@@ -46,6 +46,29 @@ py scripts/find_duplicates.py --distance 4      # near-identical only
 py scripts/find_duplicates.py --json dupes.json
 ```
 
+## Back up derived state
+
+Everything the archive cannot re-download — prompts and verdicts that cost GPU
+hours, favourites and generation ratings that are your own judgement, styles,
+phashes, and the generation index with its seeds. Media is **not** included:
+it is the one thing that can be fetched again.
+
+```powershell
+py scripts/export_derived.py                     # -> derived_state.json.gz
+py scripts/export_derived.py backup.json         # uncompressed
+py scripts/export_derived.py --kinds prompts,verdicts
+
+py scripts/export_derived.py --import backup.json.gz
+py scripts/export_derived.py --import backup.json.gz --dry-run
+py scripts/export_derived.py --import backup.json.gz --kinds prompts
+```
+
+Import merges and is safe to re-run: every kind has a natural key, so a
+half-finished restore overwrites row-for-row rather than duplicating, and
+importing onto a live archive will not un-favourite anything starred since the
+export. `--kinds prompts` is the "a re-run invalidated a prompt version and I
+want the old one back" case.
+
 ## Web UI
 
 ```powershell

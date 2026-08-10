@@ -200,6 +200,110 @@ const { Session, Report, sleep } = require('./cdp');
   r.check('"Rated (any)" maps to rated_only, not a rating value',
     /rated_only=1/.test(ratedOnly) && !/rating=/.test(ratedOnly), ratedOnly);
 
+  // ── review mode is mutually exclusive with this view ───────────────
+  //
+  // Four defects found by an audit probe after the first cut of A1, all from
+  // the two modes not knowing about each other. Kept as regressions because
+  // each one is invisible rather than loud.
+  r.section('review mode interaction');
+
+  const enteringOutputs = await s.eval(`
+    exitReviewMode();
+    if (state.outputsView) document.getElementById('outputsBtn').click();
+    await new Promise((res) => setTimeout(res, 300));
+    enterReviewMode(null, 'reject');
+    await new Promise((res) => setTimeout(res, 300));
+    document.getElementById('outputsBtn').click();
+    await new Promise((res) => setTimeout(res, 700));
+    const controls = document.getElementById('outputsView').querySelector('.view-controls');
+    return {
+      reviewMode: state.reviewMode,
+      controls: getComputedStyle(controls).display,
+      sortHasBox: elements.outputsSort.offsetParent !== null,
+    };
+  `);
+  r.check('opening Outputs leaves review mode', enteringOutputs.reviewMode === false);
+  r.check('so the outputs filter bar is not blanked by body.review-mode',
+    enteringOutputs.controls !== 'none', enteringOutputs.controls);
+  r.check('and the sort dropdown has a layout box', enteringOutputs.sortHasBox === true);
+
+  const enteringReview = await s.eval(`
+    if (!state.outputsView) document.getElementById('outputsBtn').click();
+    await new Promise((res) => setTimeout(res, 400));
+    // The classify toast firing while the user browses Outputs.
+    enterReviewMode(null, 'reject');
+    await new Promise((res) => setTimeout(res, 500));
+    return {
+      outputsView: state.outputsView,
+      photoGallery: getComputedStyle(
+        document.querySelector('.gallery-container:not(.outputs-container)')).display,
+      reviewBarOnScreen: document.getElementById('reviewBar').offsetParent !== null,
+    };
+  `);
+  r.check('entering review mode leaves the outputs view',
+    enteringReview.outputsView === false);
+  r.check('so the photo gallery is back on screen',
+    enteringReview.photoGallery !== 'none', enteringReview.photoGallery);
+  r.check('and review mode actually has a surface',
+    enteringReview.reviewBarOnScreen === true);
+
+  // ── freshness and paging ───────────────────────────────────────────
+  r.section('freshness + paging');
+
+  const refetched = await s.eval(`
+    exitReviewMode();
+    if (!state.outputsView) document.getElementById('outputsBtn').click();
+    await new Promise((res) => setTimeout(res, 600));
+    const seen = [];
+    const realFetch = window.fetch;
+    window.fetch = (url, opts) => { seen.push(String(url)); return realFetch(url, opts); };
+    try {
+      document.getElementById('outputsBtn').click();   // leave
+      await new Promise((res) => setTimeout(res, 250));
+      document.getElementById('outputsBtn').click();   // come back
+      await new Promise((res) => setTimeout(res, 800));
+    } finally {
+      window.fetch = realFetch;
+    }
+    return seen.filter((u) => u.includes('/api/generations/list')).length;
+  `);
+  r.check('reopening Outputs refetches the grid, not just the badge',
+    refetched >= 1, `${refetched} list calls`);
+
+  const offsetAfterDelete = await s.eval(`
+    state.outputs = [
+      { gen_id: 'a', creator: 'n', workflow: 'pro', rating: 0, seed: 1, seed_recorded: true,
+        url: '/media/a.png', thumb_url: '/media/thumb/a.png', source_rel: 'n/p.jpg',
+        positive_prompt: '', negative_prompt: '', steps: 1, cfg: 1, denoise: null,
+        mode_e: false, prompt_version: null, created_at: '2026-08-10' },
+      { gen_id: 'b', creator: 'n', workflow: 'pro', rating: 0, seed: 2, seed_recorded: true,
+        url: '/media/b.png', thumb_url: '/media/thumb/b.png', source_rel: 'n/p.jpg',
+        positive_prompt: '', negative_prompt: '', steps: 1, cfg: 1, denoise: null,
+        mode_e: false, prompt_version: null, created_at: '2026-08-09' },
+    ];
+    state.outputsOffset = 2;
+    state.outputsTotal = 2;
+    renderOutputs({ append: false });
+    state.outputDetail = state.outputs[0];
+    // 'a' is not a real row, so DELETE answers 404 and the catch runs — assert
+    // on the success path by driving the same mutations with a stubbed fetch.
+    const realFetch = window.fetch;
+    window.fetch = async () => ({ ok: true, status: 200, json: async () => ({}) });
+    const realConfirm = window.confirm;
+    window.confirm = () => true;
+    try {
+      await deleteOutput();
+      await new Promise((res) => setTimeout(res, 200));
+    } finally {
+      window.fetch = realFetch;
+      window.confirm = realConfirm;
+    }
+    return { offset: state.outputsOffset, loaded: state.outputs.length };
+  `);
+  r.check('deleting an output keeps offset equal to the rows still loaded',
+    offsetAfterDelete.offset === offsetAfterDelete.loaded,
+    `offset=${offsetAfterDelete.offset} loaded=${offsetAfterDelete.loaded}`);
+
   await sleep(200);
   r.finish(s) || process.exit(1);
   process.exit(0);

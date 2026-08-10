@@ -2625,13 +2625,25 @@ function attachOutputsSentinel() {
 }
 
 function showOutputsView(on) {
+    // Outputs and review mode are mutually exclusive: review mode's strip and
+    // its `body.review-mode` rules belong to the photo gallery, which is
+    // hidden here. Leaving both on gives review mode no surface and blanks the
+    // outputs filter bar, since both use `.view-controls`.
+    if (on && state.reviewMode) exitReviewMode();
     state.outputsView = on;
     const gallery = document.querySelector('.gallery-container:not(.outputs-container)');
     if (gallery) gallery.style.display = on ? 'none' : 'flex';
     if (elements.outputsView) elements.outputsView.style.display = on ? 'flex' : 'none';
     if (elements.outputsBtn) elements.outputsBtn.classList.toggle('active', on);
-    if (on && !state.outputs.length) fetchOutputs();
-    if (on) refreshOutputsKeepRate();
+    if (on) {
+        // Always refetch on open, not only when empty. The gesture this view
+        // exists for is "generate something, then go look at it" — a cached
+        // grid would be missing exactly the output you came to see, and the
+        // keep-rate badge beside it refreshes regardless, so a stale grid next
+        // to a fresh number is worse than both being stale.
+        fetchOutputs();
+        refreshOutputsKeepRate();
+    }
 }
 
 async function refreshOutputsKeepRate() {
@@ -2783,6 +2795,11 @@ async function deleteOutput() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         state.outputs = state.outputs.filter((g) => g.gen_id !== gen.gen_id);
         state.outputsTotal = Math.max(0, state.outputsTotal - 1);
+        // Offset tracks how many rows have been consumed from the server, so it
+        // has to come down with them — otherwise the next page starts one row
+        // late and silently skips a generation. Same rule as
+        // removePhotosFromView in the photo gallery.
+        state.outputsOffset = Math.max(0, state.outputsOffset - 1);
         // Optimistic removal, like the photo gallery: no full refetch, so the
         // scroll position and loaded pages survive.
         const card = elements.outputsGrid
@@ -6467,6 +6484,10 @@ async function cancelCreatorClassify() {
 // ── review mode ──────────────────────────────────────────────────────
 
 function enterReviewMode(creator, verdict = 'reject') {
+    // Review mode's surface is the photo gallery. Entered from the Outputs view
+    // — which the classify toast can do while the user is browsing generations
+    // — it would otherwise turn on with nothing on screen to review.
+    if (state.outputsView) showOutputsView(false);
     if (creator && creator !== state.selectedCreator) {
         state.selectedCreator = creator;
         state.creatorPanelOpen = true;
