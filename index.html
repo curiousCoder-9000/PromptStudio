@@ -266,6 +266,16 @@
                         <h2><i class="fa-solid fa-images"></i> Outputs</h2>
                         <span class="photo-badge" id="outputsCount">0 items</span>
                         <span class="photo-badge keep-rate" id="outputsKeepRate" title="Kept ÷ rated. Unrated outputs are not counted either way.">—</span>
+                        <!-- Shown only while a single batch is being viewed as a
+                             contact sheet. Without it an empty filtered grid is
+                             indistinguishable from "no outputs exist". -->
+                        <span class="photo-badge batch-badge" id="outputsBatchChip" style="display:none;">
+                            <i class="fa-solid fa-layer-group"></i>
+                            <span id="outputsBatchLabel"></span>
+                            <button type="button" class="badge-clear" id="outputsBatchClear" title="Show all outputs" aria-label="Clear batch filter">
+                                <i class="fa-solid fa-xmark"></i>
+                            </button>
+                        </span>
                     </div>
                     <div class="view-controls">
                         <label class="control-label" for="outputsSort">Sort</label>
@@ -362,6 +372,9 @@
         <div class="bulk-actions">
             <button class="btn btn-secondary" id="bulkReanalyzeBtn" type="button">
                 <i class="fa-solid fa-wand-magic-sparkles"></i> Re-analyze
+            </button>
+            <button class="btn btn-secondary" id="bulkGenerateBtn" type="button" title="Batch generate through ComfyUI">
+                <i class="fa-solid fa-palette"></i> Generate
             </button>
             <button class="btn btn-danger" id="bulkDeleteBtn" type="button">
                 <i class="fa-solid fa-trash-can"></i> Delete
@@ -962,6 +975,22 @@
             </div>
             <div class="scrape-job-chip-actions">
                 <button type="button" class="scrape-job-chip-btn" id="batchJobChipCancel" title="Stop after the current photo">Cancel</button>
+            </div>
+        </div>
+
+        <!-- Batch generate (A2). Same ids-by-convention shape, so
+             renderJobChip('generate', …) drives it with no new rendering code. -->
+        <div class="scrape-job-chip" id="generateJobChip" style="display:none;" role="status" aria-live="polite">
+            <div class="scrape-job-chip-main">
+                <i class="fa-solid fa-palette scrape-job-chip-icon spinning" id="generateJobChipIcon"></i>
+                <div class="scrape-job-chip-text">
+                    <div class="scrape-job-chip-title" id="generateJobChipTitle">Generating</div>
+                    <div class="scrape-job-chip-sub" id="generateJobChipSub"></div>
+                    <div class="job-chip-progress"><div class="job-chip-progress-fill" id="generateJobChipFill"></div></div>
+                </div>
+            </div>
+            <div class="scrape-job-chip-actions">
+                <button type="button" class="scrape-job-chip-btn" id="generateJobChipCancel" title="Stop now — the image in flight is interrupted">Cancel</button>
             </div>
         </div>
 

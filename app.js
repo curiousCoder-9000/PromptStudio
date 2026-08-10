@@ -35,6 +35,12 @@ const state = {
     outputsHasMore: false,
     outputsRequest: null,
     outputDetail: null,
+    // One batch, viewed as a contact sheet. Not a <select> like the other
+    // filters: batch ids are opaque hex, so the only sensible way in is the
+    // completion toast, and the only sensible way out is a clear button.
+    outputsBatch: null,
+    generatePollTimer: null,
+    generateWasRunning: false,
     promptDirty: false,
     lightboxIndex: -1,
     currentPromptData: null,
@@ -323,6 +329,16 @@ const elements = {
     outputsWorkflow: document.getElementById('outputsWorkflow'),
     outputsCheckpoint: document.getElementById('outputsCheckpoint'),
     outputsCreator: document.getElementById('outputsCreator'),
+    outputsBatchChip: document.getElementById('outputsBatchChip'),
+    outputsBatchLabel: document.getElementById('outputsBatchLabel'),
+    outputsBatchClear: document.getElementById('outputsBatchClear'),
+    generateJobChip: document.getElementById('generateJobChip'),
+    generateJobChipTitle: document.getElementById('generateJobChipTitle'),
+    generateJobChipSub: document.getElementById('generateJobChipSub'),
+    generateJobChipFill: document.getElementById('generateJobChipFill'),
+    generateJobChipIcon: document.getElementById('generateJobChipIcon'),
+    generateJobChipCancel: document.getElementById('generateJobChipCancel'),
+    bulkGenerateBtn: document.getElementById('bulkGenerateBtn'),
     outputDetailModal: document.getElementById('outputDetailModal'),
     outputDetailImage: document.getElementById('outputDetailImage'),
     outputDetailSource: document.getElementById('outputDetailSource'),
@@ -559,6 +575,7 @@ async function initApp() {
     // Resume job chips if work is mid-flight — jobs live on the server, so a
     // browser refresh must not orphan a running batch/scrape.
     pollBatchStatus();
+    pollGenerateStatus();
     pollClassifyStatus();
     // Restore scrape/sync chip after refresh (queue lives on the server)
     await hydrateScrapeUiFromServer();
@@ -2500,7 +2517,42 @@ function outputsFilters() {
     ]) {
         if (el && el.value) params.set(key, el.value);
     }
+    if (state.outputsBatch) params.set('batch_id', state.outputsBatch);
     return params;
+}
+
+/**
+ * Show one batch's outputs as a contact sheet.
+ *
+ * The endpoint has filtered on `batch_id` since A1; what was missing was any
+ * way to reach it. A completion toast that lands you in an unfiltered grid of
+ * every output ever made is not a result — you still have to go find the
+ * fifty images you just waited for.
+ */
+function openBatchContactSheet(batchId) {
+    if (!batchId) return;
+    state.outputsBatch = String(batchId);
+    renderOutputsBatchChip();
+    showOutputsView(true);
+}
+
+function clearOutputsBatch() {
+    state.outputsBatch = null;
+    renderOutputsBatchChip();
+    fetchOutputs();
+}
+
+function renderOutputsBatchChip() {
+    const chip = elements.outputsBatchChip;
+    if (!chip) return;
+    chip.style.display = state.outputsBatch ? '' : 'none';
+    if (elements.outputsBatchLabel) {
+        // textContent, not innerHTML: the id is server-generated hex today, but
+        // it arrives from a response body like everything else (rule 7).
+        elements.outputsBatchLabel.textContent = state.outputsBatch
+            ? `run ${state.outputsBatch}`
+            : '';
+    }
 }
 
 async function fetchOutputs({ append = false } = {}) {
@@ -4171,6 +4223,12 @@ function setupEventListeners() {
     if (elements.batchJobChipCancel) {
         elements.batchJobChipCancel.addEventListener('click', cancelBatchAnalyze);
     }
+    if (elements.generateJobChipCancel) {
+        elements.generateJobChipCancel.addEventListener('click', cancelBatchGenerate);
+    }
+    if (elements.outputsBatchClear) {
+        elements.outputsBatchClear.addEventListener('click', clearOutputsBatch);
+    }
     if (elements.favoritePhotoBtn) {
         elements.favoritePhotoBtn.addEventListener('click', toggleFavoriteCurrent);
     }
@@ -4242,6 +4300,9 @@ function setupEventListeners() {
     }
     if (elements.bulkDeleteBtn) {
         elements.bulkDeleteBtn.addEventListener('click', promptBulkDelete);
+    }
+    if (elements.bulkGenerateBtn) {
+        elements.bulkGenerateBtn.addEventListener('click', startBulkGenerate);
     }
     if (elements.bulkReanalyzeBtn) {
         elements.bulkReanalyzeBtn.addEventListener('click', startBulkReanalyze);
@@ -6096,6 +6157,139 @@ async function startBatchAnalyze() {
     } catch (err) {
         showToast('Batch analyze failed');
     }
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
+// A2 — batch generate.
+//
+// Deliberately a near-twin of the batch-analyze poller above rather than a
+// shared abstraction: the two jobs report different counters (skips, a batch
+// id) and end differently (this one leads somewhere), and the parts that are
+// genuinely identical are already factored out into renderJobChip.
+// ─────────────────────────────────────────────────────────────────────
+
+function generateChipSub(data) {
+    const done = (data.completed || 0) + (data.failed || 0);
+    const bits = [`${done}/${data.total} (${jobPct(done, data.total)}%)`];
+    if (data.failed) bits.push(`${data.failed} failed`);
+    // Skips are the number that makes an unexpectedly short run explicable, so
+    // they belong on the chip rather than only in the completion toast.
+    const skipped = (data.skipped_no_prompt || 0) + (data.skipped_video || 0);
+    if (skipped) bits.push(`${skipped} skipped`);
+    return bits.join(' · ');
+}
+
+async function pollGenerateStatus() {
+    try {
+        const res = await fetch('/api/comfy/batch/status');
+        const data = await res.json();
+        if (data.running) {
+            renderJobChip('generate', {
+                active: true,
+                title: data.cancel_requested ? 'Generating — stopping' : 'Generating',
+                sub: generateChipSub(data),
+                completed: (data.completed || 0) + (data.failed || 0),
+                total: data.total,
+                cancellable: true,
+                cancelled: Boolean(data.cancel_requested)
+            });
+            if (!state.generatePollTimer) {
+                state.generatePollTimer = setInterval(pollGenerateStatus, 4000);
+            }
+        } else {
+            if (state.generatePollTimer) {
+                clearInterval(state.generatePollTimer);
+                state.generatePollTimer = null;
+            }
+            renderJobChip('generate', { active: false });
+            // Only on a running → stopped transition this tab actually saw.
+            // Announcing on the first poll after a page load would re-toast a
+            // batch that finished yesterday.
+            if (state.generateWasRunning) {
+                announceGenerateFinished(data);
+                if (state.outputsView) fetchOutputs();
+            }
+        }
+        state.generateWasRunning = Boolean(data.running);
+    } catch (err) {
+        console.error('Batch generate status error:', err);
+    }
+}
+
+function announceGenerateFinished(data) {
+    const skipped = (data.skipped_no_prompt || 0) + (data.skipped_video || 0);
+    const parts = [`${data.completed || 0} generated`];
+    if (data.failed) parts.push(`${data.failed} failed`);
+    if (skipped) parts.push(`${skipped} skipped`);
+    if (data.cancelled && data.pending) parts.push(`${data.pending} not run`);
+    showToast({
+        title: data.cancelled ? 'Generate cancelled' : 'Generate complete',
+        body: parts.join(' · '),
+        variant: data.cancelled ? undefined : 'success',
+        // The whole point of a batch is that you were not watching it. Landing
+        // in an unfiltered grid of every output ever made would mean hunting
+        // for the run you just waited on.
+        actionLabel: data.batch_id ? 'View run' : null,
+        onAction: data.batch_id ? () => openBatchContactSheet(data.batch_id) : null,
+        // Longer than the default 3.5s: an action nobody is at the keyboard for
+        // is the same as no action.
+        duration: data.batch_id ? 15000 : undefined
+    });
+}
+
+async function cancelBatchGenerate() {
+    try {
+        const res = await fetch('/api/comfy/batch/cancel', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        showToast(
+            data.status === 'cancelling'
+                ? 'Stopping — the image in flight is being interrupted'
+                : 'No batch generate running'
+        );
+        pollGenerateStatus();
+    } catch (err) {
+        showToast('Cancel failed');
+    }
+}
+
+async function startBatchGenerate(body, { label = 'Generate' } = {}) {
+    try {
+        const res = await fetch('/api/comfy/batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.status === 'started') {
+            // Set before the first poll so the completion toast fires even for
+            // the first batch of the session.
+            state.generateWasRunning = true;
+            const skipped = (data.skipped_no_prompt || 0) + (data.skipped_video || 0);
+            showToast({
+                title: `${label} started`,
+                body: `${data.pending} queued`
+                    + (skipped ? ` · ${skipped} skipped (no prompt yet)` : '')
+                    + (data.capped ? ' · capped by COMFY_BATCH_MAX' : '')
+            });
+            pollGenerateStatus();
+        } else if (data.status === 'nothing_to_do') {
+            const skipped = data.skipped_no_prompt || 0;
+            showToast(skipped
+                ? `Nothing to generate — ${skipped} need analyzing first`
+                : 'Nothing to generate');
+        } else {
+            showToast(data.message || 'ComfyUI busy or unreachable');
+        }
+    } catch (err) {
+        showToast('Batch generate failed');
+    }
+}
+
+function startBulkGenerate() {
+    const paths = Array.from(state.selectedPaths);
+    if (!paths.length) return;
+    startBatchGenerate({ paths }, { label: 'Generate' });
 }
 
 
