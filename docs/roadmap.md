@@ -473,7 +473,7 @@ them to gate on, which it did not before.
 
 ---
 
-## Phase 14 — Studio usable at archive scale 🔜
+## Phase 14 — Studio usable at archive scale ✅
 
 **Goal:** generation becomes a batch operation, and the single hardcoded
 workflow stops being the ceiling.
@@ -482,9 +482,14 @@ workflow stops being the ceiling.
 |-------------|----|--------|
 | `BackgroundJob` base class, three managers migrated | S6 | **Done** `cebba18` |
 | Batch generate queue — `POST /api/comfy/batch` + status/cancel, `renderJobChip('generate', …)` | A2 | **Done** `71e6037` `855e421` |
-| Custom `workflow_api.json` import + slot-mapping UI (prompt / negative / seed / image) | A4 | Todo |
-| Post / carousel grouping in the gallery | C2 | **Done** `slice/c2-post-grouping` |
-| Pass-rate badge per filter + CI failure when one bucket exceeds 60% of outputs | B4 | Todo |
+| Workflow registry — `graph.json` + `slots.json`, `pro`/`txt2img` migrated, picker | A4 | **Done** `a52b939` — import UI deferred |
+| Post / carousel grouping in the gallery | C2 | **Done** `326e242` |
+| Pass-rate badge per filter + a failing check when one bucket exceeds 60% | B4 · E5a | **Done** `9a4cef3` |
+
+**924 pytest + 2 skipped, 495 browser checks across 14 suites, ruff clean.**
+The 2 skips are E5a's real-archive gates, inert until 100 items are classified.
+One pre-existing failure remains: `test_sort_newest`'s macOS APFS artifact
+(`st_birthtime` clamps to `mtime`), which does not apply to the Windows target.
 
 **S6 shipped scoped, not whole.** `BatchPromptManager`, `ClassifyJobManager` and
 the new `ComfyBatchManager` are on `BackgroundJob`; `SyncManager` and
@@ -527,8 +532,39 @@ The thing that had to be got right was not the grouping but the **paging**:
 posts while `photos` still carries every slide, and names the unit (`rows`) so
 the client never has to infer it.
 
-B4 becomes standing policy from here — Phase 5's Sexy filter reached 92% pass
-rate with nothing to notice.
+**A4 deleted the thing it replaced**, which was the test of whether it was
+designed right: `PRO_NODE_*` and both hand-written injectors are gone and
+`client.py` is 154 lines lighter. The gate — a registry-built `pro` graph
+byte-identical to the old builder's — was written before anything was removed,
+against fixtures captured from those builders, and re-verified afterwards by
+regenerating both from `401dce4` and diffing. A golden fixture is only a gate
+if it predates the code it guards.
+
+The `seed` slot takes a list, which generalises the FaceDetailer special-case
+rather than preserving it: two sampler nodes wanting one seed is a property of
+that graph, not of the product.
+
+**A4's import flow is deferred, not forgotten** — `POST /api/workflows/import`,
+class_type→slot auto-proposal, the remap form and `/object_info` validation.
+Every one of those is gated on a running ComfyUI, so shipping them now means
+shipping them untested. Dropping a `slots.json` beside a `graph.json` covers
+the need meanwhile. Picked up in Phase 15 or when ComfyUI is available to test
+against.
+
+**B4 is standing policy from here** — Phase 5's Sexy filter reached 92% pass
+rate with nothing to notice, and AGENTS.md rule 17 now says a new score ships
+its pass rate and a guard case with it.
+
+### Not met, and not quietly dropped
+
+Two Phase 13–14 success criteria need a running ComfyUI and a pinned
+checkpoint, so neither is verified on this machine:
+
+- **Regenerate-same-seed produces a byte-identical image** (§5 criterion 2).
+  The seed round-trip is tested; the pixels are not.
+- **An unattended 50-item batch** (§5 criterion 5). The wiring, the per-item
+  failure isolation and the cancel path are tested against a faked ComfyUI;
+  the throughput is not.
 
 ---
 
