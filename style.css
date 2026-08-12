@@ -614,6 +614,15 @@ body {
     transition: var(--transition-fast);
 }
 
+.creator-item.all-creators {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--bg-elevated);
+    backdrop-filter: blur(8px);
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+}
+
 .creator-item:hover {
     background: rgba(51, 65, 85, 0.55);
     border-color: rgba(139, 92, 246, 0.28);

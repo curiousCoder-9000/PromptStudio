@@ -1766,7 +1766,7 @@ function renderCreatorList() {
     const q = (state.creatorSearchQuery || '').toLowerCase();
 
     const allItem = document.createElement('div');
-    allItem.className = `creator-item ${!state.selectedCreator ? 'active' : ''}`;
+    allItem.className = `creator-item all-creators ${!state.selectedCreator ? 'active' : ''}`;
     allItem.innerHTML = `
         <span class="creator-name"><i class="fa-solid fa-layer-group"></i> All Creators</span>
         <span class="creator-badge">${state.creators.reduce((acc, c) => acc + Number(c.photo_count || 0), 0)}</span>
