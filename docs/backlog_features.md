@@ -5,7 +5,7 @@
 | **Date** | 2026-08-09 |
 | **Source** | [`review_ui_product.md`](review_ui_product.md) §2 |
 | **Relationship to Themes A/B/C/E** | Deliberately **distinct**. [`product_review.md`](product_review.md) owns "close the generation loop"; these are the items that review did not surface, mostly because they ride on code that already exists. |
-| **Status** | **F1, F2, F5 shipped** (Stage 2 — see [review_ui_product.md](review_ui_product.md) §6). F3, F4, F6, F7, F8 Todo. Sequence in §9. |
+| **Status** | **F1, F2, F5 shipped** (Stage 2 — see [review_ui_product.md](review_ui_product.md) §6). **F3, F4, F6, F8 shipped** (Phase 15). F7 Todo. Sequence in §9. |
 
 Sizes: **S** ≈ days · **M** ≈ 1–2 weeks · **L** ≈ 3+ weeks.
 

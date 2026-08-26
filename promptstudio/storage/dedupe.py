@@ -22,7 +22,7 @@ archive has a trash/restore flow that a heuristic should go through, not around.
 from __future__ import annotations
 
 import os
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from promptstudio.config import VIDEO_EXTENSIONS
 from promptstudio.logging_setup import get_logger
@@ -211,6 +211,89 @@ def find_near_duplicate_groups(
     groups = [sorted(members) for members in clusters.values() if len(members) > 1]
     groups.sort(key=lambda g: (-len(g), g[0]))
     return groups
+
+
+def pick_review_keeper(members: Sequence[Dict[str, Any]]) -> str:
+    """Favourite first, then largest file, then earliest added_at.
+
+    Favourites are never the ones a sweep should delete, so the keeper is
+    always a favourite when the group has one.
+    """
+    def key(photo: Dict[str, Any]) -> Tuple:
+        return (
+            0 if photo.get("favorite") else 1,
+            -int(photo.get("file_size") or 0),
+            float(photo.get("added_at") or 0.0),
+            str(photo.get("rel_path") or ""),
+        )
+
+    return min(members, key=key)["rel_path"]
+
+
+def _same_post(members: Sequence[Dict[str, Any]]) -> bool:
+    """True when every member shares one non-empty post_id (carousel siblings)."""
+    ids = [str(m.get("post_id") or "").strip() for m in members]
+    if not ids or not ids[0]:
+        return False
+    return all(pid == ids[0] for pid in ids)
+
+
+def review_groups(
+    index: Any,
+    *,
+    max_distance: int = DEFAULT_MAX_DISTANCE,
+) -> List[Dict[str, Any]]:
+    """pHash near-dup groups shaped for the F3 review UI.
+
+    Carousel siblings (same ``post_id``) are dropped. Favourites are never
+    ``preselected`` for delete.
+    """
+    hashes = index.all_phashes()
+    clusters = find_near_duplicate_groups(hashes, max_distance=max_distance)
+    lookup = index.photos_for_rel_paths([p for g in clusters for p in g])
+    out: List[Dict[str, Any]] = []
+    for group in clusters:
+        photos: List[Dict[str, Any]] = []
+        for rel in group:
+            photo = lookup.get(rel)
+            if not photo:
+                continue
+            full = photo.get("full_path") or ""
+            try:
+                size = os.path.getsize(full) if full and os.path.isfile(full) else 0
+            except OSError:
+                size = 0
+            photos.append({**photo, "file_size": size})
+        if len(photos) < 2 or _same_post(photos):
+            continue
+        keeper = pick_review_keeper(photos)
+        members = []
+        for photo in photos:
+            rel = photo["rel_path"]
+            members.append(
+                {
+                    "rel_path": rel,
+                    "filename": photo.get("filename") or "",
+                    "creator": photo.get("creator") or "",
+                    "url": photo.get("url") or "",
+                    "thumb_url": photo.get("thumb_url") or "",
+                    "favorite": bool(photo.get("favorite")),
+                    "file_size": int(photo.get("file_size") or 0),
+                    "post_id": photo.get("post_id"),
+                    "keeper": rel == keeper,
+                    "preselected": (not photo.get("favorite")) and rel != keeper,
+                }
+            )
+        out.append(
+            {
+                "kind": "phash",
+                "keeper": keeper,
+                "size": len(members),
+                "members": members,
+            }
+        )
+    out.sort(key=lambda g: (-int(g["size"]), g["keeper"]))
+    return out
 
 
 def pick_keeper(group: Sequence[str], base_dir: str = "") -> str:

@@ -64,7 +64,7 @@ These are the single source of truth — other docs point here rather than resta
 | Background job contention | `promptstudio/jobs.py` |
 | Why a job did that | `<archive>/_journal/`, `GET /api/journal` |
 | Duplicate detection | `promptstudio/storage/dedupe.py` |
-| Instagram sync | `promptstudio/scraping/downloader.py` |
+| Instagram sync | `promptstudio/scraping/downloader.py` (Instaloader) · `instagram_source.py` (`IG_BACKEND=gallery-dl`) |
 | Add a scrape source | `promptstudio/scraping/sources/` |
 | Add a ComfyUI workflow | `promptstudio/comfy/registry.py` · `comfy/workflows/<name>/` |
 | ComfyUI | `promptstudio/comfy/client.py` |

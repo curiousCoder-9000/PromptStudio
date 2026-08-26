@@ -5,7 +5,12 @@ import os
 
 import pytest
 
-from promptstudio.config import SAVED_DIR
+from promptstudio.config import (
+    SAVED_DIR,
+    instagram_backend,
+    instagram_cookies_info,
+    resolve_gallery_dl_cmd,
+)
 from promptstudio.scraping.results import SyncResult
 from promptstudio.scraping.sources import get_source, known_sources, source_info
 from promptstudio.scraping.sources.base import (
@@ -14,10 +19,12 @@ from promptstudio.scraping.sources.base import (
     resolve_folder_name,
 )
 from promptstudio.scraping.sources.gallery_dl_source import (
+    InstagramGalleryDlSource,
     RedditSource,
     XSource,
     _parse_dt,
 )
+from promptstudio.scraping.sources.instagram_source import InstagramSource
 from promptstudio.storage.metadata import build_metadata_from_normalized
 
 # ── registry ────────────────────────────────────────────────────────────
@@ -557,6 +564,21 @@ def test_ingest_substitutes_mtime_when_extractor_gave_no_date():
     assert load_post_metadata(full)["taken_at"]
 
 
+def test_resolve_gallery_dl_cmd_default_is_runnable():
+    """pip --user on Windows leaves gallery-dl.exe off PATH; we still find it."""
+    cmd = resolve_gallery_dl_cmd("gallery-dl")
+    assert cmd
+    assert cmd[0] != "gallery-dl" or os.path.isfile(cmd[0])
+    joined = " ".join(cmd)
+    assert "gallery-dl" in joined or "gallery_dl" in joined
+
+
+def test_resolve_gallery_dl_cmd_custom_name_is_literal():
+    assert resolve_gallery_dl_cmd("definitely-not-installed-xyz") == [
+        "definitely-not-installed-xyz"
+    ]
+
+
 def test_missing_gallery_dl_binary_reports_cleanly(monkeypatch):
     """A missing binary must be an actionable message, not a traceback."""
     monkeypatch.setattr(
@@ -572,3 +594,215 @@ def test_missing_gallery_dl_binary_reports_cleanly(monkeypatch):
     assert result.stop_reason == "error"
     assert result.errors == 1
     assert "pip install gallery-dl" in " ".join(result.messages)
+
+
+# ── Instagram gallery-dl backend ────────────────────────────────────────
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("", "instaloader"),
+        ("instaloader", "instaloader"),
+        ("il", "instaloader"),
+        ("gallery-dl", "gallery-dl"),
+        ("gdl", "gallery-dl"),
+        ("gallerydl", "gallery-dl"),
+        ("nope", "instaloader"),
+    ],
+)
+def test_instagram_backend_aliases(monkeypatch, raw, expected):
+    if raw:
+        monkeypatch.setenv("IG_BACKEND", raw)
+    else:
+        monkeypatch.setenv("IG_BACKEND", "")
+    assert instagram_backend() == expected
+
+
+def test_instagram_still_not_a_fourth_registry_source():
+    assert "instagram-gdl" not in known_sources()
+    assert InstagramGalleryDlSource().name == "instagram"
+
+
+def _ig_argv(options=None, dest="/tmp/dest", handle="borabit1004"):
+    src = InstagramGalleryDlSource()
+    target = src.parse_target(handle)
+    return src._build_argv(target, options or ScrapeOptions.normalize("full", deep=True), dest), target
+
+
+def test_ig_gdl_argv_pins_search_web_and_never_web_profile_info(monkeypatch):
+    monkeypatch.setenv("SCRAPE_COOKIES_FROM_BROWSER", "brave")
+    monkeypatch.delenv("IG_GDL_SLEEP_REQUEST", raising=False)
+    argv, target = _ig_argv()
+    blob = " ".join(argv)
+    assert "extractor.instagram.user-strategy=search,web" in blob
+    assert "web_profile_info" not in blob
+    assert "user-strategy=info" not in blob
+    assert "extractor.instagram.include=posts" in blob
+    assert "--cookies-from-browser" in argv
+    assert argv[argv.index("--cookies-from-browser") + 1] == "brave"
+    assert "--range" not in argv
+    assert float(argv[argv.index("--sleep-request") + 1]) >= 6.0
+    assert argv[-1] == "https://www.instagram.com/borabit1004/"
+    assert target.folder == "borabit1004"
+
+
+def test_ig_gdl_cookies_file_wins_over_browser(monkeypatch, tmp_path):
+    cookies = tmp_path / "ig-cookies.txt"
+    cookies.write_text("# Netscape\n", encoding="utf-8")
+    monkeypatch.setenv("IG_COOKIES_FILE", str(cookies))
+    monkeypatch.setenv("SCRAPE_COOKIES_FROM_BROWSER", "brave")
+    argv, _ = _ig_argv()
+    assert "--cookies" in argv
+    assert argv[argv.index("--cookies") + 1] == str(cookies)
+    assert "--cookies-from-browser" not in argv
+
+
+def test_ig_gdl_missing_cookies_fails_without_spawning(monkeypatch):
+    monkeypatch.setenv("IG_COOKIES_FILE", "")
+    monkeypatch.setenv("SCRAPE_COOKIES_FROM_BROWSER", "")
+    src = InstagramGalleryDlSource()
+    result = src.run(
+        src.parse_target("nina"),
+        ScrapeOptions(),
+        SourceContext(save_dir=SAVED_DIR, log=lambda _m: None),
+    )
+    assert result.stop_reason == "error"
+    assert result.errors == 1
+    joined = " ".join(result.messages)
+    assert "IG_COOKIES_FILE" in joined
+    assert "SCRAPE_COOKIES_FROM_BROWSER" in joined
+
+
+def test_ig_gdl_saved_url_uses_session_user():
+    target = InstagramGalleryDlSource().parse_saved_target("archi")
+    assert target.kind == "saved"
+    assert target.url == "https://www.instagram.com/archi/saved/"
+    argv = InstagramGalleryDlSource()._build_argv(
+        target, ScrapeOptions.normalize("full", deep=True), SAVED_DIR
+    )
+    assert "--base-directory" in argv
+    assert "--directory" not in argv
+    assert argv[-1].endswith("/archi/saved/")
+
+
+IG_RAW = {
+    "post_id": 1234567890,
+    "post_shortcode": "AbCdefGh",
+    "date": "2026-03-04 11:22:33",
+    "description": "editorial in milan",
+    "username": "borabit1004",
+    "count": 2,
+    "num": 1,
+    "extension": "jpg",
+    "likes": 44,
+}
+
+
+def test_ig_gdl_mapping_matches_instagram_sidecar_shape():
+    src = InstagramGalleryDlSource()
+    target = src.parse_target("borabit1004")
+    post = src._map_raw(IG_RAW, target)
+    assert post.source == "instagram"
+    assert post.creator == "borabit1004"
+    assert post.post_id == "1234567890"
+    assert post.shortcode == "AbCdefGh"
+    assert post.post_url == "https://www.instagram.com/p/AbCdefGh/"
+    assert post.caption == "editorial in milan"
+    meta = build_metadata_from_normalized(post)
+    assert meta["source"] == "instagram"
+    assert meta["owner_username"] == "borabit1004"
+    assert "shortcode" in meta and "post_id" in meta
+
+
+def test_ig_gdl_caption_object_becomes_text():
+    src = InstagramGalleryDlSource()
+    post = src._map_raw(
+        {**IG_RAW, "description": "", "caption": {"text": "from object"}},
+        src.parse_target("borabit1004"),
+    )
+    assert post.caption == "from object"
+
+
+def test_ig_gdl_tombstoned_post_is_unlinked_not_indexed():
+    from PIL import Image
+
+    from promptstudio.storage.db import ArchiveIndex
+    from promptstudio.storage.metadata import load_post_metadata
+
+    src = InstagramGalleryDlSource()
+    target = src.parse_target("borabit1004")
+    folder = os.path.join(SAVED_DIR, target.folder)
+    os.makedirs(folder, exist_ok=True)
+    name = "borabit1004_2026-03-04_11-22-33_UTC_01.jpg"
+    full = os.path.join(folder, name)
+    Image.new("RGB", (16, 16), (8, 8, 8)).save(full, "JPEG")
+    with open(full + ".json", "w", encoding="utf-8") as fh:
+        json.dump(IG_RAW, fh)
+
+    ArchiveIndex.get().record_deleted_post(
+        "borabit1004", post_id="1234567890", platform="instagram"
+    )
+    ctx = SourceContext(save_dir=SAVED_DIR, log=lambda _m: None)
+    converted, errors, _newest = src._ingest([name], target, SAVED_DIR, ctx)
+    assert (converted, errors) == (0, 0)
+    assert not os.path.exists(full)
+    assert load_post_metadata(full) is None
+
+
+def test_instagram_source_default_uses_instaloader(monkeypatch):
+    monkeypatch.setenv("IG_BACKEND", "instaloader")
+    seen = {}
+
+    class FakeDL:
+        def __init__(self, **_kw):
+            seen["init"] = True
+
+        def sync_creator_feed(self, username, **_kw):
+            seen["user"] = username
+            result = SyncResult(job_type="creator")
+            result.stop_reason = "nothing_new"
+            return result
+
+    monkeypatch.setattr(
+        "promptstudio.scraping.downloader.InstagramDownloader", FakeDL
+    )
+    src = InstagramSource()
+    result = src.run(
+        src.parse_target("nina"),
+        ScrapeOptions(),
+        SourceContext(save_dir=SAVED_DIR, log=lambda _m: None),
+    )
+    assert seen.get("user") == "nina"
+    assert result.source == "instagram"
+
+
+def test_instagram_source_dispatches_to_gallery_dl(monkeypatch):
+    monkeypatch.setenv("IG_BACKEND", "gallery-dl")
+    monkeypatch.setenv("SCRAPE_COOKIES_FROM_BROWSER", "brave")
+    seen = {}
+
+    def fake_run(self, target, options, ctx):
+        seen["url"] = target.url
+        result = SyncResult(job_type="creator", source="instagram")
+        result.stop_reason = "nothing_new"
+        return result
+
+    monkeypatch.setattr(
+        "promptstudio.scraping.sources.gallery_dl_source.InstagramGalleryDlSource.run",
+        fake_run,
+    )
+    src = InstagramSource()
+    result = src.run(
+        src.parse_target("nina"),
+        ScrapeOptions(),
+        SourceContext(save_dir=SAVED_DIR, log=lambda _m: None),
+    )
+    assert seen.get("url") == "https://www.instagram.com/nina/"
+    assert result.source == "instagram"
+
+
+def test_instagram_cookies_info_browser_mode(monkeypatch):
+    monkeypatch.setenv("IG_COOKIES_FILE", "")
+    monkeypatch.setenv("SCRAPE_COOKIES_FROM_BROWSER", "brave")
+    info = instagram_cookies_info()
+    assert info == {"mode": "browser", "browser": "brave", "ready": True}

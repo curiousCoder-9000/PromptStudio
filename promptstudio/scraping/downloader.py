@@ -759,6 +759,7 @@ class InstagramDownloader:
         keywords: Optional[Sequence[str]] = None,
         min_media_count: int = DEFAULT_MIN_MEDIA_COUNT,
         include_videos: bool = INCLUDE_VIDEOS_DEFAULT,
+        feed_fn: Optional[Callable[..., SyncResult]] = None,
     ) -> SyncResult:
         """Bulk download from accounts in following_list.json with anti-ban pacing."""
         result = SyncResult(job_type="following")
@@ -813,7 +814,12 @@ class InstagramDownloader:
             if self._aborted:
                 break
             self.log(f"--- Account {result.accounts_processed + 1}: @{username} ---")
-            sub = self.sync_creator_feed(username, max_posts=max_posts_per_account, include_videos=include_videos)
+            download = feed_fn or self.sync_creator_feed
+            sub = download(
+                username,
+                max_posts=max_posts_per_account,
+                include_videos=include_videos,
+            )
             result.downloaded += sub.downloaded
             result.skipped += sub.skipped
             result.errors += sub.errors

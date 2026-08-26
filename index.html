@@ -31,6 +31,7 @@
                 <input type="text" id="searchInput" placeholder="Search creators or prompt descriptors (e.g. bikini, sunset, 35mm)..." autocomplete="off">
                 <button id="clearSearch" class="clear-btn" style="display:none;"><i class="fa-solid fa-xmark"></i></button>
             </div>
+            <button id="semanticSearchBtn" class="filter-chip search-mode-chip" type="button" title="Semantic search over taste embeddings (C1)">Semantic</button>
 
             <div class="nav-actions">
                 <button id="batchPromptBtn" class="btn btn-secondary" title="Analyze all uncached photos with Ollama Vision">
@@ -41,11 +42,20 @@
                 <button id="classifyAllBtn" class="btn btn-secondary" title="Classify every unclassified photo and reel across all creators">
                     <i class="fa-solid fa-wand-sparkles"></i> Classify All
                 </button>
+                <button id="labelBtn" class="btn btn-secondary" title="Label keep/discard for the preference model (K / X)">
+                    <i class="fa-solid fa-tags"></i> Label <span class="nav-count-badge" id="labelCountBadge">0</span>
+                </button>
                 <button id="syncInstagramBtn" class="btn btn-secondary" title="Download creators, saved posts, following">
                     <i class="fa-solid fa-cloud-arrow-down"></i> Download
                 </button>
                 <button id="uploadPhotoBtn" class="btn btn-secondary">
                     <i class="fa-solid fa-cloud-arrow-up"></i> Upload Photo
+                </button>
+                <button id="duplicatesBtn" class="btn btn-secondary" title="Review near-duplicate groups (pHash + embeddings)">
+                    <i class="fa-solid fa-clone"></i> Duplicates
+                </button>
+                <button id="activityBtn" class="btn btn-secondary" title="What last night's jobs actually did">
+                    <i class="fa-solid fa-clock-rotate-left"></i> Activity
                 </button>
                 <button id="trashBtn" class="btn btn-secondary" title="Restore or permanently remove deleted media" style="display:none;">
                     <i class="fa-solid fa-trash-can"></i> Trash <span class="nav-count-badge" id="trashCountBadge">0</span>
@@ -101,6 +111,24 @@
             
             <!-- Sidebar Navigation -->
             <aside class="sidebar">
+                <div class="sidebar-section" id="savedViewsSection">
+                    <div class="sidebar-header">
+                        <h3><i class="fa-solid fa-bookmark"></i> Saved views</h3>
+                        <button class="icon-btn sm" id="saveViewBtn" title="Save the current filters as a named view">
+                            <i class="fa-solid fa-plus"></i>
+                        </button>
+                    </div>
+                    <div class="saved-views-list" id="savedViewsList"></div>
+                </div>
+                <div class="sidebar-section" id="collectionsSection">
+                    <div class="sidebar-header">
+                        <h3><i class="fa-solid fa-layer-group"></i> Boards</h3>
+                        <button class="icon-btn sm" id="newCollectionBtn" title="New collection">
+                            <i class="fa-solid fa-plus"></i>
+                        </button>
+                    </div>
+                    <div class="saved-views-list" id="collectionsList"></div>
+                </div>
                 <div class="sidebar-header">
                     <h3><i class="fa-solid fa-folder-tree"></i> Creators (<span id="creatorCount">0</span>)</h3>
                     <button class="icon-btn sm" id="newCreatorBtn" title="Create New Creator Folder">
@@ -174,6 +202,7 @@
                             <option value="posted">Newest post</option>
                             <option value="posted_oldest">Oldest post</option>
                             <option value="tier">Tier (harshest first)</option>
+                            <option value="foryou">For You</option>
                         </select>
                         <select id="mediaTypeSelect" class="sort-select" title="Filter media type">
                             <option value="all">All Media</option>
@@ -207,10 +236,14 @@
                         <button class="filter-chip" id="groupPostsBtn" type="button" title="Collapse a post's slides into one tile — open it to walk them">
                             <i class="fa-solid fa-layer-group"></i> Group posts
                         </button>
+                        <button class="btn btn-ghost btn-sm" id="addToCollectionBtn" type="button" title="Add the current selection to a board" style="display:none;">
+                            <i class="fa-solid fa-folder-plus"></i> Add to board
+                        </button>
                         <span class="control-label">Grid Size:</span>
                         <button class="icon-btn active" id="gridNormal"><i class="fa-solid fa-border-all"></i></button>
                         <button class="icon-btn" id="gridLarge"><i class="fa-solid fa-table-cells-large"></i></button>
                     </div>
+                    <div class="facet-chip-row" id="facetChipRow" role="group" aria-label="Filter by visual attributes"></div>
                 </div>
 
                 <!-- Review mode strip. Replaces the view controls while
@@ -255,6 +288,24 @@
                             <i class="fa-solid fa-trash-can"></i> Delete selected
                         </button>
                         <button class="btn btn-ghost btn-sm" id="reviewExitBtn" type="button">Done</button>
+                    </div>
+                </div>
+
+                <div class="label-bar" id="labelBar" style="display:none;">
+                    <div class="review-bar-head">
+                        <span class="review-bar-title" id="labelBarTitle">Labeling taste</span>
+                        <span class="review-bar-hint" id="labelBarHint">Click a card · <kbd>K</kbd> keep <kbd>X</kbd> discard · Space skip</span>
+                    </div>
+                    <div class="review-bar-filters" id="labelBarFilters">
+                        <button class="filter-chip review-chip active" type="button" data-label="unlabeled">Unlabeled <span class="review-chip-n" id="labelChipUnlabeled">0</span></button>
+                        <button class="filter-chip review-chip" type="button" data-label="keep">Keep <span class="review-chip-n" id="labelChipKeep">0</span></button>
+                        <button class="filter-chip review-chip" type="button" data-label="discard">Discard <span class="review-chip-n" id="labelChipDiscard">0</span></button>
+                    </div>
+                    <div class="review-bar-actions">
+                        <span class="review-bar-count" id="labelBarCount">0 remaining</span>
+                        <button class="btn btn-secondary btn-sm" id="labelSeedBtn" type="button" title="Copy favorites as keep and trash as discard, without overwriting">Seed from favorites / trash</button>
+                        <button class="btn btn-primary btn-sm" id="tasteTrainBtn" type="button" title="Embed the archive and fit P(keep) from these labels">Train For You</button>
+                        <button class="btn btn-ghost btn-sm" id="labelExitBtn" type="button">Done</button>
                     </div>
                 </div>
 
@@ -315,6 +366,15 @@
                         <select id="outputsCreator" class="sort-select" title="Filter by creator">
                             <option value="">Any creator</option>
                         </select>
+                        <select id="outputsHasSource" class="sort-select" title="Filter by whether a source photo was recorded">
+                            <option value="">Any source</option>
+                            <option value="1">Has source</option>
+                            <option value="0">No source</option>
+                        </select>
+                        <label class="control-label" for="outputsSince">From</label>
+                        <input type="date" id="outputsSince" class="sort-select" title="Created on or after this date">
+                        <label class="control-label" for="outputsUntil">To</label>
+                        <input type="date" id="outputsUntil" class="sort-select" title="Created on or before this date">
                     </div>
                 </div>
 
@@ -363,8 +423,22 @@
                 </div>
             </div>
             <div class="modal-actions output-detail-actions">
+                <div class="gen-rating in-detail" id="outputDetailRating" role="group" aria-label="Rate this generation">
+                    <button type="button" class="gen-rate-btn discard" data-rating="-1" title="Discard — didn't work (X)" aria-label="Discard">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                    <button type="button" class="gen-rate-btn clear" data-rating="0" title="Clear rating (0)" aria-label="Unrated">
+                        <i class="fa-solid fa-minus"></i>
+                    </button>
+                    <button type="button" class="gen-rate-btn keep" data-rating="1" title="Keep (1)" aria-label="Keep">
+                        <i class="fa-solid fa-check"></i>
+                    </button>
+                    <button type="button" class="gen-rate-btn star" data-rating="2" title="Star — the reason you generated at all (2)" aria-label="Star">
+                        <i class="fa-solid fa-star"></i>
+                    </button>
+                </div>
                 <button class="btn btn-secondary" id="outputCopyParams" type="button">
-                    <i class="fa-solid fa-copy"></i> Copy parameters
+                    <i class="fa-solid fa-sliders"></i> Copy parameters
                 </button>
                 <button class="btn btn-secondary" id="outputRegenSameSeed" type="button">
                     <i class="fa-solid fa-rotate"></i> Regenerate — same seed
@@ -698,6 +772,59 @@
         </div>
     </div>
 
+    <!-- E2 — run journal, read-only -->
+    <div class="modal-dialog-container" id="activityModal" style="display:none;">
+        <div class="modal-overlay" id="activityModalOverlay"></div>
+        <div class="modal-card wide insights-modal-card">
+            <div class="sync-modal-header">
+                <div class="modal-icon cyan"><i class="fa-solid fa-clock-rotate-left"></i></div>
+                <div class="sync-modal-titles">
+                    <h3>Activity</h3>
+                    <p class="sync-modal-sub">What the last jobs actually did — stop reason, counts, backoff.</p>
+                </div>
+                <button type="button" class="icon-btn" id="closeActivityBtn" title="Close" aria-label="Close activity">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+            <div class="activity-kind-row" id="activityKindRow" role="tablist" aria-label="Job kind"></div>
+            <div id="activityBody" class="insights-body" aria-live="polite">
+                <div class="insights-loading">Loading…</div>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" id="refreshActivityBtn">
+                    <i class="fa-solid fa-arrows-rotate"></i> Refresh
+                </button>
+                <button type="button" class="btn btn-primary" id="doneActivityBtn">Done</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- F3 — near-duplicate review -->
+    <div class="modal-dialog-container" id="duplicatesModal" style="display:none;">
+        <div class="modal-overlay" id="duplicatesModalOverlay"></div>
+        <div class="modal-card wide insights-modal-card">
+            <div class="sync-modal-header">
+                <div class="modal-icon orange"><i class="fa-solid fa-clone"></i></div>
+                <div class="sync-modal-titles">
+                    <h3>Duplicates</h3>
+                    <p class="sync-modal-sub">Near-duplicate groups. Favourites are never preselected for delete.</p>
+                </div>
+                <button type="button" class="icon-btn" id="closeDuplicatesBtn" title="Close" aria-label="Close duplicates">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
+            </div>
+            <div id="duplicatesBody" class="duplicates-body" aria-live="polite">
+                <div class="insights-loading">Loading…</div>
+            </div>
+            <div class="modal-actions trash-modal-actions">
+                <button type="button" class="btn btn-danger" id="duplicatesSweepBtn" title="Move preselected copies to Trash">
+                    <i class="fa-solid fa-trash-can"></i> Trash selected copies
+                </button>
+                <button type="button" class="btn btn-secondary" id="doneDuplicatesBtn">Close</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Custom Confirmation Delete Modal -->
     <div class="modal-dialog-container" id="deleteConfirmModal" style="display:none;">
         <div class="modal-overlay"></div>
@@ -876,7 +1003,7 @@
             <h3>Trash</h3>
             <p id="trashSummary">Deleted media is kept here so you can put it back.</p>
 
-            <div class="trash-list" id="trashList">
+            <div class="trash-grid" id="trashList">
                 <div class="trash-empty" id="trashEmpty">Loading…</div>
             </div>
 
@@ -975,7 +1102,7 @@
                 <div class="scrape-job-chip-actions">
                     <button type="button" class="scrape-job-chip-btn primary" data-role="resume" style="display:none;" title="Resume this queue">Resume</button>
                     <button type="button" class="scrape-job-chip-btn" data-role="cancel" title="Cancel running job">Cancel</button>
-                    <button type="button" class="scrape-job-chip-btn ghost" data-role="dismiss" title="Hide">
+                    <button type="button" class="scrape-job-chip-btn ghost" data-role="dismiss" title="Hide this notice">
                         <i class="fa-solid fa-xmark"></i>
                     </button>
                 </div>
@@ -1025,6 +1152,21 @@
             </div>
             <div class="scrape-job-chip-actions">
                 <button type="button" class="scrape-job-chip-btn" id="classifyJobChipCancel" title="Stop after the current item">Cancel</button>
+            </div>
+        </div>
+
+        <!-- B2 taste / For You training -->
+        <div class="scrape-job-chip" id="tasteJobChip" style="display:none;" role="status" aria-live="polite">
+            <div class="scrape-job-chip-main">
+                <i class="fa-solid fa-heart scrape-job-chip-icon spinning" id="tasteJobChipIcon"></i>
+                <div class="scrape-job-chip-text">
+                    <div class="scrape-job-chip-title" id="tasteJobChipTitle">Training For You</div>
+                    <div class="scrape-job-chip-sub" id="tasteJobChipSub"></div>
+                    <div class="job-chip-progress"><div class="job-chip-progress-fill" id="tasteJobChipFill"></div></div>
+                </div>
+            </div>
+            <div class="scrape-job-chip-actions">
+                <button type="button" class="scrape-job-chip-btn" id="tasteJobChipCancel" title="Stop after the current item">Cancel</button>
             </div>
         </div>
 

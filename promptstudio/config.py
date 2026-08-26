@@ -7,6 +7,8 @@ All secrets and machine-specific paths come from environment variables
 from __future__ import annotations
 
 import os
+import shutil
+import sys
 from pathlib import Path
 
 
@@ -174,6 +176,58 @@ QUEUE_PRIORITY_DEFAULT = int(os.environ.get("IG_QUEUE_PRIORITY_DEFAULT", "10"))
 POST_RANK_ENABLED = _env_bool("IG_POST_RANK", "1")
 POST_SCAN_FACTOR = float(os.environ.get("IG_POST_SCAN_FACTOR", "3"))
 
+# Instagram fetch backend. Instaloader stays the default so existing session
+# files keep working; gallery-dl + browser cookies is the practical way around
+# web_profile_info 429s. Read live so tests can flip IG_BACKEND without reload.
+_IG_BACKEND_ALIASES = {
+    "instaloader": "instaloader",
+    "il": "instaloader",
+    "gallery-dl": "gallery-dl",
+    "gallerydl": "gallery-dl",
+    "gdl": "gallery-dl",
+}
+
+
+def instagram_backend() -> str:
+    """`instaloader` or `gallery-dl`. Unknown values fall back to instaloader."""
+    raw = (os.environ.get("IG_BACKEND") or "instaloader").strip().lower()
+    return _IG_BACKEND_ALIASES.get(raw, "instaloader")
+
+
+def instagram_cookies_file() -> str:
+    """Netscape cookies.txt for the gallery-dl Instagram backend."""
+    return os.path.expanduser((os.environ.get("IG_COOKIES_FILE") or "").strip())
+
+
+def scrape_cookies_from_browser() -> str:
+    """`--cookies-from-browser` value (brave, chrome, chrome:Default, …)."""
+    return (os.environ.get("SCRAPE_COOKIES_FROM_BROWSER") or "").strip()
+
+
+def instagram_cookies_info() -> dict:
+    """Health/status snapshot — never includes cookie values."""
+    path = instagram_cookies_file()
+    if path and os.path.isfile(path):
+        return {"mode": "file", "ready": True}
+    browser = scrape_cookies_from_browser()
+    if browser:
+        return {"mode": "browser", "browser": browser, "ready": True}
+    return {"mode": "none", "ready": False}
+
+
+# gallery-dl's own Instagram sleep-request default is 6–12s. The shared
+# SCRAPE_SLEEP_REQUEST=1.5 is for X/Reddit and is too fast for this account.
+def ig_gdl_sleep_sec() -> float:
+    return float(_env_num("IG_GDL_SLEEP", 2.0))
+
+
+def ig_gdl_sleep_request_sec() -> float:
+    return float(_env_num("IG_GDL_SLEEP_REQUEST", 6.0))
+
+
+def ig_gdl_sleep_429_sec() -> float:
+    return float(_env_num("IG_GDL_SLEEP_429", 90.0))
+
 # ---------------------------------------------------------------------------
 # Multi-source scraping (X / Reddit via gallery-dl)
 # ---------------------------------------------------------------------------
@@ -185,7 +239,46 @@ FOLDER_SUFFIX_NON_DEFAULT = _env_bool("SCRAPE_FOLDER_SUFFIX", "1")
 FOLDER_SUFFIX_SEP = os.environ.get("SCRAPE_FOLDER_SUFFIX_SEP", "__")
 
 # gallery-dl binary. Left as a bare name so a venv/PATH install just works.
+# On Windows a pip --user install often puts gallery-dl.exe in
+# %APPDATA%\Python\PythonXY\Scripts, which is not on PATH — resolve at
+# spawn time via resolve_gallery_dl_cmd() rather than assuming which().
 GALLERY_DL_BIN = os.environ.get("GALLERY_DL_BIN", "gallery-dl")
+
+
+def resolve_gallery_dl_cmd(configured: str | None = None) -> list[str]:
+    """Argv prefix that actually launches gallery-dl.
+
+    A custom `GALLERY_DL_BIN` (or a test fake) is used as-is. The default
+    name `gallery-dl` is resolved in order: PATH, this interpreter's
+    Scripts dir, the Windows user Scripts dir, then `python -m gallery_dl`
+    if the package is importable here.
+    """
+    raw = (configured if configured is not None else GALLERY_DL_BIN) or "gallery-dl"
+    raw = str(raw).strip() or "gallery-dl"
+    if raw not in ("gallery-dl", "gallery_dl"):
+        return [os.path.expanduser(raw)]
+
+    found = shutil.which("gallery-dl") or shutil.which("gallery-dl.exe")
+    if found:
+        return [found]
+
+    exe_name = "gallery-dl.exe" if os.name == "nt" else "gallery-dl"
+    py_dir = Path(sys.executable).resolve().parent
+    appdata = Path(os.environ.get("APPDATA") or "")
+    py_tag = f"Python{sys.version_info.major}{sys.version_info.minor}"
+    for candidate in (
+        py_dir / "Scripts" / exe_name,
+        py_dir / exe_name,
+        appdata / "Python" / py_tag / "Scripts" / exe_name,
+    ):
+        if candidate.is_file():
+            return [str(candidate)]
+
+    try:
+        import gallery_dl  # noqa: F401
+    except ImportError:
+        return ["gallery-dl"]
+    return [sys.executable, "-m", "gallery_dl"]
 GALLERY_DL_TIMEOUT_SEC = int(os.environ.get("GALLERY_DL_TIMEOUT", str(2 * 60 * 60)))
 # Optional cookie files (Netscape format). X needs one; Reddit does not.
 GALLERY_DL_COOKIES_X = os.path.expanduser(os.environ.get("X_COOKIES_FILE", ""))
@@ -399,6 +492,13 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
 OLLAMA_TEXT_URL = os.environ.get("OLLAMA_TEXT_URL", OLLAMA_URL)
 MODEL_NAME = os.environ.get("OLLAMA_VISION_MODEL", "qwen2.5vl:7b")
 REWRITE_MODEL_NAME = os.environ.get("OLLAMA_REWRITE_MODEL", MODEL_NAME)
+# B2/C1/C3. Blank = hashed n-grams over vision JSON + prompt (no extra model,
+# no new dep). Set to an Ollama embedding tag to switch the vectors.
+OLLAMA_EMBED_MODEL = os.environ.get("OLLAMA_EMBED_MODEL", "").strip()
+OLLAMA_EMBED_URL = os.environ.get(
+    "OLLAMA_EMBED_URL", "http://127.0.0.1:11434/api/embed"
+)
+TASTE_EMBED_DIM = int(os.environ.get("TASTE_EMBED_DIM", "256"))
 
 # Prompt tone: balanced (default) | low | high
 # Accept legacy PROMPT_EROTIC_INTENSITY for existing private .env files

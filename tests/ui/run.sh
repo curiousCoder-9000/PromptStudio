@@ -73,6 +73,8 @@ find_chrome() {
   for candidate in \
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
     "/Applications/Chromium.app/Contents/MacOS/Chromium" \
+    "/c/Program Files/Google/Chrome/Application/chrome.exe" \
+    "/c/Program Files (x86)/Google/Chrome/Application/chrome.exe" \
     "$(command -v google-chrome-stable)" \
     "$(command -v google-chrome)" \
     "$(command -v chromium)" \
@@ -87,7 +89,7 @@ if [ -z "$CHROME" ]; then
   exit 0
 fi
 
-WORKDIR="$(mktemp -d -t promptstudio-ui)"
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/promptstudio-ui.XXXXXX")"
 ARCHIVE="$WORKDIR/archive"
 mkdir -p "$ARCHIVE/test_creator"
 
@@ -152,7 +154,8 @@ if [ ${#SUITES[@]} -eq 0 ]; then
           test_insights_and_pollers.js test_distribution_guard.js
           test_browse_and_paging.js test_source_filter.js test_post_grouping.js
           test_scrape_lanes.js test_generation_rating.js
-          test_outputs_gallery.js test_batch_generate.js test_workflow_registry.js)
+          test_outputs_gallery.js test_batch_generate.js test_workflow_registry.js
+          test_label_mode.js test_phase15.js)
 fi
 
 STATUS=0

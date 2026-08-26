@@ -77,6 +77,46 @@ def test_filters_reach_the_query(api):
     assert payload["generations"][0]["workflow"] == "txt2img"
 
 
+def test_has_source_and_until_reach_the_query(api):
+    index = ArchiveIndex.get()
+    _make_output(
+        index, "ref.png", creator="nina",
+        created_at="2026-08-10T12:00:00+00:00",
+    )
+    index.record_generation(
+        rel_path="_generations/nina/orphan.png",
+        source_rel="",
+        creator="nina",
+        workflow="txt2img",
+        seed=1,
+        positive_prompt="no ref",
+        created_at="2026-08-20T12:00:00+00:00",
+    )
+
+    _s, no_src = api("GET", f"{LIST}?has_source=0")
+    _s2, with_src = api("GET", f"{LIST}?has_source=1")
+    _s3, until = api("GET", f"{LIST}?until=2026-08-15")
+
+    assert no_src["total"] == 1
+    assert no_src["generations"][0]["has_source"] is False
+    assert with_src["total"] == 1
+    assert with_src["generations"][0]["has_source"] is True
+    assert with_src["generations"][0]["source_thumb_url"]
+    assert until["total"] == 1
+    assert until["generations"][0]["has_source"] is True
+
+
+def test_photos_path_returns_exactly_that_row(api, make_photo):
+    rel, _full = make_photo(creator="nina", name="keep.jpg")
+    make_photo(creator="nina", name="other.jpg")
+
+    status, payload = api("GET", f"/api/photos?path={rel}")
+
+    assert status == 200
+    assert payload["total"] == 1
+    assert payload["photos"][0]["rel_path"] == rel.replace("\\", "/")
+
+
 def test_a_hostile_sort_does_not_error_or_execute(api):
     index = ArchiveIndex.get()
     _make_output(index, "a.png")

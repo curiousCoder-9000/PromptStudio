@@ -11,12 +11,15 @@ Design rationale and the platform survey live in
 
 | Source | Name | Auth | Fetches | Archive folder |
 |--------|------|------|---------|----------------|
-| Instagram | `instagram` (default) | Instaloader session | profile feed | `handle` |
+| Instagram | `instagram` (default) | Instaloader session **or** gallery-dl cookies (`IG_BACKEND`) | profile feed | `handle` |
 | X / Twitter | `x` (alias `twitter`) | **cookies required** | `/media` timeline | `handle__x` |
 | Reddit | `reddit` | none (OAuth optional) | subreddit or user submissions | `r_sub__reddit`, `u_user__reddit` |
 
-Instagram keeps using `instaloader` and its existing ranking / catch-up / anti-ban
-logic. X and Reddit go through **gallery-dl**, driven as a subprocess.
+Instagram defaults to `instaloader`. Set `IG_BACKEND=gallery-dl` to use the same
+gallery-dl subprocess path as X/Reddit (browser cookies or `IG_COOKIES_FILE`).
+That is the practical way around Instaloader’s `web_profile_info` 429s — not a
+second source, so folders and `photos.source` stay `instagram`. Caption ranking
+(`IG_POST_RANK`) is Instaloader-only. X and Reddit are gallery-dl only.
 
 ## 2. Setup
 

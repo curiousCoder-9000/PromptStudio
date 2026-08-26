@@ -17,7 +17,15 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `GET` | `/api/creator/style` | Learned style prefix for a creator |
 | `POST` | `/api/creator/style/rebuild` | Rebuild style from cached prompts |
 | `GET` | `/api/following` | Accounts from local `following_list.json` |
-| `GET` | `/api/photos` | Paginated (`offset`, `limit`, `creator`, `search`, `unanalyzed`, `favorite`, `media_type`, `verdict`, `source`, `sort`, `group`) |
+| `GET` | `/api/photos` | Paginated (`offset`, `limit`, `creator`, `search`, `unanalyzed`, `favorite`, `media_type`, `verdict`, `source`, `sort`, `group`, `mode`, `collection`, `setting`/`outfit`/`pose`/`lighting`) |
+| `GET` | `/api/duplicates` | Near-dup groups (`kind=phash\|embed\|all`). Favourites never `preselected` |
+| `GET`/`POST`/`DELETE` | `/api/views` | Saved filter sets (F8) |
+| `GET`/`POST`/`DELETE` | `/api/collections` | Cross-creator boards (C4) |
+| `POST`/`DELETE` | `/api/collections/items` | `{id, paths}` add / remove members |
+| `GET` | `/api/facets` | C5 chip values from structured vision |
+| `POST` | `/api/taste/train` | Embed + fit P(keep) (B2) |
+| `GET` | `/api/taste/status` | Taste job snapshot |
+| `POST` | `/api/taste/cancel` | Cooperative cancel |
 | `GET` | `/api/media/detail` | Reel/photo inspector (`path`): caption, IG link — not vision prompts |
 | `GET` | `/api/prompt` | Vision prompt bundle (`path`, optional `refresh`) — includes `history` |
 | `PUT` | `/api/prompt` | Save edited positive/negative prompts + tags |
@@ -31,6 +39,9 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `GET` | `/api/classify/status` | Classify job progress + tier histogram |
 | `POST` | `/api/classify/cancel` | Cooperative cancel after the current item |
 | `POST` | `/api/classify/verdict` | Pin one file to keep/reject by hand (or clear) |
+| `GET` | `/api/labels` | Taste-label counts, or `?path=` for one row |
+| `PUT` | `/api/labels` | `{path, label}` where label is `1` keep / `-1` discard / `0` clear |
+| `POST` | `/api/labels/seed` | Copy favorites → keep and trash → discard without overwriting |
 | `GET` | `/api/classify/sheet` | Contact sheet a reel was judged from (`rel_path`) |
 | `DELETE` | `/api/photo` | Soft delete → `_trash/` (`permanent=1` to unlink) |
 | `GET` | `/api/trash` | List trashed entries (`limit`, `offset`) + size/retention |
@@ -268,6 +279,21 @@ The contact sheet JPEG the reel was judged from, or `404` if there is none
 media resolver — `_classify` is an `EXCLUDED_FOLDER`, so `/media/…` cannot reach
 it, which is exactly why sheets live there.
 
+### `GET` / `PUT` `/api/labels`
+
+B3 taste labels for the preference model. `label` is `1` keep, `-1` discard, `0`
+clears the row so "not judged yet" is the absence of a label.
+
+`GET /api/labels` returns `{keep, discard, labelled, unlabeled}`.
+`GET /api/labels?path=` returns one row or 404.
+`PUT /api/labels` body `{path, label}`.
+
+### `POST /api/labels/seed`
+
+Copies `favorites.json` as keep and `_trash/` `rel_path`s as discard.
+Existing labels are not overwritten. Returns inserted/skipped counts plus
+the updated summary.
+
 ### `GET /api/prompt/batch/status`
 
 ```json
@@ -308,11 +334,17 @@ Probes Ollama at `http://localhost:11434/api/tags` (1.5s timeout).
   "model": "qwen2.5vl:7b",
   "model_ready": true,
   "models": ["qwen2.5vl:7b", "moondream:latest"],
-  "leases": { "ollama": "batch_prompt", "instagram": null, "comfy": null }
+  "leases": { "ollama": "batch_prompt", "instagram": null, "comfy": null },
+  "instagram_backend": "instaloader",
+  "instagram_cookies": { "mode": "none", "ready": false }
 }
 ```
 
 When Ollama is down: `{ "ollama": false, ... }`. Also includes `comfy` / `url` for ComfyUI reachability.
+
+`instagram_backend` is `instaloader` or `gallery-dl` (`IG_BACKEND`).
+`instagram_cookies` is `{mode, ready}` plus `browser` when cookies come from
+`--cookies-from-browser`. Cookie values are never returned.
 
 `leases` names the job holding each exclusive resource, or `null` if free — the
 first thing to check when a job reports `busy` and nothing looks like it is
@@ -534,8 +566,9 @@ The outputs gallery (A1). Mirrors `/api/photos`: same `offset` / `limit` /
 `has_more` / `total` contract, so the existing paging works unchanged.
 
 Query: `creator`, `workflow`, `checkpoint`, `batch_id`, `source` (a source
-`rel_path`), `rating` (`-1|0|1|2`), `rated_only=1`, `since` (ISO), `sort`,
-`offset`, `limit`.
+`rel_path`), `rating` (`-1|0|1|2`), `rated_only=1`, `since` / `until` (ISO or
+`YYYY-MM-DD`; date-only `until` is inclusive of that day), `has_source=1|0`,
+`sort`, `offset`, `limit`.
 
 `rating=0` filters to the **unrated**; omitting the parameter means no filter.
 `rated_only=1` is the different question — everything judged either way.
@@ -555,7 +588,8 @@ be able to reach SQL or 500.
     "workflow": "pro", "checkpoint": "…", "steps": 32, "cfg": 6.0,
     "denoise": 0.7, "mode_e": true, "prompt_version": "…",
     "positive_prompt": "…", "negative_prompt": "…",
-    "rating": 2, "rated_at": "…", "batch_id": null, "created_at": "…"
+    "rating": 2, "rated_at": "…", "batch_id": null, "created_at": "…",
+    "has_source": true, "source_thumb_url": "/media/thumb/…"
   }],
   "total": 412, "offset": 0, "limit": 200, "has_more": true,
   "facets": { "creators": [], "workflows": [], "checkpoints": [] }
@@ -630,7 +664,7 @@ Reads local `following_list.json` (no live Instagram call).
 
 ### `GET /api/photos`
 
-Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `verdict` (see below), `source` (`instagram` | `x` | `reddit` | omit/`all`), `sort` (`name` | `newest` | `oldest` | `posted` | `posted_oldest` | `tier`), `group` (`post` | omit), `offset` (default 0), `limit` (default/max from config, typically 300).
+Query: `creator`, `search`, `mode` (`text` | `semantic` — C1 cosine over taste embeddings), `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `verdict` (see below), `source` (`instagram` | `x` | `reddit` | omit/`all`), `path` (exact `rel_path`; for opening one photo that is not on the current gallery page), `label` (`unlabeled` | `keep` | `discard` — B3 taste labels), `collection` (board id), `setting` / `outfit` / `pose` / `lighting` (C5 facet chips), `sort` (`name` | `newest` | `oldest` | `posted` | `posted_oldest` | `tier` | `foryou`), `group` (`post` | omit), `offset` (default 0), `limit` (default/max from config, typically 300).
 
 - `source` — ANDs with `creator`, so a merged folder can be split by platform. An unregistered value is a **400**.
 - `group=post` — collapse a carousel into one post. See [Post grouping](#post-grouping) below; any other value is a **400**.
@@ -638,6 +672,7 @@ Query: `creator`, `search`, `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), 
 - `newest` / `oldest` — archive ingest time (`added_at`; when the file was downloaded/indexed).
 - `posted` / `posted_oldest` — remote post time (`mtime`, which downloaders stamp to the post date); falls back to `added_at` when `mtime` is missing or zero.
 - `tier` — classify tier ascending (harshest first), then errors, then never-classified. The review-mode order.
+- `foryou` — B2 `p_keep` descending; unscored rows sink. Train via `POST /api/taste/train`.
 
 ```json
 {
@@ -937,7 +972,9 @@ Each entry directory holds the media file, its `.meta.json` sidecar, and an `ent
                  "creator": "creator", "filename": "IMG_1.jpg",
                  "deleted_at": "2026-08-08T19:12:04+00:00", "file_size": 244118,
                  "favorite": false, "prompt_bundle": null, "tombstoned": true,
-                 "media_present": true } ],
+                 "media_present": true,
+                 "url": "/media/_trash/<id>/IMG_1.jpg",
+                 "thumb_url": "/media/thumb/_trash/<id>/IMG_1.jpg" } ],
   "total": 1, "offset": 0, "limit": 100,
   "count": 1, "bytes": 244118, "retention_days": 30 }
 ```
@@ -992,7 +1029,9 @@ lane started first, `pending_count` is the total.
   "running_jobs": [],
   "history": [],
   "stats": { "completed_today": 3, "downloaded_today": 41, "errors_today": 0 },
-  "sync": { "running": false, "progress": "", "lanes": {}, "creator_queue": {} }
+  "sync": { "running": false, "progress": "", "lanes": {}, "creator_queue": {} },
+  "instagram_backend": "instaloader",
+  "instagram_cookies": { "mode": "none", "ready": false }
 }
 ```
 

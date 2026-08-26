@@ -154,6 +154,45 @@ def test_since_excludes_older_rows(seeded):
     assert total == 3
 
 
+def test_until_is_inclusive_of_a_date_only_day(seeded):
+    """A date-only until must not drop same-day timestamps just because they
+    sort after the bare date string."""
+    index, _ = seeded
+
+    _rows, total = index.list_generations(until="2026-08-03")
+
+    assert total == 3
+
+
+def test_date_range_clips_both_ends(seeded):
+    index, _ = seeded
+
+    _rows, total = index.list_generations(since="2026-08-03", until="2026-08-05")
+
+    assert total == 3
+
+
+def test_has_source_hides_pure_txt2img_rows(seeded):
+    index, _ = seeded
+    index.record_generation(
+        rel_path="_generations/nina/txt.png",
+        source_rel="",
+        creator="nina",
+        workflow="txt2img",
+        seed=1,
+        positive_prompt="no reference",
+        created_at="2026-08-20T10:00:00+00:00",
+    )
+
+    _with, with_total = index.list_generations(has_source=True)
+    _without, without_total = index.list_generations(has_source=False)
+    _any, any_total = index.list_generations()
+
+    assert with_total == 9
+    assert without_total == 1
+    assert any_total == 10
+
+
 def test_an_unknown_sort_falls_back_rather_than_erroring(seeded):
     """Sort arrives from a query string. A bad value must not 500, and must not
     be interpolated into SQL."""

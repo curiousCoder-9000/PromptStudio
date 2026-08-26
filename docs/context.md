@@ -19,7 +19,7 @@ Local **Instagram photo archive studio**: scrape creators → store under `~/Pic
 | HTTP API + static UI | `ThreadingHTTPServer` | `server.py` → `promptstudio.server.handler` |
 | Frontend | Vanilla HTML/CSS/JS | `index.html`, `style.css`, `app.js` |
 | Vision prompts | Ollama (default `qwen2.5vl:7b`) | `promptstudio.prompts.engine` |
-| Instagram | Instaloader + session file | `promptstudio.scraping.*` |
+| Instagram | Instaloader **or** gallery-dl (`IG_BACKEND`) | `promptstudio.scraping.*` |
 | Gallery index | SQLite `archive.db` | `promptstudio.storage.db` |
 | ComfyUI (optional) | HTTP API `:8188` | `promptstudio.comfy.client` |
 
@@ -58,6 +58,7 @@ promptstudio/
   logging_setup.py       # lazy logging config; handlers on the promptstudio logger
   jobs.py                # LeaseRegistry — exclusive ollama/instagram/comfy leases
   insights.py            # archive stats/aggregates behind /api/insights
+  taste.py               # B2/C1/C3 embeddings, P(keep), semantic rank, kNN dups
   server/
     handler.py           # Every HTTP route lives here
     multipart.py         # cgi-free multipart upload parser
@@ -92,8 +93,8 @@ promptstudio/
     sources/             # multi-source seam (see docs/multi_source_scraping.md)
       base.py            # NormalizedPost, SourceTarget, MediaSource, folder naming
       __init__.py        # lazy registry: instagram | x | reddit
-      instagram_source.py  # wraps InstagramDownloader
-      gallery_dl_source.py # X + Reddit via gallery-dl subprocess
+      instagram_source.py  # wraps InstagramDownloader; dispatches to gallery-dl when IG_BACKEND=gallery-dl
+      gallery_dl_source.py # X + Reddit + InstagramGalleryDlSource (not a registry source)
   comfy/
     client.py            # ComfyJobManager (lease + status) · params · runner · batch
     registry.py          # A4: workflows are data — slot map → injected graph
@@ -105,7 +106,8 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
   conftest.py            # temp archive + cache reset (sets env BEFORE import)
   # security / protocol: test_paths, test_path_containment, test_byte_range, test_multipart
   # storage:            test_atomic_write, test_prompt_store, test_trash, test_dedupe,
-  #                     test_sort_newest, test_index_sidecar_reads, test_journal, test_stats
+  #                     test_sort_newest, test_index_sidecar_reads, test_journal, test_stats,
+  #                     test_taste, test_labels, test_api_phase15
   # jobs / runtime:     test_job_leases, test_batch_job, test_logging_and_errors, test_insights
   # quality gates:      test_distribution_guard (B4/E5a — reads the REAL archive,
   #                     skips under DISTRIBUTION_MIN_*; fails a local run on saturation)
@@ -215,7 +217,7 @@ Base: `http://localhost:5000`. Full schemas → [api.md](api.md).
 | GET | `/api/health` | Ollama + Comfy reachability |
 | GET | `/api/stats` | photos, creators, `prompts_ready` |
 | GET | `/api/creators` | folders + sync badges |
-| GET | `/api/photos` | `creator`, `search` (prompts **+ caption**), `unanalyzed`, `favorite`, `media_type` (`photo`/`video`), `verdict`, `sort` (incl. `tier`), `group=post` (carousels; pages in **posts** — use `rows`), `offset`, `limit` |
+| GET | `/api/photos` | `creator`, `search` (prompts **+ caption**; `mode=semantic` for C1), `unanalyzed`, `favorite`, `media_type`, `verdict`, `sort` (incl. `tier`, `foryou`), `group=post`, `collection`, `setting`/`outfit`/`pose`/`lighting`, `offset`, `limit` |
 | GET/PUT | `/api/prompt` | get bundle / save edits |
 | POST | `/api/prompt/restore` | history index |
 | POST | `/api/prompt/mode-e` | Mode E rewrite; `apply` |

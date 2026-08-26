@@ -9,8 +9,9 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from promptstudio.config import INCLUDE_VIDEOS_DEFAULT
-from promptstudio.scraping.downloader import InstagramDownloader
+from promptstudio.config import INCLUDE_VIDEOS_DEFAULT, SAVED_DIR
+from promptstudio.scraping.sources.base import ScrapeOptions, SourceContext
+from promptstudio.scraping.sources.instagram_source import InstagramSource
 
 
 def main():
@@ -76,12 +77,18 @@ def main():
     else:
         deep = True  # default deep for full (ignored for latest)
 
-    InstagramDownloader().sync_creator_feed(
-        args.username,
+    src = InstagramSource()
+    opts = ScrapeOptions.normalize(
+        mode,
+        deep=deep,
         max_posts=args.max_posts,
         include_videos=include_videos,
-        mode=mode,
-        deep=deep,
+        catch_up_only=(mode == "latest"),
+    )
+    src.run(
+        src.parse_target(args.username),
+        opts,
+        SourceContext(save_dir=SAVED_DIR, log=print),
     )
 
 

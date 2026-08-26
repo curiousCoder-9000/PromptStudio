@@ -85,8 +85,16 @@ class ArchiveStore:
         media_type: Optional[str] = None,
         verdict: Optional[str] = None,
         source: Optional[str] = None,
+        path: Optional[str] = None,
+        label: Optional[str] = None,
         sort: str = "name",
         group_posts: bool = False,
+        search_mode: str = "text",
+        collection_id: Optional[int] = None,
+        setting: Optional[str] = None,
+        outfit: Optional[str] = None,
+        pose: Optional[str] = None,
+        lighting: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], int]:
         return self._index.query_photos(
             creator=creator,
@@ -96,10 +104,18 @@ class ArchiveStore:
             media_type=media_type,
             verdict=verdict,
             source=source,
+            path=path,
+            label=label,
             sort=sort,
             limit=limit,
             offset=offset,
             group_posts=group_posts,
+            search_mode=search_mode,
+            collection_id=collection_id,
+            setting=setting,
+            outfit=outfit,
+            pose=pose,
+            lighting=lighting,
         )
 
     def photos_for_rel_paths(

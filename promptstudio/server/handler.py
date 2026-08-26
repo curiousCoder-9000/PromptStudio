@@ -34,13 +34,12 @@ from promptstudio.prompts.engine import ENGINE_ID, build_export_variants, get_pr
 from promptstudio.prompts.styles import CreatorStyleStore
 from promptstudio.scraping.classify_job import ClassifyJobManager
 from promptstudio.scraping.creator_queue import CreatorScrapeQueue
-from promptstudio.scraping.downloader import InstagramDownloader
 from promptstudio.scraping.media_classifier import TIER_LABELS
 from promptstudio.scraping.sources.base import VALID_MODES, ScrapeOptions
 from promptstudio.scraping.sync_manager import SyncManager
 from promptstudio.server.multipart import parse_multipart_data
 from promptstudio.storage.archive import ArchiveStore, ensure_creator_folder
-from promptstudio.storage.db import VERDICT_FILTERS
+from promptstudio.storage.db import LABEL_FILTERS, SEARCH_MODES, VERDICT_FILTERS
 from promptstudio.storage.favorites import FavoritesStore
 from promptstudio.storage.journal import list_kinds as list_journal_kinds
 from promptstudio.storage.journal import read_runs as read_journal_runs
@@ -70,6 +69,33 @@ OLLAMA_TAGS_URL = os.environ.get(
 _following_cache: Dict[str, Any] = {"mtime": None, "accounts": []}
 
 _TRUTHY = ("1", "true", "yes")
+_FALSY = ("0", "false", "no")
+_TASTE_JOB = None
+
+
+def _taste_job():
+    global _TASTE_JOB
+    if _TASTE_JOB is None:
+        from promptstudio.taste import TasteJob
+
+        _TASTE_JOB = TasteJob.get()
+    return _TASTE_JOB
+
+
+def _trash_entry_urls(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach /media URLs so the trash modal can render thumbnails."""
+    from promptstudio.storage.thumbs import thumb_url
+
+    eid = str(entry.get("id") or "")
+    filename = str(entry.get("filename") or "")
+    if not eid or not filename or not entry.get("media_present"):
+        entry.setdefault("url", "")
+        entry.setdefault("thumb_url", "")
+        return entry
+    rel = f"_trash/{eid}/{filename}"
+    entry["url"] = f"/media/{urllib.parse.quote(rel)}"
+    entry["thumb_url"] = thumb_url(rel)
+    return entry
 
 
 def _as_bool(value: Any, *, default: bool = False) -> bool:
@@ -168,6 +194,22 @@ def _parse_source_filter(query: Dict[str, List[str]]) -> Optional[str]:
             f"Unknown source '{raw}'. Known: {', '.join(sorted(known_sources()))}, all"
         )
     return name
+
+
+def _parse_has_source(query: Dict[str, List[str]]) -> Optional[bool]:
+    """Tri-state: True / False filter, or None for "any".
+
+    Empty is unfiltered. `has_source=0` is a real filter (pure txt2img rows),
+    so this cannot collapse to `_as_bool` — that treats missing as False.
+    """
+    raw = (query.get("has_source", [""])[0] or "").strip().lower()
+    if not raw:
+        return None
+    if raw in _TRUTHY:
+        return True
+    if raw in _FALSY:
+        return False
+    return None
 
 
 def _expand_post_groups(reps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -296,6 +338,10 @@ def _check_ollama_health(timeout: float = 1.5) -> Dict[str, Any]:
     # Who holds each exclusive resource — the first thing to look at when
     # a job reports busy and nothing appears to be running.
     result["leases"] = LEASES.snapshot()
+    from promptstudio.config import instagram_backend, instagram_cookies_info
+
+    result["instagram_backend"] = instagram_backend()
+    result["instagram_cookies"] = instagram_cookies_info()
     return result
 
 
@@ -550,6 +596,56 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(404, "Photo not found")
             return
 
+        if parsed.path == "/api/views":
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                view_id = int(query.get("id", ["0"])[0] or 0)
+            except ValueError:
+                self.send_error(400, "id required")
+                return
+            from promptstudio.storage.db import ArchiveIndex
+
+            if not ArchiveIndex.get().delete_saved_view(view_id):
+                self.send_error(404, "View not found")
+                return
+            self._send_json({"status": "ok", "id": view_id})
+            return
+
+        if parsed.path == "/api/collections":
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                cid = int(query.get("id", ["0"])[0] or 0)
+            except ValueError:
+                self.send_error(400, "id required")
+                return
+            from promptstudio.storage.db import ArchiveIndex
+
+            if not ArchiveIndex.get().delete_collection(cid):
+                self.send_error(404, "Collection not found")
+                return
+            self._send_json({"status": "ok", "id": cid})
+            return
+
+        if parsed.path == "/api/collections/items":
+            try:
+                data = self._read_json_body()
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON body")
+                return
+            try:
+                cid = int(data.get("id") or 0)
+            except (TypeError, ValueError):
+                cid = 0
+            paths = data.get("paths") or []
+            if not cid or not isinstance(paths, list):
+                self.send_error(400, "id and paths required")
+                return
+            from promptstudio.storage.db import ArchiveIndex
+
+            removed = ArchiveIndex.get().remove_collection_items(cid, paths)
+            self._send_json({"status": "ok", "removed": removed})
+            return
+
         if parsed.path == "/api/generation":
             from promptstudio.storage.db import ArchiveIndex
 
@@ -719,6 +815,31 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(404, "Generation not found")
                 return
             self._send_json({"status": "ok", "gen_id": gen_id, "rating": rating})
+            return
+
+        if parsed.path == "/api/labels":
+            try:
+                data = self._read_json_body()
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON body")
+                return
+            rel_path = (data.get("path") or data.get("rel_path") or "").strip()
+            if not rel_path:
+                self.send_error(400, "path required")
+                return
+            rel_path = urllib.parse.unquote(rel_path)
+            from promptstudio.storage.db import ArchiveIndex
+
+            try:
+                ok = ArchiveIndex.get().set_label(rel_path, data.get("label"))
+            except ValueError as e:
+                self.send_error(400, str(e))
+                return
+            if not ok:
+                self.send_error(404, "Photo not found")
+                return
+            row = ArchiveIndex.get().get_label(rel_path)
+            self._send_json({"status": "ok", "path": rel_path, "label": row})
             return
 
         self.send_error(404, "Not found")
@@ -1013,12 +1134,16 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json(blocked, 409)
                 return
             def job(log, on_rate_limit=None):
-                dl = InstagramDownloader(
+                from promptstudio.scraping.sources.base import SourceContext
+                from promptstudio.scraping.sources.instagram_source import run_saved
+
+                ctx = SourceContext(
+                    save_dir=SAVED_DIR,
                     log=log,
-                    on_rate_limit=on_rate_limit,
                     should_cancel=lambda: _sync.is_cancel_requested("instagram"),
+                    on_rate_limit=on_rate_limit,
                 )
-                return dl.sync_saved_posts()
+                return run_saved(ctx)
 
             # No is_running() pre-check: start_job takes the Instagram lease and
             # flips status under one lock, so it is the only answer that cannot
@@ -1094,25 +1219,24 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 mode = opts.mode
                 deep = opts.deep
                 include_videos = opts.include_videos
-                max_posts = opts.resolved_max_posts()
                 blocked = _creator_queue_blocks_oneshot()
                 if blocked:
                     self._send_json(blocked, 409)
                     return
 
                 def job(log, on_rate_limit=None):
-                    dl = InstagramDownloader(
+                    from promptstudio.scraping.sources import get_source
+                    from promptstudio.scraping.sources.base import SourceContext
+
+                    source = get_source("instagram")
+                    target = source.parse_target(username)
+                    ctx = SourceContext(
+                        save_dir=SAVED_DIR,
                         log=log,
-                        on_rate_limit=on_rate_limit,
                         should_cancel=lambda: _sync.is_cancel_requested("instagram"),
+                        on_rate_limit=on_rate_limit,
                     )
-                    return dl.sync_creator_feed(
-                        username,
-                        max_posts=max_posts,
-                        include_videos=include_videos,
-                        mode=mode,
-                        deep=deep,
-                    )
+                    return source.run(target, opts, ctx)
 
                 if _sync.start_job("creator", job, source="instagram"):
                     self._send_json(
@@ -1161,12 +1285,19 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     return
 
                 def job(log, on_rate_limit=None):
-                    dl = InstagramDownloader(
-                        log=log,
-                        on_rate_limit=on_rate_limit,
-                        should_cancel=lambda: _sync.is_cancel_requested("instagram"),
+                    from promptstudio.scraping.sources.base import SourceContext
+                    from promptstudio.scraping.sources.instagram_source import (
+                        run_following,
                     )
-                    return dl.sync_following(
+
+                    ctx = SourceContext(
+                        save_dir=SAVED_DIR,
+                        log=log,
+                        should_cancel=lambda: _sync.is_cancel_requested("instagram"),
+                        on_rate_limit=on_rate_limit,
+                    )
+                    return run_following(
+                        ctx,
                         max_accounts=max_accounts,
                         max_posts_per_account=max_posts,
                         keywords=keywords,
@@ -1242,6 +1373,113 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({"status": "cancelling"})
             else:
                 self._send_json({"status": "idle", "message": "No batch job running"})
+            return
+
+        if path == "/api/labels/seed":
+            from promptstudio.storage.db import ArchiveIndex
+
+            favs = _favorites.load()
+            trash_entries, _total = _trash.list_entries()
+            trash_paths = [
+                str(e.get("rel_path") or "").strip()
+                for e in trash_entries
+                if str(e.get("rel_path") or "").strip()
+            ]
+            result = ArchiveIndex.get().seed_labels(
+                keep_paths=list(favs),
+                discard_paths=trash_paths,
+            )
+            result["status"] = "ok"
+            result["counts"] = ArchiveIndex.get().label_counts()
+            self._send_json(result)
+            return
+
+        if path == "/api/views":
+            try:
+                data = self._read_json_body()
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON body")
+                return
+            from promptstudio.storage.db import ArchiveIndex
+
+            try:
+                row = ArchiveIndex.get().create_saved_view(
+                    str(data.get("name") or ""),
+                    data.get("filters") if isinstance(data.get("filters"), dict) else {},
+                )
+            except ValueError as e:
+                self.send_error(400, str(e))
+                return
+            self._send_json({"status": "ok", "view": row})
+            return
+
+        if path == "/api/collections":
+            try:
+                data = self._read_json_body()
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON body")
+                return
+            from promptstudio.storage.db import ArchiveIndex
+
+            try:
+                row = ArchiveIndex.get().create_collection(str(data.get("name") or ""))
+            except ValueError as e:
+                self.send_error(400, str(e))
+                return
+            self._send_json({"status": "ok", "collection": row})
+            return
+
+        if path == "/api/collections/items":
+            try:
+                data = self._read_json_body()
+            except json.JSONDecodeError:
+                self.send_error(400, "Invalid JSON body")
+                return
+            try:
+                cid = int(data.get("id") or 0)
+            except (TypeError, ValueError):
+                cid = 0
+            paths = data.get("paths") or []
+            if not cid or not isinstance(paths, list):
+                self.send_error(400, "id and paths required")
+                return
+            from promptstudio.storage.db import ArchiveIndex
+
+            try:
+                result = ArchiveIndex.get().add_collection_items(cid, paths)
+            except KeyError:
+                self.send_error(404, "Collection not found")
+                return
+            result["status"] = "ok"
+            result["id"] = cid
+            self._send_json(result)
+            return
+
+        if path == "/api/taste/train":
+            try:
+                data = self._read_json_body()
+            except json.JSONDecodeError:
+                data = {}
+            force = _as_bool((data or {}).get("force"))
+            job = _taste_job()
+            if job.start(force=force):
+                self._send_json({"status": "started", **job.get_status()})
+            else:
+                self._send_json(
+                    {
+                        "status": "busy",
+                        "message": job.last_refusal or "Taste training already running",
+                    },
+                    409,
+                )
+            return
+
+        if path == "/api/taste/cancel":
+            job = _taste_job()
+            if job.cancel():
+                self._send_json({"status": "cancelling"})
+            else:
+                self._send_json({"status": "idle", "message": "No taste job running"})
             return
 
         if path == "/api/classify/start":
@@ -1710,7 +1948,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             entries, total = _trash.list_entries(limit=limit, offset=max(0, offset))
             self._send_json(
                 {
-                    "entries": entries,
+                    "entries": [_trash_entry_urls(dict(e)) for e in entries],
                     "total": total,
                     "offset": max(0, offset),
                     "limit": limit,
@@ -1759,6 +1997,9 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             verdict = (query.get("verdict", [""])[0] or "").strip().lower()
             if verdict not in VERDICT_FILTERS:
                 verdict = None
+            label = (query.get("label", [""])[0] or "").strip().lower()
+            if label not in LABEL_FILTERS:
+                label = None
             try:
                 source = _parse_source_filter(query)
             except _BadSource as e:
@@ -1772,8 +2013,24 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 "posted",
                 "posted_oldest",
                 "tier",
+                "foryou",
             ):
                 sort = "name"
+            search_mode = (query.get("mode", ["text"])[0] or "text").lower()
+            if search_mode not in SEARCH_MODES:
+                search_mode = "text"
+            collection_raw = (query.get("collection", [""])[0] or "").strip()
+            collection_id = None
+            if collection_raw:
+                try:
+                    collection_id = int(collection_raw)
+                except ValueError:
+                    self.send_error(400, "collection must be an id")
+                    return
+            setting = (query.get("setting", [""])[0] or "").strip() or None
+            outfit = (query.get("outfit", [""])[0] or "").strip() or None
+            pose = (query.get("pose", [""])[0] or "").strip() or None
+            lighting = (query.get("lighting", [""])[0] or "").strip() or None
             # Collapse a carousel into one tile. Anything other than `post` is
             # a 400 rather than a silent fallback: ungrouped rows against a
             # client that believes it is paging in posts drifts a page at a
@@ -1793,6 +2050,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             limit = max(1, min(limit, MAX_PHOTOS_API_PAGE))
             offset = max(0, offset)
 
+            path_exact = (query.get("path", [""])[0] or "").strip() or None
             photos, total = _archive.query_photos(
                 creator=creator,
                 search=search,
@@ -1801,10 +2059,18 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 media_type=media_type,
                 verdict=verdict,
                 source=source,
+                path=path_exact,
+                label=label,
                 sort=sort,
                 limit=limit,
                 offset=offset,
                 group_posts=group == "post",
+                search_mode=search_mode,
+                collection_id=collection_id,
+                setting=setting,
+                outfit=outfit,
+                pose=pose,
+                lighting=lighting,
             )
             # What the caller must advance `offset` by. Grouped, `total` counts
             # posts while `photos` carries every slide, so neither array length
@@ -1829,6 +2095,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     "verdict": verdict or "",
                     "source": source or "",
                     "group": group,
+                    "mode": search_mode,
                 }
             )
             return
@@ -1932,6 +2199,139 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             )
             return
 
+        if path == "/api/duplicates":
+            from promptstudio.storage.db import ArchiveIndex
+            from promptstudio.storage.dedupe import review_groups
+            from promptstudio.taste import embed_model_name, embedding_near_dup_groups
+
+            kind = (query.get("kind", ["all"])[0] or "all").strip().lower()
+            if kind not in ("phash", "embed", "all"):
+                self.send_error(400, "kind must be phash, embed, or all")
+                return
+            index = ArchiveIndex.get()
+            groups: List[Dict[str, Any]] = []
+            if kind in ("phash", "all"):
+                groups.extend(review_groups(index))
+            if kind in ("embed", "all"):
+                phash_paths = {m["rel_path"] for g in groups for m in g.get("members") or []}
+                embeddings = index.all_embeddings(model=embed_model_name())
+                embed_clusters = embedding_near_dup_groups(
+                    embeddings, exclude=phash_paths
+                )
+                lookup = index.photos_for_rel_paths(
+                    [p for g in embed_clusters for p in g]
+                )
+                from promptstudio.storage.dedupe import _same_post, pick_review_keeper
+
+                for cluster in embed_clusters:
+                    photos: List[Dict[str, Any]] = []
+                    for rel in cluster:
+                        photo = lookup.get(rel)
+                        if not photo:
+                            continue
+                        full = photo.get("full_path") or ""
+                        try:
+                            size = os.path.getsize(full) if full and os.path.isfile(full) else 0
+                        except OSError:
+                            size = 0
+                        photos.append({**photo, "file_size": size})
+                    if len(photos) < 2 or _same_post(photos):
+                        continue
+                    keeper = pick_review_keeper(photos)
+                    members = []
+                    for photo in photos:
+                        rel = photo["rel_path"]
+                        members.append(
+                            {
+                                "rel_path": rel,
+                                "filename": photo.get("filename") or "",
+                                "creator": photo.get("creator") or "",
+                                "url": photo.get("url") or "",
+                                "thumb_url": photo.get("thumb_url") or "",
+                                "favorite": bool(photo.get("favorite")),
+                                "file_size": int(photo.get("file_size") or 0),
+                                "post_id": photo.get("post_id"),
+                                "keeper": rel == keeper,
+                                "preselected": (not photo.get("favorite"))
+                                and rel != keeper,
+                            }
+                        )
+                    groups.append(
+                        {
+                            "kind": "embed",
+                            "keeper": keeper,
+                            "size": len(members),
+                            "members": members,
+                        }
+                    )
+            public = []
+            for g in groups:
+                public.append(
+                    {
+                        **g,
+                        "members": [
+                            {k: v for k, v in m.items() if k != "full_path"}
+                            for m in g.get("members") or []
+                        ],
+                    }
+                )
+            self._send_json(
+                {
+                    "groups": public,
+                    "total_groups": len(public),
+                    "total_members": sum(int(g.get("size") or 0) for g in public),
+                }
+            )
+            return
+
+        if path == "/api/views":
+            from promptstudio.storage.db import ArchiveIndex
+
+            self._send_json({"views": ArchiveIndex.get().list_saved_views()})
+            return
+
+        if path == "/api/collections":
+            from promptstudio.storage.db import ArchiveIndex
+
+            self._send_json({"collections": ArchiveIndex.get().list_collections()})
+            return
+
+        if path == "/api/facets":
+            from promptstudio.storage.db import ArchiveIndex
+
+            self._send_json({"facets": ArchiveIndex.get().facet_counts()})
+            return
+
+        if path == "/api/taste/status":
+            job = _taste_job()
+            from promptstudio.storage.db import ArchiveIndex
+
+            weights = ArchiveIndex.get().get_taste_weights()
+            self._send_json(
+                {
+                    **job.get_status(),
+                    "model": (weights or {}).get("model") or job.get_status().get("model"),
+                    "labelled": (weights or {}).get("labelled"),
+                    "trained_at": (weights or {}).get("trained_at"),
+                }
+            )
+            return
+
+        if path == "/api/labels":
+            from promptstudio.storage.db import ArchiveIndex
+
+            index = ArchiveIndex.get()
+            rel = (query.get("path", [""])[0] or "").strip()
+            if rel:
+                row = index.get_label(urllib.parse.unquote(rel))
+                if not row:
+                    self.send_error(404, "No label")
+                    return
+                self._send_json(row)
+                return
+            self._send_json(index.label_counts())
+            return
+
         if path == "/api/sync/status":
             self._send_json(_sync.get_status())
             return
@@ -1943,6 +2343,10 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             snap = CreatorScrapeQueue.get().status_snapshot()
             snap["enabled"] = True
             snap["sync"] = _sync.get_status()
+            from promptstudio.config import instagram_backend, instagram_cookies_info
+
+            snap["instagram_backend"] = instagram_backend()
+            snap["instagram_cookies"] = instagram_cookies_info()
             self._send_json(snap)
             return
 
@@ -2018,6 +2422,8 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 rating=rating,
                 rated_only=(query.get("rated_only", [""])[0] or "") in ("1", "true"),
                 since=_q("since"),
+                until=_q("until"),
+                has_source=_parse_has_source(query),
                 sort=(query.get("sort", ["newest"])[0] or "newest"),
                 limit=limit,
                 offset=offset,
@@ -2035,6 +2441,9 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 # Surfaced as a flag so the UI can disable regenerate-same-seed
                 # instead of offering a button that cannot reproduce anything.
                 item["seed_recorded"] = int(row["seed"]) >= 0
+                src = (row["source_rel"] or "").strip()
+                item["has_source"] = bool(src)
+                item["source_thumb_url"] = thumb_url(src) if src else ""
                 out.append(item)
             self._send_json(
                 {

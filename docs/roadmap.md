@@ -345,6 +345,15 @@ the prompt blob is rewritten on every regenerate.
 
 ---
 
+## Instagram gallery-dl backend (opt-in) ✅
+
+`IG_BACKEND=gallery-dl` keeps Instaloader in tree and switches the existing
+`instagram` source (same folders, same `photos.source`) onto gallery-dl +
+browser cookies / `IG_COOKIES_FILE`. `user-strategy` is pinned to `search,web`
+so we never call `web_profile_info`. Default remains Instaloader.
+
+---
+
 ## Phase 12f — Multi-source: sources, filter, lanes ✅
 
 **Goal:** make the archive genuinely multi-platform — scrape beyond Instagram,
@@ -575,13 +584,13 @@ labels the product has been discarding, and mine the same embeddings three ways.
 
 | Deliverable | ID | Status |
 |-------------|----|--------|
-| Rapid labeling mode + `labels` table, seeded from `photos.favorite` and `_trash/` | B3 | Todo |
-| SigLIP-2 embeddings cached in `archive.db` + logistic head → calibrated `P(keep)`, "For You" sort | B2 | Todo |
-| Semantic search — text→image over sqlite-vec, `?search=…&mode=semantic` | C1 | Todo |
-| Near-dup collapse — `phash` column first, embedding kNN second | C3 | Todo |
-| Faceted attributes (setting / outfit / framing / pose) as columns + filter chips | C5 | Todo |
-| Collections / saved views — cross-creator boards, saved filter sets | C4 | Todo |
-| Activity view over the run journal (JSONL per job kind) | E2 | Todo |
+| Rapid labeling mode + `labels` table, seeded from `photos.favorite` and `_trash/` | B3 | **Done** |
+| Embeddings cached in `archive.db` (hashed n-grams over vision JSON + prompt; optional Ollama `/api/embed`) + logistic head → `P(keep)`, "For You" sort | B2 | **Done** |
+| Semantic search — `?search=…&mode=semantic` cosine over the same vectors | C1 | **Done** |
+| Near-dup collapse — pHash groups first, embedding kNN second; Duplicates review UI | C3 | **Done** |
+| Faceted attributes (setting / outfit / pose / lighting) as columns + filter chips | C5 | **Done** |
+| Collections / saved views — cross-creator boards, saved filter sets | C4 | **Done** |
+| Activity view over the run journal (JSONL per job kind) | E2 | **Done** |
 
 **One embedding job serves B2, C1 and C3.** Build it once. This retires the
 Phase 6 note ("CLIP? Not needed…") — that call was right for the Comfy loop and

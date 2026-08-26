@@ -29,6 +29,9 @@ os.environ["PROMPTSTUDIO_TRASH"] = "1"
 os.environ["PROMPTSTUDIO_TRASH_DAYS"] = "30"
 os.environ["IG_AUTO_DRAIN_ON_START"] = "0"
 os.environ["INSTAGRAM_SESSION_USER"] = ""
+os.environ["IG_BACKEND"] = "instaloader"
+os.environ["IG_COOKIES_FILE"] = ""
+os.environ["SCRAPE_COOKIES_FROM_BROWSER"] = ""
 # No log file: clean_archive() wipes the archive between tests, and a live
 # RotatingFileHandler would keep writing to the deleted inode.
 os.environ["PROMPTSTUDIO_LOG_FILE"] = ""
@@ -90,6 +93,15 @@ def clean_archive():
         # Generations live under _generations/, which the archive wipe above
         # does remove — but the rows describing them do not go with it.
         index._conn.execute("DELETE FROM generations")
+        index._conn.execute("DELETE FROM labels")
+        index._conn.execute("DELETE FROM embeddings")
+        index._conn.execute("DELETE FROM saved_views")
+        index._conn.execute("DELETE FROM collection_items")
+        index._conn.execute("DELETE FROM collections")
+        index._conn.execute(
+            "DELETE FROM meta WHERE key IN "
+            "('taste_weights', 'facets_backfilled')"
+        )
         if index.fts_enabled:
             index._conn.execute("DELETE FROM prompts_fts")
         index._conn.execute(

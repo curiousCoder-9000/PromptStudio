@@ -55,6 +55,7 @@ def populated(make_photo):
         positive_prompt="a portrait, golden hour",
     )
     index.rate_generation(gen_id, 2)
+    index.set_label(rel, 1)
     return rel, gen_id
 
 
@@ -66,7 +67,7 @@ def _wipe_derived():
 
     index = ArchiveIndex.get()
     with index._lock:
-        for table in ("prompts", "media_verdicts", "phashes", "generations"):
+        for table in ("prompts", "media_verdicts", "phashes", "generations", "labels"):
             index._conn.execute(f"DELETE FROM {table}")
         index._conn.commit()
     PromptCache().invalidate_memory()
@@ -217,6 +218,7 @@ def test_round_trip_restores_every_kind(populated, tmp_path):
     assert len(gens) == 1
     assert gens[0]["rating"] == 2, "the user's judgement did not survive the trip"
     assert gens[0]["seed"] == 4242
+    assert index.get_label(rel)["label"] == 1
 
 
 def test_importing_twice_changes_nothing(populated, tmp_path):

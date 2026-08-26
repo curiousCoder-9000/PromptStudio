@@ -14,8 +14,10 @@ from promptstudio.config import (
     DEFAULT_BIO_KEYWORDS,
     DEFAULT_MIN_MEDIA_COUNT,
     INCLUDE_VIDEOS_DEFAULT,
+    SAVED_DIR,
 )
-from promptstudio.scraping.downloader import InstagramDownloader
+from promptstudio.scraping.sources.base import SourceContext
+from promptstudio.scraping.sources.instagram_source import run_following
 
 
 def main():
@@ -90,7 +92,8 @@ def main():
         include_videos = INCLUDE_VIDEOS_DEFAULT
 
     keywords = [k.strip() for k in args.keywords.split(",") if k.strip()] if args.keywords else []
-    result = InstagramDownloader().sync_following(
+    result = run_following(
+        SourceContext(save_dir=SAVED_DIR, log=print),
         max_accounts=accounts_cap,
         max_posts_per_account=args.max_posts,
         public_only=not args.include_private,

@@ -47,6 +47,7 @@ DERIVED_KINDS = (
     "verdicts",
     "phashes",
     "generations",
+    "labels",
     "workflows",
 )
 
@@ -57,6 +58,7 @@ _TABLE_FOR_KIND = {
     "verdicts": "media_verdicts",
     "phashes": "phashes",
     "generations": "generations",
+    "labels": "labels",
 }
 
 

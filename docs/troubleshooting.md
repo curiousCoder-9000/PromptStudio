@@ -108,9 +108,21 @@ Index is `archive.db` next to media.
 
 ### Instagram rate-limit / abort
 
-- Stop for the day; queue persists in `following_queue.json`.
-- Keep app/browser IG closed during sync.
-- Reuse Instaloader session; do not re-login each run.
+Instaloader’s first call is `Profile.from_username()` →
+`/api/v1/users/web_profile_info/`. That endpoint 429s even on fresh sessions
+(instaloader#2726). 429s are a rolling window, not a calendar-day reset.
+
+- Pause the Instagram lane. Do **not** Resume while `IG_BACKEND` is still
+  Instaloader — that retries `web_profile_info`.
+- Switch: `IG_BACKEND=gallery-dl` plus `SCRAPE_COOKIES_FROM_BROWSER=brave`
+  (or `IG_COOKIES_FILE`). Restart the server. gallery-dl is pinned to
+  `user-strategy=search,web` and never calls `web_profile_info`.
+- Close Brave/Chrome while scraping if cookie read fails (Chromium locks the
+  Cookies SQLite). If `brave` fails: `chrome`, then a profile path, then
+  cookies.txt.
+- Keep the logged-in Instagram tab closed during a scrape — same rate budget.
+- gallery-dl is the most reliable option in practice, not a guarantee.
+  Auth/challenge/zero-download 429s still pause the Instagram lane.
 - See [instagram_downloader.md](instagram_downloader.md).
 
 ### Comfy generate fails

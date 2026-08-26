@@ -157,6 +157,28 @@ _VERDICT_CASE = (
 )
 
 VERDICT_FILTERS = ("keep", "reject", "unclassified", "error", "unusable", "modest")
+LABEL_FILTERS = ("unlabeled", "keep", "discard")
+SEARCH_MODES = ("text", "semantic")
+# C5 — chips over structured_vision fields already produced by the vision call.
+# setting ← background, outfit ← clothing. Framing is not a vision field.
+FACET_KEYS = ("setting", "outfit", "pose", "lighting")
+FACET_SOURCE_FIELDS = {
+    "setting": "background",
+    "outfit": "clothing",
+    "pose": "pose",
+    "lighting": "lighting",
+}
+_FACET_EMPTY = frozenset(("", "unknown", "n/a", "none", "null", "n.a.", "-"))
+_SETTING_CANON = (
+    ("studio", "studio"),
+    ("beach", "beach"),
+    ("street", "street"),
+    ("indoor", "indoor"),
+    ("outdoor", "outdoor"),
+    ("bedroom", "indoor"),
+    ("bathroom", "indoor"),
+    ("pool", "pool"),
+)
 
 # C2 — carousel grouping. One tile per post instead of one per slide.
 #
@@ -196,8 +218,10 @@ def _photo_select(verdict_case: str) -> Tuple[str, str]:
         "v.media_kind AS v_media_kind, v.verdict_source AS v_source, "
         "v.confidence AS v_confidence, v.prompt_version AS v_prompt_version, "
         "v.sheet_path AS v_sheet_path, v.error AS v_error, "
-        f"v.classified_at AS v_classified_at, {verdict_case} AS v_verdict",
-        " FROM photos p LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path",
+        f"v.classified_at AS v_classified_at, {verdict_case} AS v_verdict, "
+        "lb.label AS taste_label, lb.labelled_at AS taste_labelled_at",
+        " FROM photos p LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path "
+        "LEFT JOIN labels lb ON lb.rel_path = p.rel_path",
     )
 
 
@@ -302,6 +326,75 @@ CREATE INDEX IF NOT EXISTS idx_gen_batch ON generations(batch_id);
 DROP INDEX IF EXISTS idx_gen_created;
 """
 
+# B3 — human taste labels for the preference model. Own table, same reason as
+# phashes and verdicts: written by a separate pass (keyboard labeling), absent
+# until that pass runs, and must not widen the row every gallery query reads.
+#
+# `label` is an ordinal, not a boolean: 1 keep, -1 discard. 0 is not stored —
+# returning to unlabelled deletes the row, so "not judged yet" is the absence
+# of a row rather than a third value that would leak into keep_rate later.
+_LABELS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS labels (
+  rel_path     TEXT PRIMARY KEY,
+  label        INTEGER NOT NULL,
+  labelled_at  TEXT NOT NULL,
+  source       TEXT NOT NULL DEFAULT 'manual'
+);
+CREATE INDEX IF NOT EXISTS idx_labels_label ON labels(label);
+"""
+
+# B2 — one vector per photo. Own table, same reason as phashes: written by a
+# separate pass, absent until that pass runs, and a BLOB must not widen the
+# gallery row. dim is stored so a model switch cannot silently mix lengths.
+_EMBEDDINGS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS embeddings (
+  rel_path     TEXT PRIMARY KEY,
+  vector       BLOB NOT NULL,
+  dim          INTEGER NOT NULL,
+  model        TEXT NOT NULL,
+  computed_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_embeddings_model ON embeddings(model);
+"""
+
+# F8 — named filter sets. The cheap 80% of C4; collections (below) are the
+# membership model. filters is a JSON object of gallery query state.
+_SAVED_VIEWS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS saved_views (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL UNIQUE,
+  filters     TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+"""
+
+# C4 — cross-creator boards. Items are archive-relative paths; the board
+# itself is just a name. Membership is the thing saved views cannot express.
+_COLLECTIONS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS collections (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL UNIQUE,
+  created_at  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS collection_items (
+  collection_id  INTEGER NOT NULL,
+  rel_path       TEXT NOT NULL,
+  added_at       TEXT NOT NULL,
+  PRIMARY KEY (collection_id, rel_path)
+);
+CREATE INDEX IF NOT EXISTS idx_collection_items_path ON collection_items(rel_path);
+"""
+
+# Additive columns on photos: C5 facets + B2 p_keep. Applied in
+# _migrate_taste_columns so existing DBs pick them up without a rebuild.
+_TASTE_COLUMNS = (
+    ("facet_setting", "TEXT"),
+    ("facet_outfit", "TEXT"),
+    ("facet_pose", "TEXT"),
+    ("facet_lighting", "TEXT"),
+    ("p_keep", "REAL"),
+)
+
 # Standalone rather than an external-content FTS table: the content table is
 # tiny, and standalone avoids rowid-sync triggers that silently rot if a write
 # path forgets them.
@@ -349,6 +442,37 @@ def _fts_query(raw: str) -> str:
     if not tokens:
         return ""
     return " AND ".join(f'"{t}"*' for t in tokens)
+
+
+def normalize_facet(raw: Any, *, facet: str = "") -> Optional[str]:
+    """First phrase, lowercased, empty/unknown dropped. Setting gets a canon."""
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    if not text:
+        return None
+    text = re.split(r"[,;|/]", text, maxsplit=1)[0]
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text or text in _FACET_EMPTY:
+        return None
+    if facet == "setting":
+        for needle, canon in _SETTING_CANON:
+            if needle in text:
+                return canon
+    if len(text) > 48:
+        text = text[:48].rsplit(" ", 1)[0] or text[:48]
+    return text
+
+
+def facets_from_prompt(entry: Optional[Dict[str, Any]]) -> Dict[str, Optional[str]]:
+    """C5 values from a prompt bundle's structured_vision object."""
+    sv = (entry or {}).get("structured_vision") if isinstance(entry, dict) else None
+    if not isinstance(sv, dict):
+        sv = {}
+    return {
+        facet: normalize_facet(sv.get(src), facet=facet)
+        for facet, src in FACET_SOURCE_FIELDS.items()
+    }
 
 
 def _ratio(num: int, den: int) -> Optional[float]:
@@ -501,11 +625,16 @@ class ArchiveIndex:
             self._conn.executescript(_PHASH_SCHEMA)
             self._conn.executescript(_VERDICT_SCHEMA)
             self._conn.executescript(_GENERATIONS_SCHEMA)
+            self._conn.executescript(_LABELS_SCHEMA)
+            self._conn.executescript(_EMBEDDINGS_SCHEMA)
+            self._conn.executescript(_SAVED_VIEWS_SCHEMA)
+            self._conn.executescript(_COLLECTIONS_SCHEMA)
             self._init_fts()
             self._migrate_identity_columns()
             self._migrate_deleted_posts()
             self._migrate_added_at()
             self._migrate_caption_search()
+            self._migrate_taste_columns()
             self._conn.commit()
         # After the schema commit, not inside it: the import writes rows, and a
         # failure here must leave a usable index rather than an app that will
@@ -589,6 +718,7 @@ class ArchiveIndex:
                 self._prompt_row(rel_path, entry),
             )
             self._reindex_prompt(rel_path, entry)
+            self._apply_facets(rel_path, facets_from_prompt(entry))
             self._conn.commit()
 
     def prompt_get(self, rel_path: str, filename: str = "") -> Optional[Dict[str, Any]]:
@@ -786,6 +916,19 @@ class ArchiveIndex:
         "source": "source_rel ASC, created_at DESC",
     }
 
+    @staticmethod
+    def _iso_day_bound(value: str, *, end: bool) -> str:
+        """Date-only values are inclusive of that calendar day.
+
+        `until=2026-08-10` must not exclude `2026-08-10T15:00:00` just because
+        the timestamp is lexicographically greater than the date. A full ISO
+        string is used as-is.
+        """
+        text = (value or "").strip()
+        if "T" in text:
+            return text
+        return text + ("T23:59:59.999999" if end else "T00:00:00")
+
     def _generations_where(
         self,
         *,
@@ -797,6 +940,8 @@ class ArchiveIndex:
         rating: Optional[int],
         rated_only: bool,
         since: Optional[str],
+        until: Optional[str] = None,
+        has_source: Optional[bool] = None,
     ) -> Tuple[str, List[Any]]:
         where: List[str] = []
         params: List[Any] = []
@@ -822,7 +967,16 @@ class ArchiveIndex:
             where.append("rating != 0")
         if since:
             where.append("created_at >= ?")
-            params.append(since)
+            params.append(self._iso_day_bound(since, end=False))
+        if until:
+            where.append("created_at <= ?")
+            params.append(self._iso_day_bound(until, end=True))
+        # Empty source_rel is how a future pure-txt2img run is stored; the
+        # column is NOT NULL so this cannot be an IS NULL test.
+        if has_source is True:
+            where.append("source_rel != ''")
+        elif has_source is False:
+            where.append("source_rel = ''")
         return (" WHERE " + " AND ".join(where)) if where else "", params
 
     def list_generations(
@@ -836,6 +990,8 @@ class ArchiveIndex:
         rating: Optional[int] = None,
         rated_only: bool = False,
         since: Optional[str] = None,
+        until: Optional[str] = None,
+        has_source: Optional[bool] = None,
         sort: str = "newest",
         limit: Optional[int] = None,
         offset: int = 0,
@@ -855,6 +1011,8 @@ class ArchiveIndex:
             rating=rating,
             rated_only=rated_only,
             since=since,
+            until=until,
+            has_source=has_source,
         )
         order = self._GEN_SORTS.get(sort or "newest", self._GEN_SORTS["newest"])
         sql = f"SELECT * FROM generations{where_sql} ORDER BY {order}"
@@ -897,11 +1055,524 @@ class ArchiveIndex:
             self._conn.commit()
             return str(row["rel_path"])
 
+    # ── B3 taste labels ───────────────────────────────────────────────
+
+    _LABEL_VALUES = frozenset((-1, 0, 1))
+
+    def set_label(
+        self,
+        rel_path: str,
+        label: Any,
+        *,
+        source: str = "manual",
+    ) -> bool:
+        """Write one taste label. `label=0` clears it. Returns False if unknown path.
+
+        Unknown path is only refused for a *set* of 1/-1 on a file that is not
+        in `photos` and not already labelled — a trash-seeded discard is a
+        real negative even though the file has left the gallery.
+        """
+        if isinstance(label, bool) or not isinstance(label, int):
+            raise ValueError("label must be an int in (-1, 0, 1)")
+        if label not in self._LABEL_VALUES:
+            raise ValueError("label must be an int in (-1, 0, 1)")
+        rel = normalize_rel_path(rel_path)
+        if not rel:
+            return False
+        stamp = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            if label == 0:
+                cur = self._conn.execute("DELETE FROM labels WHERE rel_path = ?", (rel,))
+                self._conn.commit()
+                return cur.rowcount > 0
+            existing = self._conn.execute(
+                "SELECT 1 FROM labels WHERE rel_path = ?", (rel,)
+            ).fetchone()
+            in_photos = self._conn.execute(
+                "SELECT 1 FROM photos WHERE rel_path = ?", (rel,)
+            ).fetchone()
+            if not existing and not in_photos:
+                return False
+            self._conn.execute(
+                "INSERT INTO labels(rel_path, label, labelled_at, source) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(rel_path) DO UPDATE SET "
+                "label=excluded.label, labelled_at=excluded.labelled_at, "
+                "source=excluded.source",
+                (rel, label, stamp, source or "manual"),
+            )
+            self._conn.commit()
+            return True
+
+    def get_label(self, rel_path: str) -> Optional[Dict[str, Any]]:
+        rel = normalize_rel_path(rel_path)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT rel_path, label, labelled_at, source FROM labels "
+                "WHERE rel_path = ?",
+                (rel,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def label_counts(self) -> Dict[str, int]:
+        """Keep / discard / labelled totals, plus unlabeled photos still on disk.
+
+        Unlabeled is photos minus labelled-and-still-present. Trash-seeded
+        discards that no longer have a photos row are in `discard` but not
+        subtracted from unlabeled — they are not in the labeling queue.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT "
+                "SUM(CASE WHEN label = 1 THEN 1 ELSE 0 END) AS keep, "
+                "SUM(CASE WHEN label = -1 THEN 1 ELSE 0 END) AS discard, "
+                "COUNT(*) AS labelled "
+                "FROM labels"
+            ).fetchone()
+            unlabeled = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM photos p "
+                "LEFT JOIN labels lb ON lb.rel_path = p.rel_path "
+                "WHERE lb.rel_path IS NULL"
+            ).fetchone()["c"]
+        keep = int(row["keep"] or 0)
+        discard = int(row["discard"] or 0)
+        return {
+            "keep": keep,
+            "discard": discard,
+            "labelled": int(row["labelled"] or 0),
+            "unlabeled": int(unlabeled or 0),
+        }
+
+    def seed_labels(
+        self,
+        *,
+        keep_paths: Sequence[str],
+        discard_paths: Sequence[str],
+    ) -> Dict[str, int]:
+        """Insert labels for existing signals without overwriting a judgement.
+
+        Favorites become keep, trash rel_paths become discard. A path already
+        in `labels` is skipped — the explicit B3 keystroke is the source of
+        truth, not a later favourite toggle.
+        """
+        inserted_keep = 0
+        inserted_discard = 0
+        skipped = 0
+        stamp = datetime.now(timezone.utc).isoformat()
+
+        def _insert(rel: str, value: int, source: str) -> bool:
+            rel = normalize_rel_path(rel)
+            if not rel:
+                return False
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO labels(rel_path, label, labelled_at, source) "
+                "VALUES (?, ?, ?, ?)",
+                (rel, value, stamp, source),
+            )
+            return cur.rowcount > 0
+
+        with self._lock:
+            for raw in keep_paths:
+                if _insert(str(raw), 1, "favorite"):
+                    inserted_keep += 1
+                else:
+                    skipped += 1
+            for raw in discard_paths:
+                if _insert(str(raw), -1, "trash"):
+                    inserted_discard += 1
+                else:
+                    skipped += 1
+            self._conn.commit()
+        return {
+            "inserted_keep": inserted_keep,
+            "inserted_discard": inserted_discard,
+            "skipped": skipped,
+        }
+
+    # ── C5 facets ─────────────────────────────────────────────────────
+
+    def _apply_facets(self, rel_path: str, facets: Dict[str, Optional[str]]) -> None:
+        """Caller MUST hold self._lock. No-op when the photo row is gone."""
+        self._conn.execute(
+            "UPDATE photos SET facet_setting=?, facet_outfit=?, facet_pose=?, "
+            "facet_lighting=? WHERE rel_path = ?",
+            (
+                facets.get("setting"),
+                facets.get("outfit"),
+                facets.get("pose"),
+                facets.get("lighting"),
+                normalize_rel_path(rel_path),
+            ),
+        )
+
+    def backfill_facets(self, *, force: bool = False) -> int:
+        """Copy structured_vision fields onto photos. Idempotent unless force."""
+        if not force and self._meta_get("facets_backfilled") == "1":
+            # Still apply any prompt written since the last backfill.
+            force = False
+        updated = 0
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT p.rel_path, pr.payload FROM photos p "
+                "JOIN prompts pr ON pr.rel_path = p.rel_path"
+                + (
+                    ""
+                    if force
+                    else " WHERE p.facet_setting IS NULL AND p.facet_outfit IS NULL "
+                    "AND p.facet_pose IS NULL AND p.facet_lighting IS NULL"
+                )
+            ).fetchall()
+            for row in rows:
+                try:
+                    entry = json.loads(row["payload"])
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                facets = facets_from_prompt(entry if isinstance(entry, dict) else None)
+                if not any(facets.values()):
+                    continue
+                self._apply_facets(row["rel_path"], facets)
+                updated += 1
+            self._meta_set("facets_backfilled", "1")
+            self._conn.commit()
+        return updated
+
+    def facet_counts(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Per-facet value histogram over photos that have the column set.
+
+        The denominator for B4 is "has this facet", never the whole archive —
+        un-analysed photos are not a vote that the chip is a no-op.
+        """
+        out: Dict[str, List[Dict[str, Any]]] = {k: [] for k in FACET_KEYS}
+        with self._lock:
+            for facet in FACET_KEYS:
+                col = f"facet_{facet}"
+                rows = self._conn.execute(
+                    f"SELECT {col} AS value, COUNT(*) AS n FROM photos "
+                    f"WHERE {col} IS NOT NULL AND {col} != '' "
+                    f"GROUP BY {col} ORDER BY n DESC, value ASC LIMIT 40"
+                ).fetchall()
+                out[facet] = [{"value": r["value"], "count": int(r["n"])} for r in rows]
+        return out
+
+    def facet_bucket_map(self, facet: str) -> Dict[str, int]:
+        """``{value: count}`` for one facet — B4's denominator."""
+        if facet not in FACET_KEYS:
+            return {}
+        col = f"facet_{facet}"
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {col} AS value, COUNT(*) AS n FROM photos "
+                f"WHERE {col} IS NOT NULL AND {col} != '' GROUP BY {col}"
+            ).fetchall()
+        return {str(r["value"]): int(r["n"]) for r in rows}
+
+    # ── B2 embeddings + p_keep ────────────────────────────────────────
+
+    def set_embedding(self, rel_path: str, vector: bytes, *, dim: int, model: str) -> None:
+        rel = normalize_rel_path(rel_path)
+        stamp = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO embeddings(rel_path, vector, dim, model, computed_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(rel_path) DO UPDATE SET "
+                "vector=excluded.vector, dim=excluded.dim, model=excluded.model, "
+                "computed_at=excluded.computed_at",
+                (rel, vector, int(dim), model or "", stamp),
+            )
+            self._conn.commit()
+
+    def paths_missing_embedding(self, *, model: str = "") -> List[str]:
+        with self._lock:
+            if model:
+                rows = self._conn.execute(
+                    "SELECT p.rel_path FROM photos p "
+                    "LEFT JOIN embeddings e ON e.rel_path = p.rel_path "
+                    "WHERE e.rel_path IS NULL OR e.model != ? "
+                    "ORDER BY p.rel_path",
+                    (model,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT p.rel_path FROM photos p "
+                    "LEFT JOIN embeddings e ON e.rel_path = p.rel_path "
+                    "WHERE e.rel_path IS NULL ORDER BY p.rel_path"
+                ).fetchall()
+        return [r["rel_path"] for r in rows]
+
+    def all_embeddings(self, *, model: str = "") -> Dict[str, Any]:
+        """``{rel_path: float32 vector}``. Lazy-import numpy at the call site."""
+        import numpy as np
+
+        with self._lock:
+            if model:
+                rows = self._conn.execute(
+                    "SELECT rel_path, vector, dim FROM embeddings WHERE model = ?",
+                    (model,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    "SELECT rel_path, vector, dim FROM embeddings"
+                ).fetchall()
+        out: Dict[str, Any] = {}
+        for row in rows:
+            vec = np.frombuffer(row["vector"], dtype=np.float32).copy()
+            if int(row["dim"] or 0) and vec.size != int(row["dim"]):
+                continue
+            out[row["rel_path"]] = vec
+        return out
+
+    def labelled_embedding_matrix(
+        self, *, model: str = ""
+    ) -> Optional[Tuple[Any, Any, List[str]]]:
+        """``(X, y, paths)`` for keep=1 / discard=0 rows that have a vector."""
+        import numpy as np
+
+        with self._lock:
+            sql = (
+                "SELECT e.rel_path, e.vector, e.dim, lb.label FROM embeddings e "
+                "JOIN labels lb ON lb.rel_path = e.rel_path "
+                "WHERE lb.label IN (1, -1)"
+            )
+            params: List[Any] = []
+            if model:
+                sql += " AND e.model = ?"
+                params.append(model)
+            rows = self._conn.execute(sql, params).fetchall()
+        if not rows:
+            return None
+        dim = int(rows[0]["dim"] or 0)
+        xs: List[Any] = []
+        ys: List[float] = []
+        paths: List[str] = []
+        for row in rows:
+            vec = np.frombuffer(row["vector"], dtype=np.float32).copy()
+            if dim and vec.size != dim:
+                continue
+            xs.append(vec)
+            ys.append(1.0 if int(row["label"]) == 1 else 0.0)
+            paths.append(row["rel_path"])
+        if not xs:
+            return None
+        return np.stack(xs), np.asarray(ys, dtype=np.float32), paths
+
+    def set_taste_weights(
+        self,
+        weights: Any,
+        bias: float,
+        *,
+        model: str,
+        labelled: int,
+    ) -> None:
+        payload = {
+            "w": [float(x) for x in weights],
+            "b": float(bias),
+            "model": model,
+            "labelled": int(labelled),
+            "trained_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with self._lock:
+            self._meta_set("taste_weights", json.dumps(payload))
+            self._conn.commit()
+
+    def get_taste_weights(self) -> Optional[Dict[str, Any]]:
+        raw = self._meta_get("taste_weights")
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def set_p_keeps(self, items: Sequence[Tuple[str, float]]) -> int:
+        if not items:
+            return 0
+        with self._lock:
+            self._conn.executemany(
+                "UPDATE photos SET p_keep = ? WHERE rel_path = ?",
+                [(float(score), normalize_rel_path(rel)) for rel, score in items],
+            )
+            self._conn.commit()
+        return len(items)
+
+    def p_keep_bucket_map(self) -> Dict[str, int]:
+        """Quartile-ish buckets over scored photos — B4 for a continuous score."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT "
+                "SUM(CASE WHEN p_keep >= 0.75 THEN 1 ELSE 0 END) AS high, "
+                "SUM(CASE WHEN p_keep >= 0.5 AND p_keep < 0.75 THEN 1 ELSE 0 END) AS mid, "
+                "SUM(CASE WHEN p_keep >= 0.25 AND p_keep < 0.5 THEN 1 ELSE 0 END) AS low, "
+                "SUM(CASE WHEN p_keep < 0.25 THEN 1 ELSE 0 END) AS drop "
+                "FROM photos WHERE p_keep IS NOT NULL"
+            ).fetchone()
+        out: Dict[str, int] = {}
+        for key in ("high", "mid", "low", "drop"):
+            n = int(rows[key] or 0)
+            if n:
+                out[key] = n
+        return out
+
+    # ── F8 saved views ────────────────────────────────────────────────
+
+    def list_saved_views(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, name, filters, created_at FROM saved_views "
+                "ORDER BY name COLLATE NOCASE"
+            ).fetchall()
+        out = []
+        for row in rows:
+            try:
+                filters = json.loads(row["filters"])
+            except (json.JSONDecodeError, TypeError):
+                filters = {}
+            out.append(
+                {
+                    "id": int(row["id"]),
+                    "name": row["name"],
+                    "filters": filters if isinstance(filters, dict) else {},
+                    "created_at": row["created_at"],
+                }
+            )
+        return out
+
+    def create_saved_view(self, name: str, filters: Dict[str, Any]) -> Dict[str, Any]:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("name required")
+        if not isinstance(filters, dict):
+            raise ValueError("filters must be an object")
+        stamp = datetime.now(timezone.utc).isoformat()
+        payload = json.dumps(filters, ensure_ascii=False)
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    "INSERT INTO saved_views(name, filters, created_at) VALUES (?, ?, ?)",
+                    (name, payload, stamp),
+                )
+                self._conn.commit()
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("a view with that name already exists") from exc
+            vid = int(cur.lastrowid)
+        return {"id": vid, "name": name, "filters": filters, "created_at": stamp}
+
+    def delete_saved_view(self, view_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM saved_views WHERE id = ?", (int(view_id),)
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    # ── C4 collections ────────────────────────────────────────────────
+
+    def list_collections(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT c.id, c.name, c.created_at, COUNT(i.rel_path) AS n "
+                "FROM collections c LEFT JOIN collection_items i "
+                "ON i.collection_id = c.id "
+                "GROUP BY c.id ORDER BY c.name COLLATE NOCASE"
+            ).fetchall()
+        return [
+            {
+                "id": int(r["id"]),
+                "name": r["name"],
+                "created_at": r["created_at"],
+                "count": int(r["n"] or 0),
+            }
+            for r in rows
+        ]
+
+    def create_collection(self, name: str) -> Dict[str, Any]:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("name required")
+        stamp = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    "INSERT INTO collections(name, created_at) VALUES (?, ?)",
+                    (name, stamp),
+                )
+                self._conn.commit()
+            except sqlite3.IntegrityError as exc:
+                raise ValueError("a collection with that name already exists") from exc
+            cid = int(cur.lastrowid)
+        return {"id": cid, "name": name, "created_at": stamp, "count": 0}
+
+    def delete_collection(self, collection_id: int) -> bool:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM collection_items WHERE collection_id = ?",
+                (int(collection_id),),
+            )
+            cur = self._conn.execute(
+                "DELETE FROM collections WHERE id = ?", (int(collection_id),)
+            )
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def add_collection_items(
+        self, collection_id: int, rel_paths: Sequence[str]
+    ) -> Dict[str, int]:
+        cid = int(collection_id)
+        stamp = datetime.now(timezone.utc).isoformat()
+        added = 0
+        skipped = 0
+        with self._lock:
+            exists = self._conn.execute(
+                "SELECT 1 FROM collections WHERE id = ?", (cid,)
+            ).fetchone()
+            if not exists:
+                raise KeyError("collection not found")
+            for raw in rel_paths:
+                rel = normalize_rel_path(str(raw))
+                if not rel:
+                    skipped += 1
+                    continue
+                in_photos = self._conn.execute(
+                    "SELECT 1 FROM photos WHERE rel_path = ?", (rel,)
+                ).fetchone()
+                if not in_photos:
+                    skipped += 1
+                    continue
+                cur = self._conn.execute(
+                    "INSERT OR IGNORE INTO collection_items"
+                    "(collection_id, rel_path, added_at) VALUES (?, ?, ?)",
+                    (cid, rel, stamp),
+                )
+                if cur.rowcount > 0:
+                    added += 1
+                else:
+                    skipped += 1
+            self._conn.commit()
+        return {"added": added, "skipped": skipped}
+
+    def remove_collection_items(
+        self, collection_id: int, rel_paths: Sequence[str]
+    ) -> int:
+        cid = int(collection_id)
+        rels = [normalize_rel_path(str(p)) for p in rel_paths if str(p).strip()]
+        if not rels:
+            return 0
+        with self._lock:
+            marks = ",".join("?" * len(rels))
+            cur = self._conn.execute(
+                f"DELETE FROM collection_items WHERE collection_id = ? "
+                f"AND rel_path IN ({marks})",
+                [cid, *rels],
+            )
+            self._conn.commit()
+            return cur.rowcount
+
     # Tables the E1 bundle may round-trip. A whitelist, not a free-form table
     # name: the value reaches an unparameterisable position in the SQL, and
     # `photos` is deliberately absent — it is rebuilt from the media on disk,
     # so restoring it would resurrect rows for files that are not there.
-    EXPORTABLE_TABLES = ("prompts", "media_verdicts", "phashes", "generations")
+    EXPORTABLE_TABLES = ("prompts", "media_verdicts", "phashes", "generations", "labels")
 
     def dump_table(self, table: str) -> List[Dict[str, Any]]:
         """Every row of one derived table, as plain dicts."""
@@ -946,6 +1617,7 @@ class ArchiveIndex:
             self._conn.commit()
         if table == "prompts":
             self.reindex_all_prompts()
+            self.backfill_facets(force=True)
         return applied
 
     def reindex_all_prompts(self) -> None:
@@ -1730,6 +2402,24 @@ class ArchiveIndex:
             "WHERE post_id IS NOT NULL AND post_id != ''"
         )
 
+    def _migrate_taste_columns(self) -> None:
+        """C5 facet columns + B2 p_keep on existing photos tables."""
+        cols = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(photos)").fetchall()
+        }
+        for name, col_type in _TASTE_COLUMNS:
+            if name not in cols:
+                self._conn.execute(f"ALTER TABLE photos ADD COLUMN {name} {col_type}")
+        for facet in FACET_KEYS:
+            self._conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_photos_facet_{facet} "
+                f"ON photos(facet_{facet})"
+            )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photos_p_keep ON photos(p_keep)"
+        )
+
     @classmethod
     def get(cls) -> "ArchiveIndex":
         with cls._instance_lock:
@@ -1775,6 +2465,13 @@ class ArchiveIndex:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) AS c FROM photos").fetchone()
             return int(row["c"])
+
+    def all_photo_paths(self) -> List[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT rel_path FROM photos ORDER BY rel_path"
+            ).fetchall()
+        return [r["rel_path"] for r in rows]
 
     def ensure_ready(self, force: bool = False) -> None:
         """Rebuild if forced, empty, or env PROMPTSTUDIO_REBUILD_INDEX."""
@@ -2003,6 +2700,10 @@ class ArchiveIndex:
                 self._conn.execute(
                     "DELETE FROM media_verdicts WHERE rel_path = ?", (rel,)
                 )
+            self._conn.execute("DELETE FROM embeddings WHERE rel_path = ?", (rel,))
+            self._conn.execute(
+                "DELETE FROM collection_items WHERE rel_path = ?", (rel,)
+            )
             self._conn.commit()
 
     def get_photo_source(self, rel_path: str) -> str:
@@ -2300,6 +3001,17 @@ class ArchiveIndex:
             "post_id": row["post_id"] if "post_id" in keys else None,
             "shortcode": row["shortcode"] if "shortcode" in keys else None,
         }
+        if "added_at" in keys and row["added_at"] is not None:
+            photo["added_at"] = float(row["added_at"])
+        if "p_keep" in keys and row["p_keep"] is not None:
+            photo["p_keep"] = round(float(row["p_keep"]), 4)
+        for facet in FACET_KEYS:
+            col = f"facet_{facet}"
+            if col in keys and row[col]:
+                photo[facet] = row[col]
+        if "taste_label" in keys and row["taste_label"] is not None:
+            photo["taste_label"] = int(row["taste_label"])
+            photo["taste_labelled_at"] = row["taste_labelled_at"] or ""
         # Only present when the caller joined media_verdicts (query_photos does;
         # rebuild's internal row reads do not).
         if "v_verdict" in keys and row["v_verdict"] != "unclassified":
@@ -2443,6 +3155,7 @@ class ArchiveIndex:
             "prompts_ready": int(row["prompts_ready"] or 0),
             "unclassified_total": self.unclassified_total(),
             "verdict_facets": self.verdict_facet_counts(),
+            "labels": self.label_counts(),
         }
 
     def unclassified_total(self) -> int:
@@ -2475,11 +3188,19 @@ class ArchiveIndex:
         media_type: Optional[str] = None,
         verdict: Optional[str] = None,
         source: Optional[str] = None,
+        path: Optional[str] = None,
+        label: Optional[str] = None,
         sort: str = "name",
         limit: Optional[int] = None,
         offset: int = 0,
         reject_cut: Optional[int] = None,
         group_posts: bool = False,
+        search_mode: str = "text",
+        collection_id: Optional[int] = None,
+        setting: Optional[str] = None,
+        outfit: Optional[str] = None,
+        pose: Optional[str] = None,
+        lighting: Optional[str] = None,
     ) -> Tuple[List[Dict[str, Any]], int]:
         """Gallery page + the total the caller pages against.
 
@@ -2497,6 +3218,12 @@ class ArchiveIndex:
         if creator:
             where.append("p.creator = ?")
             params.append(creator)
+        if path:
+            # Exact lookup for "open this one photo" — copy-parameters into
+            # the lightbox needs the source row even when it is not on the
+            # current gallery page.
+            where.append("p.rel_path = ?")
+            params.append(normalize_rel_path(path))
         if source:
             where.append("p.source = ?")
             params.append(self._norm_platform(source))
@@ -2526,7 +3253,34 @@ class ArchiveIndex:
                 where.append(clause)
                 params.extend(clause_params)
 
-        if search:
+        if label == "unlabeled":
+            where.append("lb.label IS NULL")
+        elif label == "keep":
+            where.append("lb.label = 1")
+        elif label == "discard":
+            where.append("lb.label = -1")
+
+        if collection_id is not None:
+            where.append(
+                "p.rel_path IN (SELECT rel_path FROM collection_items "
+                "WHERE collection_id = ?)"
+            )
+            params.append(int(collection_id))
+        for facet, value in (
+            ("setting", setting),
+            ("outfit", outfit),
+            ("pose", pose),
+            ("lighting", lighting),
+        ):
+            if value:
+                where.append(f"p.facet_{facet} = ?")
+                params.append(normalize_facet(value, facet=facet) or value.strip().lower())
+
+        semantic = (search_mode or "text").lower() == "semantic" and bool(
+            search and str(search).strip()
+        )
+
+        if search and not semantic:
             q = search.lower().strip()
             like = f"%{q}%"
             fts_query = _fts_query(q) if (self.fts_enabled and FTS_SEARCH) else ""
@@ -2591,6 +3345,12 @@ class ArchiveIndex:
                 "ORDER BY CASE WHEN v.tier IS NULL THEN 9 WHEN v.tier < 0 THEN 8 "
                 "ELSE v.tier END ASC, p.filename ASC"
             )
+        elif sort == "foryou":
+            # Unscored rows (no p_keep yet) sink; among scored, highest first.
+            order = (
+                "ORDER BY CASE WHEN p.p_keep IS NULL THEN 1 ELSE 0 END ASC, "
+                "p.p_keep DESC, p.filename ASC"
+            )
         elif group_posts:
             # Name order, but over the group key rather than the filename —
             # which is the *same* expression the GROUP BY uses, so the whole
@@ -2608,6 +3368,33 @@ class ArchiveIndex:
             order = "ORDER BY p.creator ASC, p.filename ASC"
 
         select_cols, join = _photo_select(verdict_case)
+
+        if semantic:
+            # Rank the filtered set by cosine to the query embedding, then page.
+            # Grouping is skipped: a carousel as one tile fights nearest-neighbour
+            # order, and C1 is a retrieval view not a browse view.
+            from promptstudio.taste import embed_model_name, rank_by_query
+
+            with self._lock:
+                path_rows = self._conn.execute(
+                    f"SELECT p.rel_path{join}{where_sql}", params
+                ).fetchall()
+            candidates = [r["rel_path"] for r in path_rows]
+            embeddings = self.all_embeddings(model=embed_model_name())
+            ranked = rank_by_query(str(search).strip(), embeddings, candidates=candidates)
+            # Paths with no vector go last, original order, so a half-trained
+            # archive still shows the rest of the filter rather than vanishing.
+            have = {rel for rel, _score in ranked}
+            tail = [rel for rel in candidates if rel not in have]
+            ordered = [rel for rel, _score in ranked] + tail
+            total = len(ordered)
+            start = max(0, int(offset))
+            page_paths = (
+                ordered[start : start + int(limit)] if limit is not None else ordered[start:]
+            )
+            lookup = self.photos_for_rel_paths(page_paths, reject_cut=cut)
+            photos = [lookup[p] for p in page_paths if p in lookup]
+            return photos, total
 
         group_sql = ""
         total_sql = f"SELECT COUNT(*) AS c{join}{where_sql}"

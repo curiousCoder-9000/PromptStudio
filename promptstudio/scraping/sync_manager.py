@@ -252,6 +252,10 @@ class SyncManager:
             "any_running": bool(running_lanes),
         }
         status["creator_queue"] = self._creator_queue_summary()
+        from promptstudio.config import instagram_backend, instagram_cookies_info
+
+        status["instagram_backend"] = instagram_backend()
+        status["instagram_cookies"] = instagram_cookies_info()
         return status
 
     @staticmethod

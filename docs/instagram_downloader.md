@@ -5,6 +5,38 @@ Agent map: [context.md](context.md).
 Local archive: `~/Pictures/InstagramSaved` (`PROMPTSTUDIO_ARCHIVE`)  
 Session user: `promptstudio.config.SESSION_USER` from `INSTAGRAM_SESSION_USER` in `.env` (required for scrape)
 
+## Fetch backend (`IG_BACKEND`)
+
+Instagram stays one source / one lane / bare-handle folders. The tool that
+talks to Instagram is switchable:
+
+| `IG_BACKEND` | Auth | First request | Cancel |
+|--------------|------|---------------|--------|
+| `instaloader` (default) | `session-<user>` file | `Profile.from_username()` → `web_profile_info` | cooperative; Instaloader’s 429 sleep is **not** interruptible |
+| `gallery-dl` | `IG_COOKIES_FILE` or `SCRAPE_COOKIES_FROM_BROWSER` | gallery-dl `user-strategy=search,web` — **never** `web_profile_info` | kills the subprocess |
+
+gallery-dl + a real logged-in browser session is the **most reliable option in
+practice** right now (Instaloader issue #2726). It is not undetectable.
+Instagram can still challenge, rate-limit, or lock the account.
+
+```ini
+IG_BACKEND=gallery-dl
+SCRAPE_COOKIES_FROM_BROWSER=brave
+# or: IG_COOKIES_FILE=C:\path\to\ig-cookies.txt
+```
+
+Restart the server after changing `IG_BACKEND`. Close Brave/Chrome while
+scraping if cookie-DB read fails; Chromium locks `Cookies` SQLite. If `brave`
+fails: `chrome`, then a profile path, then export Netscape cookies.txt.
+Do not run the logged-in browser and a scrape at the same time — they share
+Instagram’s rate budget.
+
+Saved posts on the gallery-dl backend use
+`https://www.instagram.com/{INSTAGRAM_SESSION_USER}/saved/` (the session user
+is still required for the URL, even though the Instaloader session file is
+not). Following bulk keeps `following_list.json` and Instagram lane pacing;
+each account is a gallery-dl profile scrape (chronological, **no caption rank**).
+
 ---
 
 ## Sync modes

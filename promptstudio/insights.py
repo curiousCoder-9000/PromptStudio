@@ -5,6 +5,7 @@ No new instrumentation. Reads:
 - prompt bundles (`manual_edit`, `history`, pipeline version) — edit/regenerate rates
 - the `generations` table — output volume and `keep_rate` (A0/A3)
 - `media_verdicts` — the classifier's tier distribution
+- `labels` — B3 taste keep/discard (own denominator: labelled rows only)
 
 `saturation_report` is the B4 platform rule and the only part of this module
 that is not a dashboard: it is the shared answer to "has one bucket eaten this
@@ -234,6 +235,70 @@ def _classify_insights() -> Dict[str, Any]:
     }
 
 
+def _label_insights() -> Dict[str, Any]:
+    """B3 taste labels. Keep rate over labelled rows only — unlabeled is not a vote."""
+    from promptstudio.config import DISTRIBUTION_MIN_RATED
+    from promptstudio.storage.db import ArchiveIndex
+
+    counts = ArchiveIndex.get().label_counts()
+    labelled = int(counts.get("labelled") or 0)
+    keep = int(counts.get("keep") or 0)
+    discard = int(counts.get("discard") or 0)
+    buckets = {}
+    if keep:
+        buckets["keep"] = keep
+    if discard:
+        buckets["discard"] = discard
+    return {
+        **counts,
+        "keep_rate": _rate(keep, labelled),
+        "saturation": saturation_report(
+            buckets, what="taste label", min_n=DISTRIBUTION_MIN_RATED
+        ),
+    }
+
+
+def _facet_insights() -> Dict[str, Any]:
+    """C5 chip distributions. Each facet's denominator is populated values only."""
+    from promptstudio.config import DISTRIBUTION_MIN_CLASSIFIED
+    from promptstudio.storage.db import FACET_KEYS, ArchiveIndex
+
+    index = ArchiveIndex.get()
+    counts = index.facet_counts()
+    out: Dict[str, Any] = {}
+    for facet in FACET_KEYS:
+        buckets = {row["value"]: int(row["count"]) for row in counts.get(facet) or []}
+        out[facet] = {
+            "n": sum(buckets.values()),
+            "values": counts.get(facet) or [],
+            "saturation": saturation_report(
+                buckets, what=f"facet {facet}", min_n=DISTRIBUTION_MIN_CLASSIFIED
+            ),
+        }
+    return out
+
+
+def _taste_insights() -> Dict[str, Any]:
+    """B2 p_keep buckets over scored photos only."""
+    from promptstudio.config import DISTRIBUTION_MIN_RATED
+    from promptstudio.storage.db import ArchiveIndex
+
+    index = ArchiveIndex.get()
+    buckets = index.p_keep_bucket_map()
+    weights = index.get_taste_weights() or {}
+    n = sum(buckets.values())
+    return {
+        "n": n,
+        "model": weights.get("model"),
+        "labelled": weights.get("labelled"),
+        "trained_at": weights.get("trained_at"),
+        "buckets": buckets,
+        "saturation": saturation_report(
+            buckets, what="p_keep", min_n=DISTRIBUTION_MIN_RATED
+        ),
+    }
+
+
 def compute_insights() -> Dict[str, Any]:
     """Aggregate B1 quality signals for GET /api/insights."""
     try:
@@ -251,9 +316,27 @@ def compute_insights() -> Dict[str, Any]:
     except Exception as e:
         log.exception("classify insights failed: %s", e)
         classify = {"classified": 0, "error": str(e)}
+    try:
+        labels = _label_insights()
+    except Exception as e:
+        log.exception("label insights failed: %s", e)
+        labels = {"labelled": 0, "error": str(e)}
+    try:
+        facets = _facet_insights()
+    except Exception as e:
+        log.exception("facet insights failed: %s", e)
+        facets = {"error": str(e)}
+    try:
+        taste = _taste_insights()
+    except Exception as e:
+        log.exception("taste insights failed: %s", e)
+        taste = {"n": 0, "error": str(e)}
 
     return {
         "prompts": prompts,
         "generations": generations,
         "classify": classify,
+        "labels": labels,
+        "facets": facets,
+        "taste": taste,
     }

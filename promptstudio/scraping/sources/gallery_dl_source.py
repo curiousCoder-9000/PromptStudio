@@ -53,6 +53,7 @@ from promptstudio.config import (
     SCRAPE_SLEEP_SEC,
     X_INCLUDE_RETWEETS,
     X_MEDIA_TIMELINE_ONLY,
+    resolve_gallery_dl_cmd,
 )
 from promptstudio.scraping.results import SyncResult
 from promptstudio.scraping.sources.base import (
@@ -168,6 +169,14 @@ def _first(raw: Dict[str, Any], *keys: str, default: Any = "") -> Any:
     return default
 
 
+def _caption_text(raw: Dict[str, Any]) -> str:
+    """Instagram caption may be a string or `{text: ...}` object."""
+    cap = _first(raw, "description", "caption", default="")
+    if isinstance(cap, dict):
+        return str(cap.get("text") or cap.get("caption") or "")
+    return str(cap or "")
+
+
 class GalleryDlSource:
     """Shared gallery-dl driver. Subclasses supply target parsing and mapping."""
 
@@ -183,8 +192,38 @@ class GalleryDlSource:
     def _cookies_file(self) -> str:
         return ""
 
+    def _cookies_from_browser(self) -> str:
+        return GALLERY_DL_COOKIES_FROM_BROWSER
+
+    def _pacing_sleep(self) -> float:
+        return SCRAPE_SLEEP_SEC
+
+    def _pacing_sleep_request(self) -> float:
+        return SCRAPE_SLEEP_REQUEST_SEC
+
+    def _pacing_sleep_429(self) -> float:
+        return SCRAPE_SLEEP_429_SEC
+
+    def _destination_argv(self, dest: str, target: SourceTarget) -> List[str]:
+        """`-D`: exact dir, no extractor subdirs. Saved-post runs override."""
+        return ["--directory", dest]
+
+    def _ceiling_argv(self, options: ScrapeOptions) -> List[str]:
+        """`--range` counts files considered, including skipped ones."""
+        ceiling = options.max_posts
+        if ceiling is not None and int(ceiling) > 0 and options.mode != "full":
+            return ["--range", f"1-{int(ceiling)}"]
+        return []
+
     def _extractor_options(self, options: ScrapeOptions) -> List[str]:
         return []
+
+    def _gallery_dl_cmd(self) -> List[str]:
+        """Honours the module-level GALLERY_DL_BIN (tests patch it)."""
+        return resolve_gallery_dl_cmd(GALLERY_DL_BIN)
+
+    def _list_media(self, dest: str, target: SourceTarget) -> set:
+        return self._snapshot(dest)
 
     def _map_raw(self, raw: Dict[str, Any], target: SourceTarget) -> NormalizedPost:
         raise NotImplementedError
@@ -198,22 +237,18 @@ class GalleryDlSource:
         dest: str,
     ) -> List[str]:
         argv = [
-            GALLERY_DL_BIN,
-            "--directory", dest,          # -D: exact dir, no extractor subdirs
+            *self._gallery_dl_cmd(),
+            *self._destination_argv(dest, target),
             "--filename", self._filename_format(target),
             "--write-metadata",
             "--retries", str(max(0, int(SCRAPE_RETRIES))),
-            "--sleep", str(SCRAPE_SLEEP_SEC),
-            "--sleep-request", str(SCRAPE_SLEEP_REQUEST_SEC),
-            "--sleep-429", str(SCRAPE_SLEEP_429_SEC),
+            "--sleep", str(self._pacing_sleep()),
+            "--sleep-request", str(self._pacing_sleep_request()),
+            "--sleep-429", str(self._pacing_sleep_429()),
             "--no-part",  # no .part files left behind if we terminate mid-download
         ]
 
-        # Ceiling. `--range` counts files considered, including skipped ones, so
-        # it is a scan bound rather than an exact download count.
-        ceiling = options.max_posts
-        if ceiling is not None and int(ceiling) > 0 and options.mode != "full":
-            argv += ["--range", f"1-{int(ceiling)}"]
+        argv += self._ceiling_argv(options)
 
         # Catch-up: gallery-dl's own "stop after N consecutive skips".
         if options.mode != "full" or not options.deep:
@@ -227,8 +262,10 @@ class GalleryDlSource:
         cookies = self._cookies_file()
         if cookies and os.path.isfile(cookies):
             argv += ["--cookies", cookies]
-        elif GALLERY_DL_COOKIES_FROM_BROWSER:
-            argv += ["--cookies-from-browser", GALLERY_DL_COOKIES_FROM_BROWSER]
+        else:
+            browser = self._cookies_from_browser()
+            if browser:
+                argv += ["--cookies-from-browser", browser]
 
         argv += self._extractor_options(options)
 
@@ -271,13 +308,14 @@ class GalleryDlSource:
         )
         ctx.log("gallery-dl " + " ".join(shlex.quote(a) for a in argv[1:]))
 
-        before = self._snapshot(dest)
+        before = self._list_media(dest, target)
 
         try:
             code, lines = self._spawn(argv, ctx, result)
         except FileNotFoundError:
+            looked = " ".join(self._gallery_dl_cmd()) or GALLERY_DL_BIN
             msg = (
-                f"gallery-dl not found (looked for '{GALLERY_DL_BIN}'). "
+                f"gallery-dl not found (looked for '{looked}'). "
                 "Install it with: pip install gallery-dl"
             )
             result.errors += 1
@@ -288,7 +326,7 @@ class GalleryDlSource:
 
         # Convert whatever landed, even on a non-zero exit — a partial run still
         # produced real files that must be indexed.
-        added = sorted(self._snapshot(dest) - before)
+        added = sorted(self._list_media(dest, target) - before)
         converted, convert_errors, newest = self._ingest(added, target, save_dir, ctx)
         result.downloaded = converted
         result.errors += convert_errors
@@ -345,6 +383,21 @@ class GalleryDlSource:
             }
         except OSError:
             return set()
+
+    @staticmethod
+    def _snapshot_tree(root: str) -> set:
+        """Media files under `root`, relative paths, skipping `_` dirs."""
+        found: set = set()
+        try:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if not d.startswith("_")]
+                for name in filenames:
+                    if name.lower().endswith(MEDIA_EXTENSIONS):
+                        full = os.path.join(dirpath, name)
+                        found.add(os.path.relpath(full, root))
+        except OSError:
+            return found
+        return found
 
     def _spawn(
         self,
@@ -594,6 +647,8 @@ class GalleryDlSource:
             raw = self._read_gdl_meta(full)
             try:
                 post = self._map_raw(raw, target)
+                if self._discard_if_tombstoned(post, full, ctx):
+                    continue
                 carousel_index = self._carousel_index(raw)
                 meta = build_metadata_from_normalized(post, carousel_index=carousel_index)
                 if not meta.get("taken_at"):
@@ -669,6 +724,39 @@ class GalleryDlSource:
         except (TypeError, ValueError):
             return 0
         return max(0, num - 1)
+
+    def _discard_if_tombstoned(
+        self,
+        post: NormalizedPost,
+        full: str,
+        ctx: SourceContext,
+    ) -> bool:
+        """Drop a re-download the user already deleted. Returns True if skipped.
+
+        gallery-dl cannot see `deleted_posts`. Re-indexing a trashed Instagram
+        post would resurrect it in the gallery; unlinking restores the delete.
+        """
+        if not (post.post_id or post.shortcode):
+            return False
+        try:
+            from promptstudio.storage.db import ArchiveIndex
+
+            if not ArchiveIndex.get().is_deleted_post(
+                post.creator,
+                shortcode=post.shortcode or None,
+                post_id=post.post_id or None,
+                platform=post.source,
+            ):
+                return False
+        except Exception:
+            return False
+        ctx.log(f"Skipping tombstoned {post.identity()} ({os.path.basename(full)})")
+        self._discard_gdl_meta(full)
+        try:
+            os.remove(full)
+        except OSError:
+            pass
+        return True
 
 
 class XSource(GalleryDlSource):
@@ -841,5 +929,196 @@ class RedditSource(GalleryDlSource):
                     for k in ("score", "num_comments", "over_18", "flair")
                     if k in raw
                 },
+            },
+        )
+
+
+class InstagramGalleryDlSource(GalleryDlSource):
+    """Instagram via gallery-dl. Not a registry source — InstagramSource dispatches here.
+
+    Same lane, same bare-handle folders, same `photos.source=instagram` as
+    Instaloader. The point is to avoid `web_profile_info` (user-strategy is
+    pinned to search,web) while keeping Instaloader selectable via IG_BACKEND.
+    """
+
+    name = "instagram"
+    label = "Instagram"
+    extractor = "instagram"
+    _COOKIES_HINT = (
+        "Instagram gallery-dl needs IG_COOKIES_FILE or "
+        "SCRAPE_COOKIES_FROM_BROWSER — Instaloader session files are not cookies"
+    )
+
+    def parse_target(self, target: str, **kwargs: Any) -> SourceTarget:
+        raw = (target or "").strip()
+        handle = sanitize_folder(raw)
+        if not handle:
+            raise ValueError("Instagram handle required")
+        return SourceTarget(
+            source=self.name,
+            raw=raw,
+            url=f"https://www.instagram.com/{handle}/",
+            folder=resolve_folder_name(self.name, handle),
+            handle=handle,
+            label=f"@{handle}",
+        )
+
+    def parse_saved_target(self, session_user: str) -> SourceTarget:
+        handle = sanitize_folder(session_user)
+        if not handle:
+            raise ValueError(
+                "INSTAGRAM_SESSION_USER is not set. Copy .env.example to .env "
+                "and set your Instagram username (used in the /saved/ URL)."
+            )
+        return SourceTarget(
+            source=self.name,
+            raw=handle,
+            url=f"https://www.instagram.com/{handle}/saved/",
+            folder="",
+            handle=handle,
+            kind="saved",
+            label=f"@{handle} saved",
+        )
+
+    def _cookies_file(self) -> str:
+        from promptstudio.config import instagram_cookies_file
+
+        return instagram_cookies_file()
+
+    def _cookies_from_browser(self) -> str:
+        from promptstudio.config import scrape_cookies_from_browser
+
+        return scrape_cookies_from_browser()
+
+    def _pacing_sleep(self) -> float:
+        from promptstudio.config import ig_gdl_sleep_sec
+
+        return ig_gdl_sleep_sec()
+
+    def _pacing_sleep_request(self) -> float:
+        from promptstudio.config import ig_gdl_sleep_request_sec
+
+        return ig_gdl_sleep_request_sec()
+
+    def _pacing_sleep_429(self) -> float:
+        from promptstudio.config import ig_gdl_sleep_429_sec
+
+        return ig_gdl_sleep_429_sec()
+
+    def _destination_argv(self, dest: str, target: SourceTarget) -> List[str]:
+        if target.kind == "saved":
+            # Saved posts belong to many owners. `-d` + directory={username}
+            # lands each file in that owner's archive folder.
+            return [
+                "--base-directory",
+                dest,
+                "-o",
+                'extractor.instagram.directory=["{username}"]',
+            ]
+        return super()._destination_argv(dest, target)
+
+    def _filename_format(self, target: SourceTarget) -> str:
+        if target.kind == "saved":
+            return (
+                "{username}_{date:%Y-%m-%d_%H-%M-%S}_UTC"
+                "_{num:>02}.{extension}"
+            )
+        return super()._filename_format(target)
+
+    def _ceiling_argv(self, options: ScrapeOptions) -> List[str]:
+        from promptstudio.config import FULL_SCRAPE_MAX_POSTS
+
+        if options.mode == "full" and options.deep:
+            n = int(FULL_SCRAPE_MAX_POSTS)
+        elif options.max_posts is not None and int(options.max_posts) > 0:
+            n = int(options.max_posts)
+        else:
+            n = int(options.resolved_max_posts())
+        if n > 0:
+            return ["-o", f"extractor.instagram.max-posts={n}"]
+        return []
+
+    def _extractor_options(self, options: ScrapeOptions) -> List[str]:
+        videos = "true" if options.include_videos else "false"
+        return [
+            "-o",
+            "extractor.instagram.user-strategy=search,web",
+            "-o",
+            "extractor.instagram.include=posts",
+            "-o",
+            "extractor.instagram.api=rest",
+            "-o",
+            f"extractor.instagram.videos={videos}",
+        ]
+
+    def _list_media(self, dest: str, target: SourceTarget) -> set:
+        if target.kind == "saved":
+            return self._snapshot_tree(dest)
+        return self._snapshot(dest)
+
+    def run(
+        self,
+        target: SourceTarget,
+        options: ScrapeOptions,
+        ctx: SourceContext,
+    ) -> SyncResult:
+        from promptstudio.config import instagram_cookies_info
+
+        info = instagram_cookies_info()
+        if not info.get("ready"):
+            result = SyncResult(
+                job_type="saved" if target.kind == "saved" else "creator",
+                source=self.name,
+            )
+            result.errors = 1
+            result.stop_reason = "error"
+            result.messages.append(self._COOKIES_HINT)
+            ctx.log(self._COOKIES_HINT)
+            return result
+        result = super().run(target, options, ctx)
+        if target.kind == "saved":
+            result.job_type = "saved"
+        return result
+
+    def _map_raw(self, raw: Dict[str, Any], target: SourceTarget) -> NormalizedPost:
+        post_id = str(_first(raw, "post_id", "pk", "media_id", default="") or "")
+        shortcode = str(
+            _first(raw, "post_shortcode", "shortcode", "code", default="") or ""
+        )
+        owner = sanitize_folder(
+            str(
+                _first(
+                    raw,
+                    "username",
+                    "owner.username",
+                    default=target.handle,
+                )
+                or target.handle
+            )
+        )
+        creator = owner or target.folder or target.handle
+        extension = str(_first(raw, "extension", default="")).lower()
+        post_url = str(_first(raw, "post_url", default="") or "")
+        if not post_url and shortcode:
+            post_url = f"https://www.instagram.com/p/{shortcode}/"
+        try:
+            media_count = int(_first(raw, "count", default=1) or 1)
+        except (TypeError, ValueError):
+            media_count = 1
+        return NormalizedPost(
+            source=self.name,
+            creator=creator,
+            post_id=post_id,
+            shortcode=shortcode,
+            taken_at=_parse_dt(_first(raw, "date", "post_date", default=None)),
+            caption=_caption_text(raw),
+            is_video=extension in ("mp4", "webm", "m4v", "mov"),
+            media_count=max(1, media_count),
+            post_url=post_url,
+            author=owner,
+            extra={
+                k: raw[k]
+                for k in ("likes", "like_count", "pinned")
+                if k in raw
             },
         )

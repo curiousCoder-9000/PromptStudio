@@ -60,8 +60,23 @@ TIER_SQL = "SELECT tier, COUNT(*) FROM media_verdicts WHERE tier >= 0 GROUP BY t
 # bucket would fire on an archive nobody has judged — the false alarm that
 # gets a guard switched off.
 RATING_SQL = "SELECT rating, COUNT(*) FROM generations WHERE rating != 0 GROUP BY rating"
+LABEL_SQL = "SELECT label, COUNT(*) FROM labels GROUP BY label"
+FACET_SQL = {
+    "setting": "SELECT facet_setting, COUNT(*) FROM photos WHERE facet_setting IS NOT NULL AND facet_setting != '' GROUP BY facet_setting",
+    "outfit": "SELECT facet_outfit, COUNT(*) FROM photos WHERE facet_outfit IS NOT NULL AND facet_outfit != '' GROUP BY facet_outfit",
+    "pose": "SELECT facet_pose, COUNT(*) FROM photos WHERE facet_pose IS NOT NULL AND facet_pose != '' GROUP BY facet_pose",
+    "lighting": "SELECT facet_lighting, COUNT(*) FROM photos WHERE facet_lighting IS NOT NULL AND facet_lighting != '' GROUP BY facet_lighting",
+}
+PKEEP_SQL = (
+    "SELECT CASE "
+    "WHEN p_keep >= 0.75 THEN 'high' "
+    "WHEN p_keep >= 0.5 THEN 'mid' "
+    "WHEN p_keep >= 0.25 THEN 'low' "
+    "ELSE 'drop' END, COUNT(*) FROM photos WHERE p_keep IS NOT NULL GROUP BY 1"
+)
 
 RATING_LABELS = {"-1": "discard", "1": "keep", "2": "star"}
+LABEL_NAMES = {"-1": "discard", "1": "keep"}
 
 
 def _read_only_counts(db_path: str, sql: str) -> Dict[str, int]:
@@ -110,6 +125,22 @@ def rating_buckets(db_path: str) -> Dict[str, int]:
         RATING_LABELS.get(r, f"rating {r}"): n
         for r, n in _read_only_counts(db_path, RATING_SQL).items()
     }
+
+
+def label_buckets(db_path: str) -> Dict[str, int]:
+    return {
+        LABEL_NAMES.get(r, f"label {r}"): n
+        for r, n in _read_only_counts(db_path, LABEL_SQL).items()
+    }
+
+
+def facet_buckets(db_path: str, facet: str) -> Dict[str, int]:
+    sql = FACET_SQL[facet]
+    return _read_only_counts(db_path, sql)
+
+
+def p_keep_buckets(db_path: str) -> Dict[str, int]:
+    return _read_only_counts(db_path, PKEEP_SQL)
 
 
 # ── 1. the rule ──────────────────────────────────────────────────────
@@ -341,5 +372,91 @@ def test_generation_rating_distribution_is_not_saturated():
     assert_not_saturated(
         rating_buckets(GUARD_DB),
         what=f"generation rating ({GUARD_DB})",
+        min_n=DISTRIBUTION_MIN_RATED,
+    )
+
+
+def test_taste_labels_are_judged_over_the_labelled_denominator(make_photo):
+    """Unlabeled photos are not a bucket. Counting them would fire on every
+    fresh archive, which is how a guard gets switched off."""
+    index = ArchiveIndex.get()
+    for i in range(12):
+        rel, _ = make_photo(name=f"want_{i}.jpg")
+        index.set_label(rel, 1)
+    for i in range(8):
+        make_photo(name=f"unseen_{i}.jpg")
+
+    counts = label_buckets(ARCHIVE_DB_FILE)
+    assert counts == {"keep": 12}, counts
+    with pytest.raises(AssertionError) as caught:
+        assert_not_saturated(counts, what="taste label", min_n=10)
+    assert "keep" in str(caught.value)
+
+
+def test_archive_taste_label_distribution_is_not_saturated():
+    assert_not_saturated(
+        label_buckets(GUARD_DB),
+        what=f"taste label ({GUARD_DB})",
+        min_n=DISTRIBUTION_MIN_RATED,
+    )
+
+
+def test_a_saturated_facet_is_caught_on_its_own_denominator(make_photo):
+    """C5 chips filter on populated values. Un-analysed photos are not a vote."""
+    from promptstudio.prompts.cache import PromptCache
+
+    for i in range(12):
+        rel, _ = make_photo(name=f"st_{i}.jpg")
+        PromptCache().set(
+            rel,
+            {
+                "positive_prompt": "x",
+                "structured_vision": {
+                    "background": "studio backdrop",
+                    "clothing": "dress",
+                    "pose": "standing",
+                    "lighting": "soft",
+                },
+            },
+            push_history=False,
+        )
+    for i in range(8):
+        make_photo(name=f"bare_{i}.jpg")
+
+    counts = facet_buckets(ARCHIVE_DB_FILE, "setting")
+    assert counts == {"studio": 12}, counts
+    with pytest.raises(AssertionError) as caught:
+        assert_not_saturated(counts, what="facet setting", min_n=10)
+    assert "studio" in str(caught.value)
+
+
+def test_p_keep_guard_ignores_unscored_rows(make_photo):
+    index = ArchiveIndex.get()
+    scored = []
+    for i in range(12):
+        rel, _ = make_photo(name=f"pk_{i}.jpg")
+        scored.append(rel)
+    make_photo(name="unscored.jpg")
+    index.set_p_keeps([(rel, 0.9) for rel in scored])
+
+    counts = p_keep_buckets(ARCHIVE_DB_FILE)
+    assert counts == {"high": 12}, counts
+    with pytest.raises(AssertionError):
+        assert_not_saturated(counts, what="p_keep", min_n=10)
+
+
+def test_archive_facet_distributions_are_not_saturated():
+    for facet in FACET_SQL:
+        assert_not_saturated(
+            facet_buckets(GUARD_DB, facet),
+            what=f"facet {facet} ({GUARD_DB})",
+            min_n=DISTRIBUTION_MIN_CLASSIFIED,
+        )
+
+
+def test_archive_p_keep_distribution_is_not_saturated():
+    assert_not_saturated(
+        p_keep_buckets(GUARD_DB),
+        what=f"p_keep ({GUARD_DB})",
         min_n=DISTRIBUTION_MIN_RATED,
     )

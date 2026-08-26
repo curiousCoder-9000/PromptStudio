@@ -4,6 +4,7 @@ const state = {
     photos: [],
     selectedCreator: null,
     searchQuery: '',
+    searchMode: 'text',
     creatorSearchQuery: '',
     unanalyzedOnly: false,
     favoritesOnly: false,
@@ -26,6 +27,9 @@ const state = {
     trashCount: 0,
     ollamaOnline: null,
     comfyOnline: null,
+    // Instagram fetch tool. Server-side (IG_BACKEND); not a view pref.
+    instagramBackend: 'instaloader',
+    instagramCookies: { mode: 'none', ready: false },
     comfyPollTimer: null,
     // A4 registry, from /api/workflows. Which graph runs is a user choice now,
     // not something inferred from which of three buttons was pressed.
@@ -46,6 +50,11 @@ const state = {
     outputsHasMore: false,
     outputsRequest: null,
     outputDetail: null,
+    // Card that 1/2/0/x will rate while the outputs grid is on screen.
+    outputsFocusedId: null,
+    // Photo temporarily pushed so copy-params can open a source that was
+    // not on the current gallery page. Spliced back out on lightbox close.
+    lightboxPushedPhoto: null,
     // One batch, viewed as a contact sheet. Not a <select> like the other
     // filters: batch ids are opaque hex, so the only sensible way in is the
     // completion toast, and the only sensible way out is a clear button.
@@ -69,10 +78,15 @@ const state = {
     batchWasRunning: false,
     classifyPollTimer: null,
     classifyStatus: null,
+    tastePollTimer: null,
     // Review mode is deliberately NOT in PREF_FIELDS: a refresh must never drop
     // you into a delete-oriented mode. Same rule as selection and select mode.
     reviewMode: false,
     verdictFilter: 'reject',
+    // B3 taste labeling. Not a view pref — same rule as reviewMode.
+    labelMode: false,
+    labelFilter: 'unlabeled',
+    labelCounts: null,
     // Verdict as a *browse* filter, outside review mode. Unlike reviewMode this
     // IS a view pref: it filters, it never deletes, so restoring it on refresh
     // is helpful rather than hostile.
@@ -81,6 +95,17 @@ const state = {
     // sidebar AND the gallery, so a merged folder shows only its X half when
     // X is picked. Comes from photos.source, never the folder-name suffix.
     sourceFilter: '',
+    facetSetting: '',
+    facetOutfit: '',
+    facetPose: '',
+    facetLighting: '',
+    collectionId: null,
+    collectionName: '',
+    facetOptions: null,
+    savedViews: [],
+    collections: [],
+    activityKind: '',
+    duplicatesSelected: new Set(),
     // [{name, label}] from /api/sources; null until the first fetch lands.
     knownSources: null,
     // Archive-wide unclassified count from /api/stats. Deliberately separate
@@ -138,6 +163,7 @@ const elements = {
     galleryTitle: document.getElementById('galleryTitle'),
     galleryCount: document.getElementById('galleryCount'),
     searchInput: document.getElementById('searchInput'),
+    semanticSearchBtn: document.getElementById('semanticSearchBtn'),
     clearSearch: document.getElementById('clearSearch'),
     emptyState: document.getElementById('emptyState'),
     refreshBtn: document.getElementById('refreshBtn'),
@@ -146,6 +172,34 @@ const elements = {
     newCreatorBtn: document.getElementById('newCreatorBtn'),
     uploadPhotoBtn: document.getElementById('uploadPhotoBtn'),
     // Trash (soft delete)
+    duplicatesBtn: document.getElementById('duplicatesBtn'),
+    duplicatesModal: document.getElementById('duplicatesModal'),
+    duplicatesModalOverlay: document.getElementById('duplicatesModalOverlay'),
+    duplicatesBody: document.getElementById('duplicatesBody'),
+    closeDuplicatesBtn: document.getElementById('closeDuplicatesBtn'),
+    doneDuplicatesBtn: document.getElementById('doneDuplicatesBtn'),
+    duplicatesSweepBtn: document.getElementById('duplicatesSweepBtn'),
+    activityBtn: document.getElementById('activityBtn'),
+    activityModal: document.getElementById('activityModal'),
+    activityModalOverlay: document.getElementById('activityModalOverlay'),
+    activityKindRow: document.getElementById('activityKindRow'),
+    activityBody: document.getElementById('activityBody'),
+    closeActivityBtn: document.getElementById('closeActivityBtn'),
+    refreshActivityBtn: document.getElementById('refreshActivityBtn'),
+    doneActivityBtn: document.getElementById('doneActivityBtn'),
+    savedViewsList: document.getElementById('savedViewsList'),
+    saveViewBtn: document.getElementById('saveViewBtn'),
+    collectionsList: document.getElementById('collectionsList'),
+    newCollectionBtn: document.getElementById('newCollectionBtn'),
+    addToCollectionBtn: document.getElementById('addToCollectionBtn'),
+    facetChipRow: document.getElementById('facetChipRow'),
+    tasteTrainBtn: document.getElementById('tasteTrainBtn'),
+    tasteJobChip: document.getElementById('tasteJobChip'),
+    tasteJobChipIcon: document.getElementById('tasteJobChipIcon'),
+    tasteJobChipTitle: document.getElementById('tasteJobChipTitle'),
+    tasteJobChipSub: document.getElementById('tasteJobChipSub'),
+    tasteJobChipFill: document.getElementById('tasteJobChipFill'),
+    tasteJobChipCancel: document.getElementById('tasteJobChipCancel'),
     trashBtn: document.getElementById('trashBtn'),
     trashCountBadge: document.getElementById('trashCountBadge'),
     trashModal: document.getElementById('trashModal'),
@@ -300,6 +354,18 @@ const elements = {
     verdictMeterLegend: document.getElementById('verdictMeterLegend'),
     classifyCreatorBtn: document.getElementById('classifyCreatorBtn'),
     classifyAllBtn: document.getElementById('classifyAllBtn'),
+    labelBtn: document.getElementById('labelBtn'),
+    labelCountBadge: document.getElementById('labelCountBadge'),
+    labelBar: document.getElementById('labelBar'),
+    labelBarTitle: document.getElementById('labelBarTitle'),
+    labelBarHint: document.getElementById('labelBarHint'),
+    labelBarCount: document.getElementById('labelBarCount'),
+    labelBarFilters: document.getElementById('labelBarFilters'),
+    labelChipUnlabeled: document.getElementById('labelChipUnlabeled'),
+    labelChipKeep: document.getElementById('labelChipKeep'),
+    labelChipDiscard: document.getElementById('labelChipDiscard'),
+    labelSeedBtn: document.getElementById('labelSeedBtn'),
+    labelExitBtn: document.getElementById('labelExitBtn'),
     reviewRejectsBtn: document.getElementById('reviewRejectsBtn'),
     rescoreStaleBtn: document.getElementById('rescoreStaleBtn'),
     cancelClassifyBtn: document.getElementById('cancelClassifyBtn'),
@@ -347,6 +413,9 @@ const elements = {
     outputsWorkflow: document.getElementById('outputsWorkflow'),
     outputsCheckpoint: document.getElementById('outputsCheckpoint'),
     outputsCreator: document.getElementById('outputsCreator'),
+    outputsHasSource: document.getElementById('outputsHasSource'),
+    outputsSince: document.getElementById('outputsSince'),
+    outputsUntil: document.getElementById('outputsUntil'),
     outputsBatchChip: document.getElementById('outputsBatchChip'),
     outputsBatchLabel: document.getElementById('outputsBatchLabel'),
     outputsBatchClear: document.getElementById('outputsBatchClear'),
@@ -369,6 +438,7 @@ const elements = {
     outputRegenSameSeed: document.getElementById('outputRegenSameSeed'),
     outputRegenNewSeed: document.getElementById('outputRegenNewSeed'),
     outputDelete: document.getElementById('outputDelete'),
+    outputDetailRating: document.getElementById('outputDetailRating'),
     generatedPane: document.getElementById('generatedPane'),
     mediaCompare: document.getElementById('mediaCompare'),
     compareToggleBtn: document.getElementById('compareToggleBtn'),
@@ -451,7 +521,12 @@ const PREF_FIELDS = [
     // helpful rather than hostile — same reasoning as browseVerdict.
     'sourceFilter',
     // How the grid is shaped, not where you are — a view pref like grid size.
-    'groupPosts'
+    'groupPosts',
+    'searchMode',
+    'facetSetting',
+    'facetOutfit',
+    'facetPose',
+    'facetLighting'
 ];
 
 function loadViewPrefs() {
@@ -504,6 +579,9 @@ function applyViewPrefsToControls() {
     chips.forEach(([btn, on]) => {
         if (btn) btn.classList.toggle('active', Boolean(on));
     });
+    if (elements.semanticSearchBtn) {
+        elements.semanticSearchBtn.classList.toggle('active', state.searchMode === 'semantic');
+    }
 }
 
 function applyGridSize(size) {
@@ -553,6 +631,7 @@ const PAUSABLE_POLLERS = [
     { key: 'syncPollTimer', resume: () => pollSyncStatus() },
     { key: 'batchPollTimer', resume: () => pollBatchStatus() },
     { key: 'classifyPollTimer', resume: () => pollClassifyStatus() },
+    { key: 'tastePollTimer', resume: () => pollTasteStatus() },
 ];
 
 function pausePollers() {
@@ -588,19 +667,29 @@ function handleVisibilityChange() {
 }
 
 async function initApp() {
-    await fetchHealth();
-    await fetchStats();
+    // Gallery first: /api/health can wait on Ollama, and must not hold the
+    // first page of tiles. Stats/health/sources run in parallel with it.
+    const photosReady = fetchPhotos();
+    const statsReady = fetchStats();
+    fetchHealth();
     // Before fetchCreators, so the first sidebar render already has pills
     // rather than flashing them in a frame later.
     await fetchKnownSources();
     await fetchWorkflows();
     await fetchCreators();
-    await fetchPhotos();
+    // Views/boards/facets are sidebar chrome — don't delay the first gallery
+    // page on them. delete_flow (and first paint) wait on fetchPhotos.
+    fetchSavedViews();
+    fetchCollections();
+    fetchFacets();
+    await photosReady;
+    await statsReady;
     // Resume job chips if work is mid-flight — jobs live on the server, so a
     // browser refresh must not orphan a running batch/scrape.
     pollBatchStatus();
     pollGenerateStatus();
     pollClassifyStatus();
+    pollTasteStatus();
     // Restore scrape/sync chip after refresh (queue lives on the server)
     await hydrateScrapeUiFromServer();
     ensureHealthPolling();
@@ -611,6 +700,7 @@ async function fetchHealth() {
         const res = await fetch('/api/health');
         const data = await res.json();
         state.ollamaOnline = Boolean(data.ollama);
+        applyInstagramBackendFrom(data);
         updateOllamaBadge(data);
     } catch (err) {
         state.ollamaOnline = false;
@@ -865,6 +955,8 @@ async function fetchStats() {
         // Archive-wide, never narrowed by the source filter — the navbar
         // Classify All button needs the number its job actually covers.
         state.archiveUnclassified = Number(data.unclassified_total) || 0;
+        state.labelCounts = data.labels || null;
+        updateLabelButton();
         // Pass rates for the verdict filters (B4). Rides on /api/stats rather
         // than a chip-by-chip round trip, and refreshes exactly where it
         // matters: app init and the end of a classify run both call this.
@@ -1024,6 +1116,30 @@ function renderClassifyInsights(c) {
         + `${classifyErrorRow(errors, data.error_rate)}</div>`;
 }
 
+function renderLabelInsights(l) {
+    const data = l || {};
+    if (data.error) {
+        return `<span class="insights-muted">Unavailable: ${escapeHtml(String(data.error))}</span>`;
+    }
+    const labelled = Number(data.labelled || 0);
+    if (!labelled) {
+        return '<span class="insights-muted">Nothing labelled yet — open <b>Label</b> and press K / X.</span>';
+    }
+    return `
+        <div class="insights-metrics">
+            <div class="insights-metric">
+                <span class="insights-metric-value">${labelled.toLocaleString()}</span>
+                <span class="insights-metric-label">Labelled</span>
+                <span class="insights-metric-sub">${Number(data.unlabeled || 0).toLocaleString()} remaining</span>
+            </div>
+            <div class="insights-metric">
+                <span class="insights-metric-value">${_fmtRate(data.keep_rate)}</span>
+                <span class="insights-metric-label">Keep rate</span>
+                <span class="insights-metric-sub">${Number(data.keep || 0).toLocaleString()} keep · ${Number(data.discard || 0).toLocaleString()} discard</span>
+            </div>
+        </div>`;
+}
+
 function renderInsights(data) {
     if (!elements.insightsBody) return;
     const p = data.prompts || {};
@@ -1082,8 +1198,66 @@ function renderInsights(data) {
                 <h4><i class="fa-solid fa-wand-sparkles"></i> Keep / reject classifier</h4>
                 ${renderClassifyInsights(data.classify)}
             </section>
+
+            <section class="insights-section">
+                <h4><i class="fa-solid fa-tags"></i> Taste labels</h4>
+                ${renderLabelInsights(data.labels)}
+            </section>
+
+            <section class="insights-section">
+                <h4><i class="fa-solid fa-heart"></i> For You</h4>
+                ${renderTasteInsights(data.taste)}
+            </section>
+
+            <section class="insights-section">
+                <h4><i class="fa-solid fa-filter"></i> Facets</h4>
+                ${renderFacetInsights(data.facets)}
+            </section>
         </div>
     `;
+}
+
+function renderTasteInsights(t) {
+    const data = t || {};
+    if (data.error) {
+        return `<span class="insights-muted">Unavailable: ${escapeHtml(String(data.error))}</span>`;
+    }
+    const n = Number(data.n || 0);
+    if (!n) {
+        return '<span class="insights-muted">No P(keep) scores yet — label a few dozen photos then <b>Train For You</b>.</span>';
+    }
+    return `
+        <div class="insights-metrics">
+            <div class="insights-metric">
+                <span class="insights-metric-value">${n.toLocaleString()}</span>
+                <span class="insights-metric-label">Scored</span>
+                <span class="insights-metric-sub">${escapeHtml(String(data.model || 'hashed-ngrams'))}</span>
+            </div>
+            <div class="insights-metric">
+                <span class="insights-metric-value">${Number(data.labelled || 0).toLocaleString()}</span>
+                <span class="insights-metric-label">Labels used</span>
+            </div>
+        </div>`;
+}
+
+function renderFacetInsights(f) {
+    const data = f || {};
+    if (data.error) {
+        return `<span class="insights-muted">Unavailable: ${escapeHtml(String(data.error))}</span>`;
+    }
+    const keys = ['setting', 'outfit', 'pose', 'lighting'];
+    const parts = keys.map((key) => {
+        const block = data[key] || {};
+        const n = Number(block.n || 0);
+        const sat = block.saturation || {};
+        const top = (block.values || []).slice(0, 4).map((row) =>
+            `<span class="insights-chip"><b>${escapeHtml(row.value)}</b> ${Number(row.count).toLocaleString()}</span>`
+        ).join(' ');
+        return `<div class="insights-sublabel">${escapeHtml(key)} · ${n.toLocaleString()} filled`
+            + (sat.saturated ? ' · saturated' : '')
+            + `</div><div class="insights-dist">${top || '<span class="insights-muted">—</span>'}</div>`;
+    });
+    return parts.join('');
 }
 
 async function loadInsights() {
@@ -1168,7 +1342,15 @@ async function fetchPhotos({ append = false } = {}) {
         }
         if (state.searchQuery) {
             params.append('search', state.searchQuery);
+            if (state.searchMode === 'semantic') params.append('mode', 'semantic');
         }
+        if (state.collectionId) {
+            params.append('collection', String(state.collectionId));
+        }
+        ['Setting', 'Outfit', 'Pose', 'Lighting'].forEach((name) => {
+            const value = state[`facet${name}`];
+            if (value) params.append(name.toLowerCase(), value);
+        });
         if (state.unanalyzedOnly) {
             params.append('unanalyzed', '1');
         }
@@ -1192,6 +1374,9 @@ async function fetchPhotos({ append = false } = {}) {
                 params.append('verdict', state.browseVerdict);
             }
             params.append('sort', state.sortMode || 'name');
+        }
+        if (state.labelMode && state.labelFilter) {
+            params.append('label', state.labelFilter);
         }
         // Review mode deliberately opts out: triage adjudicates one file at a
         // time, and a collapsed carousel would hide rejects behind a tile.
@@ -1478,27 +1663,38 @@ async function loadTrashList() {
         }
 
         entries.forEach((entry) => {
-            const row = document.createElement('div');
-            row.className = 'trash-row';
+            const card = document.createElement('div');
+            card.className = 'trash-card trash-row';
+
+            const thumb = document.createElement(entry.thumb_url ? 'img' : 'div');
+            if (entry.thumb_url) {
+                thumb.className = 'trash-card-thumb';
+                thumb.src = entry.thumb_url;
+                thumb.alt = entry.filename || entry.rel_path || 'trashed media';
+                thumb.loading = 'lazy';
+            } else {
+                thumb.className = 'trash-card-thumb missing';
+                thumb.textContent = 'missing';
+            }
 
             const info = document.createElement('div');
-            info.className = 'trash-row-info';
+            info.className = 'trash-card-info trash-row-info';
             const title = document.createElement('div');
-            title.className = 'trash-row-title';
+            title.className = 'trash-card-title trash-row-title';
             title.textContent = entry.rel_path || entry.filename || entry.id;
             const meta = document.createElement('div');
-            meta.className = 'trash-row-meta';
+            meta.className = 'trash-card-meta';
             const bits = [formatRelativeTime(entry.deleted_at)];
             if (entry.file_size) bits.push(formatBytes(entry.file_size));
             if (entry.favorite) bits.push('★ favorite');
             if (entry.prompt_bundle) bits.push('has prompt');
-            if (!entry.media_present) bits.push('⚠ file missing');
+            if (!entry.media_present) bits.push('file missing');
             meta.textContent = bits.join(' · ');
             info.appendChild(title);
             info.appendChild(meta);
 
             const actions = document.createElement('div');
-            actions.className = 'trash-row-actions';
+            actions.className = 'trash-card-actions trash-row-actions';
 
             const restoreBtn = document.createElement('button');
             restoreBtn.type = 'button';
@@ -1523,9 +1719,10 @@ async function loadTrashList() {
 
             actions.appendChild(restoreBtn);
             actions.appendChild(purgeBtn);
-            row.appendChild(info);
-            row.appendChild(actions);
-            elements.trashList.appendChild(row);
+            card.appendChild(thumb);
+            card.appendChild(info);
+            card.appendChild(actions);
+            elements.trashList.appendChild(card);
         });
     } catch (err) {
         console.error('Trash list failed:', err);
@@ -1633,6 +1830,9 @@ function setSelectMode(enabled) {
         elements.selectModeBtn.classList.toggle('active', enabled);
     }
     elements.galleryGrid.classList.toggle('select-mode', enabled);
+    if (elements.addToCollectionBtn) {
+        elements.addToCollectionBtn.style.display = enabled ? 'inline-flex' : 'none';
+    }
     renderGallery();
 }
 
@@ -2196,10 +2396,12 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
         const groupBadge = tile.count > 1
             ? `<span class="group-count-badge" title="${Number(tile.count)} slides in this post"><i class="fa-solid fa-layer-group"></i> ${Number(tile.count)}</span>`
             : '';
+        const tasteBadge = tasteBadgeHtml(p);
         card.innerHTML = `
             <img src="${escapeHtml(imgSrc)}" alt="${escapeHtml(p.filename)}" loading="lazy" data-full="${escapeHtml(p.url)}">
             ${videoBadge}
             ${groupBadge}
+            ${tasteBadge}
             <div class="photo-card-overlay">
                 <div class="overlay-top-actions">
                     ${state.selectMode
@@ -2554,7 +2756,7 @@ function renderSlideCounter(photo) {
     el.style.display = '';
 }
 
-function openLightbox(index) {
+function openLightbox(index, { skipPromptLoad = false } = {}) {
     if (index < 0 || index >= state.photos.length) return;
 
     // Leave fullscreen shell cleanly before swapping media
@@ -2606,8 +2808,10 @@ function openLightbox(index) {
         state.currentGenerations = [];
     } else {
         loadGenerationsForPhoto(photo.rel_path);
-        // Auto-load Ready cached prompts for stills only
-        if (photo.has_prompt && !photo.prompt_stale) {
+        // Auto-load Ready cached prompts for stills only. Copy-parameters
+        // fills the editor from the generation instead, and this fetch would
+        // overwrite that with the source photo's current prompt.
+        if (!skipPromptLoad && photo.has_prompt && !photo.prompt_stale) {
             handleGeneratePrompt(false);
         }
     }
@@ -2660,21 +2864,63 @@ function renderGenRating() {
     });
 }
 
-async function rateCurrentGeneration(rating) {
-    const genId = state.currentGenId;
+function ratingOf(genId) {
+    if (state.currentGenId === genId) return Number(state.currentGenRating) || 0;
+    if (state.outputDetail && state.outputDetail.gen_id === genId) {
+        return Number(state.outputDetail.rating) || 0;
+    }
+    const row = state.outputs.find((g) => g.gen_id === genId);
+    return Number(row && row.rating) || 0;
+}
+
+function syncRatingButtons(root, rating) {
+    if (!root) return;
+    const r = Number(rating) || 0;
+    root.classList.toggle('has-rating', r !== 0);
+    root.querySelectorAll('.gen-rate-btn').forEach((btn) => {
+        btn.classList.toggle('active', Number(btn.dataset.rating) === r);
+        btn.disabled = false;
+    });
+}
+
+function paintOutputRating(genId, rating) {
+    const card = elements.outputsGrid
+        && elements.outputsGrid.querySelector(`[data-gen-id="${CSS.escape(genId)}"]`);
+    if (card) syncRatingButtons(card.querySelector('.gen-rating'), rating);
+    if (state.outputDetail && state.outputDetail.gen_id === genId) {
+        syncRatingButtons(elements.outputDetailRating, rating);
+    }
+}
+
+function applyRatingLocally(genId, rating) {
+    const r = Number(rating) || 0;
+    const row = state.outputs.find((g) => g.gen_id === genId);
+    if (row) row.rating = r;
+    if (state.outputDetail && state.outputDetail.gen_id === genId) {
+        state.outputDetail.rating = r;
+    }
+    const lightbox = state.currentGenerations[0];
+    if (lightbox && (lightbox.gen_id === genId || !lightbox.gen_id) && state.currentGenId === genId) {
+        lightbox.rating = r;
+        if (lightbox.files && lightbox.files[0]) lightbox.files[0].rating = r;
+    }
+    if (state.currentGenId === genId) {
+        state.currentGenRating = r;
+        renderGenRating();
+    }
+    paintOutputRating(genId, r);
+}
+
+async function rateGeneration(genId, rating) {
     if (!genId) return;
-    const previous = state.currentGenRating;
+    const previous = ratingOf(genId);
     // Optimistic: the control is meant to feel like a keypress, and a failed
     // rating rolls back rather than leaving the UI ahead of the store.
-    state.currentGenRating = rating;
-    renderGenRating();
-    // Nothing may be applied if the user has moved on. Two quick presses put
-    // two writes in flight, and a late reply from the first must not overwrite
-    // the second — the same stale-response rule the gallery fetches follow,
-    // just without an AbortController, since the write has already happened
-    // server-side and cancelling the read would not undo it.
-    const superseded = () =>
-        state.currentGenId !== genId || state.currentGenRating !== rating;
+    applyRatingLocally(genId, rating);
+    // Two quick presses put two writes in flight; a late 4xx from the first
+    // must not overwrite the second — same stale-response rule as gallery
+    // fetches, without an AbortController (the write already happened).
+    const superseded = () => ratingOf(genId) !== rating;
     try {
         const res = await fetch('/api/generation/rate', {
             method: 'PUT',
@@ -2683,29 +2929,44 @@ async function rateCurrentGeneration(rating) {
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         if (superseded()) return;
-        const gen = state.currentGenerations[0];
-        if (gen && (gen.gen_id === genId || !gen.gen_id)) {
-            gen.rating = rating;
-            if (gen.files && gen.files[0]) gen.files[0].rating = rating;
-        }
     } catch (err) {
         console.error('Rating failed', err);
         if (superseded()) return;
-        state.currentGenRating = previous;
-        renderGenRating();
+        applyRatingLocally(genId, previous);
         showToast('Could not save rating');
     }
 }
 
+async function rateCurrentGeneration(rating) {
+    return rateGeneration(state.currentGenId, rating);
+}
+
 function handleGenerationRatingKey(e) {
-    // Only while the generated pane is actually on screen — otherwise these
-    // four keys would be dead weight over the whole lightbox.
-    if (!state.compareMode || !state.currentGenId) return false;
     const map = { '1': 1, '2': 2, '0': 0, x: -1 };
     const rating = map[e.key.toLowerCase()];
     if (rating === undefined) return false;
-    rateCurrentGeneration(rating);
-    return true;
+    const detailOpen = elements.outputDetailModal
+        && elements.outputDetailModal.style.display === 'flex';
+    if (detailOpen && state.outputDetail) {
+        rateGeneration(state.outputDetail.gen_id, rating);
+        return true;
+    }
+    const lightboxOpen = elements.lightboxModal
+        && elements.lightboxModal.style.display === 'flex';
+    // Lightbox compare pane. The generated-pane guard still applies — these
+    // keys must not fire over the inspector when compare is off. compareMode
+    // can stay true after the lightbox closes, so an Outputs grid must not
+    // inherit it.
+    if (state.compareMode && state.currentGenId
+        && (!state.outputsView || lightboxOpen)) {
+        rateCurrentGeneration(rating);
+        return true;
+    }
+    if (state.outputsView && state.outputsFocusedId) {
+        rateGeneration(state.outputsFocusedId, rating);
+        return true;
+    }
+    return false;
 }
 
 // ── outputs gallery (A1) ─────────────────────────────────────────────
@@ -2730,11 +2991,23 @@ function outputsFilters() {
         ['workflow', elements.outputsWorkflow],
         ['checkpoint', elements.outputsCheckpoint],
         ['creator', elements.outputsCreator],
+        ['has_source', elements.outputsHasSource],
+        ['since', elements.outputsSince],
+        ['until', elements.outputsUntil],
     ]) {
         if (el && el.value) params.set(key, el.value);
     }
     if (state.outputsBatch) params.set('batch_id', state.outputsBatch);
     return params;
+}
+
+function outputsFiltersAreActive() {
+    if (state.outputsBatch) return true;
+    return [
+        elements.outputsRating, elements.outputsWorkflow, elements.outputsCheckpoint,
+        elements.outputsCreator, elements.outputsHasSource, elements.outputsSince,
+        elements.outputsUntil,
+    ].some((el) => el && el.value);
 }
 
 /**
@@ -2836,33 +3109,92 @@ function renderOutputs({ append = false } = {}) {
     }
     if (elements.outputsEmpty) {
         elements.outputsEmpty.style.display = state.outputs.length ? 'none' : 'flex';
+        const heading = elements.outputsEmpty.querySelector('h3');
+        const copy = elements.outputsEmpty.querySelector('p');
+        if (heading && copy) {
+            if (state.outputs.length) {
+                /* filled grid — labels unused */
+            } else if (outputsFiltersAreActive()) {
+                heading.textContent = 'No matching outputs';
+                copy.textContent = 'Nothing matches these filters.';
+            } else {
+                heading.textContent = 'Nothing generated yet';
+                copy.textContent = 'Open a photo, generate with ComfyUI, and every output lands here.';
+            }
+        }
     }
+    if (state.outputsFocusedId) focusOutputCard(state.outputsFocusedId);
     attachOutputsSentinel();
+}
+
+function ratingButtonsHtml(rating) {
+    const r = Number(rating) || 0;
+    const btns = [
+        [-1, 'discard', 'fa-xmark', 'Discard — didn\'t work (X)', 'Discard'],
+        [0, 'clear', 'fa-minus', 'Clear rating (0)', 'Unrated'],
+        [1, 'keep', 'fa-check', 'Keep (1)', 'Keep'],
+        [2, 'star', 'fa-star', 'Star — the reason you generated at all (2)', 'Star'],
+    ];
+    return `<div class="gen-rating${r ? ' has-rating' : ''}" role="group" aria-label="Rate this generation">${
+        btns.map(([val, cls, icon, title, label]) =>
+            `<button type="button" class="gen-rate-btn ${cls}${r === val ? ' active' : ''}" data-rating="${val}" title="${title}" aria-label="${label}">`
+            + `<i class="fa-solid ${icon}"></i></button>`
+        ).join('')
+    }</div>`;
+}
+
+function sourceThumbUrl(gen) {
+    if (gen.source_thumb_url) return gen.source_thumb_url;
+    const rel = (gen.source_rel || '').replace(/\\/g, '/');
+    if (!rel) return '';
+    return '/media/thumb/' + rel.split('/').map(encodeURIComponent).join('/');
 }
 
 function outputCard(gen) {
     const card = document.createElement('div');
     card.className = 'photo-card output-card';
     card.dataset.genId = gen.gen_id;
-    const rating = Number(gen.rating) || 0;
-    // Third-party text: the creator handle and the prompt both originate
-    // outside this app, so neither reaches innerHTML unescaped.
+    card.tabIndex = 0;
+    const hasSource = gen.has_source !== false && Boolean(gen.source_rel);
+    const sourceThumb = hasSource ? sourceThumbUrl(gen) : '';
+    // Third-party text: the creator handle originates outside this app.
     card.innerHTML = `
         <div class="photo-thumb-wrap">
             <img class="photo-thumb" loading="lazy" src="${escapeHtml(gen.thumb_url)}" alt="">
-            ${rating ? `<span class="output-rating-badge r${rating}">${ratingGlyph(rating)}</span>` : ''}
+            ${sourceThumb
+                ? `<img class="output-source-badge" loading="lazy" src="${escapeHtml(sourceThumb)}" alt="" title="Source">`
+                : ''}
             ${gen.seed_recorded ? '' : '<span class="output-flag" title="Seed was never recorded — cannot be reproduced">no seed</span>'}
+            ${ratingButtonsHtml(gen.rating)}
         </div>
         <div class="photo-meta">
             <span class="photo-creator">@${escapeHtml(gen.creator || '')}</span>
             <span class="photo-filename">${escapeHtml(gen.workflow || '')}</span>
         </div>`;
-    card.addEventListener('click', () => openOutputDetail(gen.gen_id));
+    card.addEventListener('click', (e) => {
+        const btn = e.target.closest('.gen-rate-btn');
+        if (btn) {
+            e.preventDefault();
+            e.stopPropagation();
+            focusOutputCard(gen.gen_id);
+            rateGeneration(gen.gen_id, Number(btn.dataset.rating));
+            return;
+        }
+        focusOutputCard(gen.gen_id);
+        openOutputDetail(gen.gen_id);
+    });
     return card;
 }
 
-function ratingGlyph(rating) {
-    return { '-1': '✕', 1: '✓', 2: '★' }[String(rating)] || '';
+function focusOutputCard(genId) {
+    state.outputsFocusedId = genId || null;
+    if (!elements.outputsGrid) return;
+    elements.outputsGrid.querySelectorAll('.output-card.is-focused').forEach((el) => {
+        el.classList.remove('is-focused');
+    });
+    if (!genId) return;
+    const card = elements.outputsGrid.querySelector(`[data-gen-id="${CSS.escape(genId)}"]`);
+    if (card) card.classList.add('is-focused');
 }
 
 function attachOutputsSentinel() {
@@ -2898,6 +3230,7 @@ function showOutputsView(on) {
     // hidden here. Leaving both on gives review mode no surface and blanks the
     // outputs filter bar, since both use `.view-controls`.
     if (on && state.reviewMode) exitReviewMode();
+    if (on && state.labelMode) exitLabelMode({ refetch: false });
     state.outputsView = on;
     const gallery = document.querySelector('.gallery-container:not(.outputs-container)');
     if (gallery) gallery.style.display = on ? 'none' : 'flex';
@@ -2933,7 +3266,8 @@ function setupOutputsListeners() {
         elements.outputsBtn.addEventListener('click', () => showOutputsView(!state.outputsView));
     }
     [elements.outputsSort, elements.outputsRating, elements.outputsWorkflow,
-     elements.outputsCheckpoint, elements.outputsCreator].forEach((el) => {
+     elements.outputsCheckpoint, elements.outputsCreator, elements.outputsHasSource,
+     elements.outputsSince, elements.outputsUntil].forEach((el) => {
         if (el) el.addEventListener('change', () => fetchOutputs());
     });
 }
@@ -2946,13 +3280,30 @@ function openOutputDetail(genId) {
     state.outputDetail = gen;
 
     elements.outputDetailImage.src = gen.url;
-    // The source may have been deleted since; /media 404s and the browser
-    // shows a broken pane, which is honest — the provenance panel still says
-    // which file it was.
-    elements.outputDetailSource.src = '/media/' + gen.source_rel
-        .split('/').map(encodeURIComponent).join('/');
+    const hasSource = gen.has_source !== false && Boolean(gen.source_rel);
+    const sourcePane = elements.outputDetailSource && elements.outputDetailSource.closest('figure');
+    if (sourcePane) sourcePane.style.display = hasSource ? '' : 'none';
+    const compare = elements.outputDetailSource && elements.outputDetailSource.closest('.output-compare');
+    if (compare) compare.classList.toggle('no-source', !hasSource);
+    if (hasSource) {
+        // The source may have been deleted since; /media 404s and the browser
+        // shows a broken pane, which is honest — the provenance panel still says
+        // which file it was.
+        elements.outputDetailSource.src = '/media/' + gen.source_rel
+            .split('/').map(encodeURIComponent).join('/');
+    } else if (elements.outputDetailSource) {
+        elements.outputDetailSource.removeAttribute('src');
+    }
     elements.outputDetailPositive.textContent = gen.positive_prompt || '';
     elements.outputDetailNegative.textContent = gen.negative_prompt || '';
+    syncRatingButtons(elements.outputDetailRating, gen.rating);
+    if (elements.outputCopyParams) {
+        elements.outputCopyParams.disabled = !hasSource;
+        elements.outputCopyParams.title = hasSource
+            ? 'Load these parameters into the generate controls'
+            : 'No source photo to open in the lightbox';
+    }
+    focusOutputCard(gen.gen_id);
 
     const rows = [
         ['Source', gen.source_rel],
@@ -2989,19 +3340,96 @@ function closeOutputDetail() {
     state.outputDetail = null;
 }
 
-function copyOutputParams() {
+async function copyOutputParams() {
     const gen = state.outputDetail;
-    if (!gen) return;
-    const text = [
-        `positive: ${gen.positive_prompt || ''}`,
-        `negative: ${gen.negative_prompt || ''}`,
-        `workflow: ${gen.workflow}`,
-        `checkpoint: ${gen.checkpoint || ''}`,
-        `seed: ${gen.seed_recorded ? gen.seed : 'not recorded'}`,
-        `steps: ${gen.steps}  cfg: ${gen.cfg}  denoise: ${gen.denoise ?? ''}`,
-        `mode_e: ${gen.mode_e ? 'on' : 'off'}`,
-    ].join('\n');
-    copyToClipboard(text, 'Copied parameters');
+    if (!gen || !gen.source_rel) {
+        showToast('No source photo to open');
+        return;
+    }
+    closeOutputDetail();
+    showOutputsView(false);
+    const idx = await ensurePhotoInGallery(gen.source_rel);
+    if (idx < 0) {
+        showToast('Source photo is gone from the archive');
+        return;
+    }
+    openLightbox(idx, { skipPromptLoad: true });
+    applyGenerationParamsToLightbox(gen);
+    showToast('Parameters loaded into generate controls');
+}
+
+async function ensurePhotoInGallery(sourceRel) {
+    const existing = state.photos.findIndex((p) => p.rel_path === sourceRel);
+    if (existing >= 0) return existing;
+    try {
+        const res = await fetch(`/api/photos?path=${encodeURIComponent(sourceRel)}&limit=1`);
+        const data = await res.json();
+        const photo = (data.photos || [])[0];
+        if (!photo) return -1;
+        state.photos.push(photo);
+        state.lightboxPushedPhoto = photo.rel_path;
+        return state.photos.length - 1;
+    } catch (err) {
+        console.error('Source photo lookup failed', err);
+        return -1;
+    }
+}
+
+function applyGenerationParamsToLightbox(gen) {
+    elements.positivePromptText.textContent = gen.positive_prompt || '';
+    elements.negativePromptText.textContent = gen.negative_prompt || '';
+    state.currentPromptData = {
+        positive_prompt: gen.positive_prompt || '',
+        negative_prompt: gen.negative_prompt || '',
+        parameters: {
+            steps: gen.steps,
+            cfg_scale: gen.cfg,
+        },
+    };
+    if (elements.generatePromptSection) elements.generatePromptSection.style.display = 'none';
+    if (elements.promptContent) elements.promptContent.classList.add('visible');
+    setPromptEditable(true);
+    clearPromptDirty();
+
+    const sel = elements.comfyWorkflowSelect;
+    if (sel && gen.workflow) {
+        if (![...sel.options].some((o) => o.value === gen.workflow)) {
+            const opt = document.createElement('option');
+            opt.value = gen.workflow;
+            opt.textContent = gen.workflow;
+            sel.appendChild(opt);
+        }
+        sel.value = gen.workflow;
+        syncComfyWorkflowControls();
+    }
+    if (elements.comfyDenoiseInput && gen.denoise != null) {
+        elements.comfyDenoiseInput.value = gen.denoise;
+    }
+    if (elements.comfyStepsInput && gen.steps != null) {
+        elements.comfyStepsInput.value = gen.steps;
+    }
+    if (elements.comfyCfgInput && gen.cfg != null) {
+        elements.comfyCfgInput.value = gen.cfg;
+    }
+    if (elements.comfyModeECheck) {
+        elements.comfyModeECheck.checked = Boolean(gen.mode_e);
+    }
+    if (elements.comfySeedLock && elements.comfySeedInput) {
+        if (gen.seed_recorded) {
+            elements.comfySeedLock.checked = true;
+            elements.comfySeedInput.value = String(gen.seed);
+        } else {
+            elements.comfySeedLock.checked = false;
+        }
+        syncComfySeedInput();
+    }
+    updateComfyButtons();
+    if (elements.paramSteps && gen.steps != null) {
+        elements.paramSteps.textContent = String(gen.steps);
+    }
+    if (elements.paramCFG && gen.cfg != null) {
+        elements.paramCFG.textContent = String(gen.cfg);
+    }
 }
 
 async function regenerateOutput({ sameSeed }) {
@@ -3096,7 +3524,16 @@ function setupOutputDetailListeners() {
     const overlay = document.getElementById('outputDetailOverlay');
     if (overlay) overlay.addEventListener('click', closeOutputDetail);
     if (elements.outputCopyParams) {
-        elements.outputCopyParams.addEventListener('click', copyOutputParams);
+        elements.outputCopyParams.addEventListener('click', () => {
+            copyOutputParams();
+        });
+    }
+    if (elements.outputDetailRating) {
+        elements.outputDetailRating.addEventListener('click', (e) => {
+            const btn = e.target.closest('.gen-rate-btn');
+            if (!btn || !state.outputDetail) return;
+            rateGeneration(state.outputDetail.gen_id, Number(btn.dataset.rating));
+        });
     }
     if (elements.outputRegenSameSeed) {
         elements.outputRegenSameSeed.addEventListener('click', () => regenerateOutput({ sameSeed: true }));
@@ -3715,6 +4152,11 @@ function closeLightbox() {
     state.lightboxIndex = -1;
     state.currentPromptData = null;
     stopAndClearLightboxVideo();
+    if (state.lightboxPushedPhoto) {
+        const i = state.photos.findIndex((p) => p.rel_path === state.lightboxPushedPhoto);
+        if (i >= 0) state.photos.splice(i, 1);
+        state.lightboxPushedPhoto = null;
+    }
 }
 
 function navigateLightbox(direction) {
@@ -4392,6 +4834,529 @@ function copyToClipboard(text, message) {
 }
 
 // Event Listeners
+const FACET_LABELS = { setting: 'Setting', outfit: 'Outfit', pose: 'Pose', lighting: 'Lighting' };
+
+function currentViewFilters() {
+    return {
+        creator: state.selectedCreator || '',
+        search: state.searchQuery || '',
+        searchMode: state.searchMode || 'text',
+        sortMode: state.sortMode || 'name',
+        mediaType: state.mediaType || 'all',
+        browseVerdict: state.browseVerdict || '',
+        favoritesOnly: Boolean(state.favoritesOnly),
+        unanalyzedOnly: Boolean(state.unanalyzedOnly),
+        sourceFilter: state.sourceFilter || '',
+        groupPosts: Boolean(state.groupPosts),
+        facetSetting: state.facetSetting || '',
+        facetOutfit: state.facetOutfit || '',
+        facetPose: state.facetPose || '',
+        facetLighting: state.facetLighting || '',
+    };
+}
+
+function applySavedFilters(filters) {
+    const f = filters || {};
+    state.selectedCreator = f.creator || null;
+    state.searchQuery = f.search || '';
+    state.searchMode = f.searchMode === 'semantic' ? 'semantic' : 'text';
+    state.sortMode = f.sortMode || 'name';
+    state.mediaType = f.mediaType || 'all';
+    state.browseVerdict = f.browseVerdict || '';
+    state.favoritesOnly = Boolean(f.favoritesOnly);
+    state.unanalyzedOnly = Boolean(f.unanalyzedOnly);
+    state.sourceFilter = f.sourceFilter || '';
+    state.groupPosts = Boolean(f.groupPosts);
+    state.facetSetting = f.facetSetting || '';
+    state.facetOutfit = f.facetOutfit || '';
+    state.facetPose = f.facetPose || '';
+    state.facetLighting = f.facetLighting || '';
+    state.collectionId = null;
+    state.collectionName = '';
+    if (elements.searchInput) {
+        elements.searchInput.value = state.searchQuery;
+        if (elements.clearSearch) {
+            elements.clearSearch.style.display = state.searchQuery ? 'block' : 'none';
+        }
+    }
+    applyViewPrefsToControls();
+    saveViewPrefs();
+    fetchPhotos();
+    fetchCreators();
+}
+
+async function fetchSavedViews() {
+    try {
+        const res = await fetch('/api/views');
+        const data = await res.json();
+        state.savedViews = data.views || [];
+        renderSavedViews();
+    } catch (err) {
+        console.error('saved views failed', err);
+    }
+}
+
+function renderSavedViews() {
+    const host = elements.savedViewsList;
+    if (!host) return;
+    host.innerHTML = '';
+    if (!state.savedViews.length) {
+        const empty = document.createElement('div');
+        empty.className = 'sidebar-empty';
+        empty.textContent = 'Save the current filters.';
+        host.appendChild(empty);
+        return;
+    }
+    state.savedViews.forEach((view) => {
+        const row = document.createElement('div');
+        row.className = 'saved-view-row';
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'saved-view-name';
+        btn.textContent = view.name;
+        btn.addEventListener('click', () => applySavedFilters(view.filters));
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'icon-btn sm';
+        del.title = 'Delete view';
+        del.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+        del.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            await fetch(`/api/views?id=${encodeURIComponent(view.id)}`, { method: 'DELETE' });
+            await fetchSavedViews();
+        });
+        row.appendChild(btn);
+        row.appendChild(del);
+        host.appendChild(row);
+    });
+}
+
+async function saveCurrentView() {
+    const name = window.prompt('Name this view');
+    if (!name || !name.trim()) return;
+    try {
+        const res = await fetch('/api/views', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name.trim(), filters: currentViewFilters() }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast(data.error || 'Could not save view');
+            return;
+        }
+        await fetchSavedViews();
+        showToast(`Saved view “${name.trim()}”`);
+    } catch (err) {
+        showToast('Could not save view');
+    }
+}
+
+async function fetchCollections() {
+    try {
+        const res = await fetch('/api/collections');
+        const data = await res.json();
+        state.collections = data.collections || [];
+        renderCollections();
+    } catch (err) {
+        console.error('collections failed', err);
+    }
+}
+
+function renderCollections() {
+    const host = elements.collectionsList;
+    if (!host) return;
+    host.innerHTML = '';
+    if (!state.collections.length) {
+        const empty = document.createElement('div');
+        empty.className = 'sidebar-empty';
+        empty.textContent = 'Boards collect photos across creators.';
+        host.appendChild(empty);
+        return;
+    }
+    state.collections.forEach((col) => {
+        const row = document.createElement('div');
+        row.className = 'saved-view-row';
+        if (state.collectionId === col.id) row.classList.add('is-active');
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'saved-view-name';
+        btn.textContent = `${col.name} (${col.count})`;
+        btn.addEventListener('click', () => {
+            state.collectionId = col.id;
+            state.collectionName = col.name;
+            state.selectedCreator = null;
+            fetchPhotos();
+            renderCollections();
+        });
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'icon-btn sm';
+        del.title = 'Delete board';
+        del.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+        del.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            await fetch(`/api/collections?id=${encodeURIComponent(col.id)}`, { method: 'DELETE' });
+            if (state.collectionId === col.id) {
+                state.collectionId = null;
+                state.collectionName = '';
+                fetchPhotos();
+            }
+            await fetchCollections();
+        });
+        row.appendChild(btn);
+        row.appendChild(del);
+        host.appendChild(row);
+    });
+}
+
+async function createCollection() {
+    const name = window.prompt('New board name');
+    if (!name || !name.trim()) return;
+    try {
+        const res = await fetch('/api/collections', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: name.trim() }),
+        });
+        if (!res.ok) {
+            showToast('Could not create board');
+            return;
+        }
+        await fetchCollections();
+    } catch (err) {
+        showToast('Could not create board');
+    }
+}
+
+async function addSelectionToCollection() {
+    const paths = Array.from(state.selectedPaths);
+    if (!paths.length) {
+        showToast('Select photos first');
+        return;
+    }
+    if (!state.collections.length) {
+        await createCollection();
+        if (!state.collections.length) return;
+    }
+    const names = state.collections.map((c) => c.name);
+    const picked = window.prompt(`Add ${paths.length} photo(s) to which board?\n${names.join(', ')}`, names[0]);
+    if (!picked) return;
+    const col = state.collections.find((c) => c.name.toLowerCase() === picked.trim().toLowerCase());
+    if (!col) {
+        showToast('No board with that name');
+        return;
+    }
+    try {
+        const res = await fetch('/api/collections/items', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: col.id, paths }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            showToast('Could not add to board');
+            return;
+        }
+        showToast(`Added ${data.added || 0} to “${col.name}”`);
+        await fetchCollections();
+    } catch (err) {
+        showToast('Could not add to board');
+    }
+}
+
+async function fetchFacets() {
+    try {
+        const res = await fetch('/api/facets');
+        const data = await res.json();
+        state.facetOptions = data.facets || {};
+        renderFacetChips();
+    } catch (err) {
+        console.error('facets failed', err);
+    }
+}
+
+function renderFacetChips() {
+    const host = elements.facetChipRow;
+    if (!host) return;
+    host.innerHTML = '';
+    const facets = state.facetOptions || {};
+    Object.keys(FACET_LABELS).forEach((key) => {
+        const values = facets[key] || [];
+        if (!values.length) return;
+        const wrap = document.createElement('label');
+        wrap.className = 'facet-select-wrap';
+        wrap.textContent = '';
+        const title = document.createElement('span');
+        title.className = 'control-label';
+        title.textContent = FACET_LABELS[key];
+        const sel = document.createElement('select');
+        sel.className = 'sort-select';
+        sel.dataset.facet = key;
+        const any = document.createElement('option');
+        any.value = '';
+        any.textContent = `Any ${key}`;
+        sel.appendChild(any);
+        const current = state[`facet${key.charAt(0).toUpperCase()}${key.slice(1)}`] || '';
+        values.forEach((row) => {
+            const opt = document.createElement('option');
+            opt.value = row.value;
+            opt.textContent = `${row.value} (${row.count})`;
+            sel.appendChild(opt);
+        });
+        sel.value = current;
+        sel.classList.toggle('is-active', Boolean(current));
+        sel.addEventListener('change', () => {
+            const field = `facet${key.charAt(0).toUpperCase()}${key.slice(1)}`;
+            state[field] = sel.value || '';
+            sel.classList.toggle('is-active', Boolean(sel.value));
+            saveViewPrefs();
+            fetchPhotos();
+        });
+        wrap.appendChild(title);
+        wrap.appendChild(sel);
+        host.appendChild(wrap);
+    });
+}
+
+async function loadActivity(kind) {
+    if (!elements.activityBody) return;
+    elements.activityBody.innerHTML = '<div class="insights-loading">Loading…</div>';
+    try {
+        const kindsRes = await fetch('/api/journal');
+        const kindsData = await kindsRes.json();
+        const kinds = kindsData.kinds || [];
+        if (!kind) kind = state.activityKind || kinds[0] || '';
+        state.activityKind = kind;
+        renderActivityKinds(kinds, kind);
+        if (!kind) {
+            elements.activityBody.innerHTML = '<div class="insights-muted">No job history yet.</div>';
+            return;
+        }
+        const res = await fetch(`/api/journal?kind=${encodeURIComponent(kind)}&limit=30`);
+        const data = await res.json();
+        renderActivityRuns(data.runs || []);
+    } catch (err) {
+        elements.activityBody.innerHTML = `<div class="insights-error">Could not load activity: ${escapeHtml(err.message || String(err))}</div>`;
+    }
+}
+
+function renderActivityKinds(kinds, active) {
+    const host = elements.activityKindRow;
+    if (!host) return;
+    host.innerHTML = '';
+    kinds.forEach((kind) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'filter-chip' + (kind === active ? ' active' : '');
+        btn.textContent = kind;
+        btn.addEventListener('click', () => loadActivity(kind));
+        host.appendChild(btn);
+    });
+}
+
+function renderActivityRuns(runs) {
+    if (!elements.activityBody) return;
+    if (!runs.length) {
+        elements.activityBody.innerHTML = '<div class="insights-muted">No runs for this kind.</div>';
+        return;
+    }
+    const html = runs.map((run) => {
+        const outcome = escapeHtml(String(run.outcome || (run.finished_at ? 'ok' : 'running')));
+        const reason = run.abort_reason || run.stop_reason || run.error || '';
+        const events = (run.events || []).slice(-8).map((ev) =>
+            `<li>${escapeHtml(ev.name || 'event')}${ev.backoff_sec ? ` · backoff ${Number(ev.backoff_sec)}s` : ''}</li>`
+        ).join('');
+        const hist = run.tier_hist
+            ? `<div class="insights-muted">tiers ${escapeHtml(JSON.stringify(run.tier_hist))} · top share ${run.top_tier_share ?? '—'}</div>`
+            : '';
+        return `<article class="activity-run">
+            <header>
+                <strong>${escapeHtml(run.kind || '')}</strong>
+                <span class="activity-outcome">${outcome}</span>
+            </header>
+            <div class="activity-meta">${escapeHtml(run.started_at || '')}${run.duration_sec != null ? ` · ${Number(run.duration_sec).toFixed(1)}s` : ''} · ${Number(run.item_count || run.items || 0)} items${run.failures ? ` · ${Number(run.failures)} failed` : ''}</div>
+            ${reason ? `<div class="activity-reason">${escapeHtml(String(reason))}</div>` : ''}
+            ${hist}
+            ${events ? `<ul class="activity-events">${events}</ul>` : ''}
+        </article>`;
+    }).join('');
+    elements.activityBody.innerHTML = html;
+}
+
+function openActivityModal() {
+    if (!elements.activityModal) return;
+    elements.activityModal.style.display = 'flex';
+    loadActivity();
+}
+
+function closeActivityModal() {
+    if (elements.activityModal) elements.activityModal.style.display = 'none';
+}
+
+async function loadDuplicates() {
+    if (!elements.duplicatesBody) return;
+    elements.duplicatesBody.innerHTML = '<div class="insights-loading">Loading…</div>';
+    state.duplicatesSelected = new Set();
+    try {
+        const res = await fetch('/api/duplicates');
+        const data = await res.json();
+        renderDuplicateGroups(data.groups || []);
+    } catch (err) {
+        elements.duplicatesBody.innerHTML = `<div class="insights-error">Could not load duplicates: ${escapeHtml(err.message || String(err))}</div>`;
+    }
+}
+
+function renderDuplicateGroups(groups) {
+    if (!elements.duplicatesBody) return;
+    if (!groups.length) {
+        elements.duplicatesBody.innerHTML = '<div class="insights-muted">No near-duplicate groups. Train For You to add embedding matches.</div>';
+        return;
+    }
+    const host = document.createElement('div');
+    host.className = 'dup-groups';
+    groups.forEach((group, gi) => {
+        const section = document.createElement('section');
+        section.className = 'dup-group';
+        const head = document.createElement('div');
+        head.className = 'dup-group-head';
+        head.textContent = `${group.kind === 'embed' ? 'Similar' : 'Near-dup'} · ${group.size} copies`;
+        section.appendChild(head);
+        const grid = document.createElement('div');
+        grid.className = 'dup-members';
+        (group.members || []).forEach((m) => {
+            const card = document.createElement('label');
+            card.className = 'dup-card' + (m.keeper ? ' is-keeper' : '');
+            const img = document.createElement('img');
+            img.src = m.thumb_url || m.url || '';
+            img.alt = m.rel_path;
+            img.loading = 'lazy';
+            const check = document.createElement('input');
+            check.type = 'checkbox';
+            check.checked = Boolean(m.preselected);
+            check.disabled = Boolean(m.favorite);
+            if (check.checked) state.duplicatesSelected.add(m.rel_path);
+            check.addEventListener('change', () => {
+                if (check.checked) state.duplicatesSelected.add(m.rel_path);
+                else state.duplicatesSelected.delete(m.rel_path);
+            });
+            const cap = document.createElement('div');
+            cap.className = 'dup-cap';
+            cap.textContent = (m.favorite ? '★ ' : '') + (m.keeper ? 'keep · ' : '') + (m.rel_path || '');
+            card.appendChild(img);
+            card.appendChild(check);
+            card.appendChild(cap);
+            grid.appendChild(card);
+        });
+        section.appendChild(grid);
+        host.appendChild(section);
+    });
+    elements.duplicatesBody.innerHTML = '';
+    elements.duplicatesBody.appendChild(host);
+}
+
+function openDuplicatesModal() {
+    if (!elements.duplicatesModal) return;
+    elements.duplicatesModal.style.display = 'flex';
+    loadDuplicates();
+}
+
+function closeDuplicatesModal() {
+    if (elements.duplicatesModal) elements.duplicatesModal.style.display = 'none';
+}
+
+async function sweepDuplicates() {
+    const paths = Array.from(state.duplicatesSelected);
+    if (!paths.length) {
+        showToast('Nothing selected');
+        return;
+    }
+    try {
+        const ids = [];
+        for (const rel of paths) {
+            const res = await fetch(`/api/photo?path=${encodeURIComponent(rel)}`, { method: 'DELETE' });
+            const data = await res.json().catch(() => ({}));
+            if (data.trash_id) ids.push(data.trash_id);
+        }
+        showToast({
+            title: `Moved ${ids.length} duplicate(s) to Trash`,
+            actionLabel: ids.length ? 'Undo' : '',
+            onAction: ids.length ? () => restoreFromTrash(ids, { label: 'photo' }) : null,
+            duration: 8000,
+        });
+        await loadDuplicates();
+        await fetchPhotos();
+        await fetchStats();
+    } catch (err) {
+        showToast('Duplicate sweep failed');
+    }
+}
+
+async function startTasteTrain() {
+    try {
+        const res = await fetch('/api/taste/train', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.status === 409) {
+            showToast(data.message || 'Taste training already running');
+            pollTasteStatus();
+            return;
+        }
+        if (!res.ok) {
+            showToast('Could not start training');
+            return;
+        }
+        showToast('Training For You…');
+        pollTasteStatus();
+    } catch (err) {
+        showToast('Could not start training');
+    }
+}
+
+async function pollTasteStatus() {
+    try {
+        const res = await fetch('/api/taste/status');
+        const data = await res.json();
+        if (data.running) {
+            const done = data.completed || 0;
+            renderJobChip('taste', {
+                active: true,
+                title: data.cancel_requested ? 'For You — stopping' : 'Training For You',
+                sub: data.current
+                    ? `${done}/${data.total || 0} · ${data.current}`
+                    : `${done}/${data.total || 0}`,
+                completed: done,
+                total: data.total || 0,
+                cancellable: true,
+                cancelled: Boolean(data.cancel_requested),
+            });
+            if (!state.tastePollTimer) {
+                state.tastePollTimer = setInterval(pollTasteStatus, 2000);
+            }
+        } else {
+            renderJobChip('taste', { active: false });
+            if (state.tastePollTimer) {
+                clearInterval(state.tastePollTimer);
+                state.tastePollTimer = null;
+            }
+        }
+    } catch (err) {
+        renderJobChip('taste', { active: false });
+    }
+}
+
+async function cancelTasteTrain() {
+    try {
+        await fetch('/api/taste/cancel', { method: 'POST' });
+        pollTasteStatus();
+    } catch (err) {
+        showToast('Cancel failed');
+    }
+}
+
 function setupEventListeners() {
     // Stop polling a tab nobody is looking at; refresh the moment it returns.
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -4592,6 +5557,33 @@ function setupEventListeners() {
         elements.refreshInsightsBtn.addEventListener('click', loadInsights);
     }
     bindModalOverlayDismiss(elements.insightsModal, closeInsightsModal);
+    if (elements.semanticSearchBtn) {
+        elements.semanticSearchBtn.addEventListener('click', () => {
+            state.searchMode = state.searchMode === 'semantic' ? 'text' : 'semantic';
+            elements.semanticSearchBtn.classList.toggle('active', state.searchMode === 'semantic');
+            saveViewPrefs();
+            if (state.searchQuery) fetchPhotos();
+        });
+    }
+    if (elements.saveViewBtn) elements.saveViewBtn.addEventListener('click', saveCurrentView);
+    if (elements.newCollectionBtn) elements.newCollectionBtn.addEventListener('click', createCollection);
+    if (elements.addToCollectionBtn) {
+        elements.addToCollectionBtn.addEventListener('click', addSelectionToCollection);
+    }
+    if (elements.activityBtn) elements.activityBtn.addEventListener('click', openActivityModal);
+    if (elements.closeActivityBtn) elements.closeActivityBtn.addEventListener('click', closeActivityModal);
+    if (elements.doneActivityBtn) elements.doneActivityBtn.addEventListener('click', closeActivityModal);
+    if (elements.refreshActivityBtn) elements.refreshActivityBtn.addEventListener('click', () => loadActivity());
+    bindModalOverlayDismiss(elements.activityModal, closeActivityModal);
+    if (elements.duplicatesBtn) elements.duplicatesBtn.addEventListener('click', openDuplicatesModal);
+    if (elements.closeDuplicatesBtn) elements.closeDuplicatesBtn.addEventListener('click', closeDuplicatesModal);
+    if (elements.doneDuplicatesBtn) elements.doneDuplicatesBtn.addEventListener('click', closeDuplicatesModal);
+    if (elements.duplicatesSweepBtn) elements.duplicatesSweepBtn.addEventListener('click', sweepDuplicates);
+    bindModalOverlayDismiss(elements.duplicatesModal, closeDuplicatesModal);
+    if (elements.tasteTrainBtn) elements.tasteTrainBtn.addEventListener('click', startTasteTrain);
+    if (elements.tasteJobChipCancel) {
+        elements.tasteJobChipCancel.addEventListener('click', cancelTasteTrain);
+    }
     if (elements.trashEmptyBtn) {
         elements.trashEmptyBtn.addEventListener('click', async () => {
             if (!state.trashCount) {
@@ -4657,6 +5649,7 @@ function setupEventListeners() {
     }
 
     setupClassifyListeners();
+    setupLabelListeners();
     setupGenRatingListeners();
     setupOutputsListeners();
     setupOutputDetailListeners();
@@ -4945,6 +5938,11 @@ function setupEventListeners() {
                 closeOutputDetail();
                 return;
             }
+            if (!e.ctrlKey && !e.metaKey && !e.altKey && handleGenerationRatingKey(e)) {
+                e.preventDefault();
+                return;
+            }
+            return;
         }
 
         if (elements.lightboxModal.style.display === 'flex') {
@@ -5000,6 +5998,10 @@ function setupEventListeners() {
                 // whole point of the mode, and 'c' (copy prompt) would
                 // otherwise be the only letter doing real work in a pile of
                 // forty rejects.
+                if (handleLabelKey(e)) {
+                    e.preventDefault();
+                    return;
+                }
                 if (handleTriageKey(e)) {
                     e.preventDefault();
                     return;
@@ -5030,6 +6032,20 @@ function setupEventListeners() {
             return;
         }
 
+        if (state.outputsView && !e.ctrlKey && !e.metaKey && !e.altKey) {
+            const ae = document.activeElement;
+            const typing = ae && (
+                ae.tagName === 'INPUT'
+                || ae.tagName === 'SELECT'
+                || ae.tagName === 'TEXTAREA'
+                || ae.isContentEditable
+            );
+            if (!typing && handleGenerationRatingKey(e)) {
+                e.preventDefault();
+                return;
+            }
+        }
+
         if (e.key === 'Escape' && isDisplayFlex(elements.syncModal)) {
             closeSyncModal();
             return;
@@ -5055,6 +6071,10 @@ function setupEventListeners() {
             if (state.selectedPaths.size) clearSelection();
             else setSelectMode(false);
             updateReviewBar();
+            return;
+        }
+        if (e.key === 'Escape' && state.labelMode) {
+            exitLabelMode();
             return;
         }
         if (e.key === 'Escape' && state.reviewMode) {
@@ -5320,10 +6340,11 @@ function renderOneLaneChip(lane) {
     const paused = Boolean(lane.paused);
     const sync = lane.sync || {};
 
-    // A dismissed chip stays hidden only while the lane is merely queued —
-    // it comes back the moment that lane actually starts work again.
+    // A dismissed chip stays hidden unless that lane actually starts work.
+    // Pause used to un-dismiss: the X hid the chip, then the 2.5s poller saw
+    // `paused` and brought it back — so Hide was a no-op after 429 pauses.
     if (state.scrapeChipDismissed.has(lane.source)) {
-        if (!running && !sync.running && !paused) {
+        if (!running && !sync.running) {
             chip.root.style.display = 'none';
             return;
         }
@@ -5498,6 +6519,7 @@ async function refreshScrapeStatusOnce() {
         }
         const data = await res.json();
         state.scrapeStatus = data;
+        applyInstagramBackendFrom(data);
 
         const pending = data.pending || [];
         const running = data.running_job;
@@ -5811,13 +6833,43 @@ function scrapeSourceValue() {
     return (elements.scrapeSourceSelect?.value || 'instagram').trim().toLowerCase();
 }
 
+function applyInstagramBackendFrom(data) {
+    if (!data || typeof data !== 'object') return;
+    if (data.instagram_backend) {
+        state.instagramBackend = String(data.instagram_backend);
+    }
+    if (data.instagram_cookies && typeof data.instagram_cookies === 'object') {
+        state.instagramCookies = data.instagram_cookies;
+    }
+    updateScrapeSourceUI();
+}
+
+function instagramBackendHint() {
+    const backend = state.instagramBackend || 'instaloader';
+    if (backend !== 'gallery-dl') {
+        return 'Jobs never run in parallel (Instagram rate limits). Backend: Instaloader.';
+    }
+    const cookies = state.instagramCookies || {};
+    let cred = 'set IG_COOKIES_FILE or SCRAPE_COOKIES_FROM_BROWSER';
+    if (cookies.mode === 'browser' && cookies.browser) {
+        cred = `${cookies.browser} cookies — close the browser if cookie read fails`;
+    } else if (cookies.mode === 'file') {
+        cred = 'cookies.txt';
+    } else if (!cookies.ready) {
+        cred = 'no cookies configured — set IG_COOKIES_FILE or SCRAPE_COOKIES_FROM_BROWSER';
+    }
+    return `Backend: gallery-dl (${cred}). Most reliable in practice; Instagram can still rate-limit.`;
+}
+
 function updateScrapeSourceUI() {
-    const meta = SCRAPE_SOURCE_META[scrapeSourceValue()] || SCRAPE_SOURCE_META.instagram;
+    const source = scrapeSourceValue();
+    const meta = SCRAPE_SOURCE_META[source] || SCRAPE_SOURCE_META.instagram;
     if (elements.scrapeCreatorInput) {
         elements.scrapeCreatorInput.placeholder = meta.placeholder;
     }
     if (elements.scrapeSourceHint) {
-        elements.scrapeSourceHint.textContent = meta.hint;
+        elements.scrapeSourceHint.textContent =
+            source === 'instagram' ? instagramBackendHint() : meta.hint;
     }
 }
 
@@ -6919,11 +7971,179 @@ async function cancelCreatorClassify() {
 
 // ── review mode ──────────────────────────────────────────────────────
 
+function tasteBadgeHtml(photo) {
+    const v = Number(photo && photo.taste_label);
+    if (v === 1) return '<span class="taste-pill keep">Keep</span>';
+    if (v === -1) return '<span class="taste-pill discard">Discard</span>';
+    return '';
+}
+
+function updateLabelButton() {
+    const n = state.labelCounts ? Number(state.labelCounts.unlabeled) || 0 : 0;
+    if (elements.labelCountBadge) elements.labelCountBadge.textContent = String(n);
+    if (elements.labelBtn) {
+        elements.labelBtn.classList.toggle('active', Boolean(state.labelMode));
+        elements.labelBtn.title = n
+            ? `Label ${n} unlabelled item(s) — K keep, X discard`
+            : 'Label keep/discard for the preference model';
+    }
+}
+
+function updateLabelBar() {
+    if (!elements.labelBar) return;
+    const on = Boolean(state.labelMode);
+    elements.labelBar.style.display = on ? 'flex' : 'none';
+    document.body.classList.toggle('label-mode', on);
+    if (!on) return;
+    const c = state.labelCounts || {};
+    if (elements.labelChipUnlabeled) elements.labelChipUnlabeled.textContent = String(c.unlabeled || 0);
+    if (elements.labelChipKeep) elements.labelChipKeep.textContent = String(c.keep || 0);
+    if (elements.labelChipDiscard) elements.labelChipDiscard.textContent = String(c.discard || 0);
+    if (elements.labelBarFilters) {
+        elements.labelBarFilters.querySelectorAll('[data-label]').forEach((chip) => {
+            chip.classList.toggle('active', chip.dataset.label === state.labelFilter);
+        });
+    }
+    if (elements.labelBarCount) {
+        elements.labelBarCount.textContent = state.labelFilter === 'unlabeled'
+            ? `${c.unlabeled || 0} remaining`
+            : `${state.photoTotal} item${state.photoTotal === 1 ? '' : 's'}`;
+    }
+}
+
+async function enterLabelMode() {
+    if (state.outputsView) showOutputsView(false);
+    if (state.reviewMode) exitReviewMode({ refetch: false });
+    state.labelMode = true;
+    state.labelFilter = 'unlabeled';
+    setSelectMode(false);
+    clearSelection();
+    updateLabelButton();
+    updateLabelBar();
+    await seedTasteLabels({ quiet: true });
+    fetchPhotos();
+}
+
+function exitLabelMode({ refetch = true } = {}) {
+    if (!state.labelMode) return;
+    state.labelMode = false;
+    state.labelFilter = 'unlabeled';
+    updateLabelButton();
+    updateLabelBar();
+    if (refetch) fetchPhotos();
+}
+
+function setLabelFilter(label) {
+    if (!['unlabeled', 'keep', 'discard'].includes(label) || label === state.labelFilter) return;
+    state.labelFilter = label;
+    updateLabelBar();
+    fetchPhotos();
+}
+
+async function seedTasteLabels({ quiet = false } = {}) {
+    try {
+        const res = await fetch('/api/labels/seed', { method: 'POST' });
+        const data = await res.json();
+        if (data.counts) state.labelCounts = data.counts;
+        updateLabelButton();
+        updateLabelBar();
+        if (!quiet) {
+            const n = (data.inserted_keep || 0) + (data.inserted_discard || 0);
+            showToast(n ? `Seeded ${n} from favorites / trash` : 'Nothing new to seed');
+        }
+    } catch (err) {
+        if (!quiet) showToast('Seed failed');
+    }
+}
+
+async function setTasteLabel(value, { advance = false } = {}) {
+    const photo = state.lightboxIndex >= 0 ? state.photos[state.lightboxIndex] : null;
+    if (!photo) return;
+    const previous = photo.taste_label;
+    photo.taste_label = value === 0 ? undefined : value;
+    try {
+        const res = await fetch('/api/labels', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: photo.rel_path, label: value }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (state.labelCounts) {
+            const c = state.labelCounts;
+            if (previous === 1) c.keep = Math.max(0, (c.keep || 0) - 1);
+            if (previous === -1) c.discard = Math.max(0, (c.discard || 0) - 1);
+            if (value === 1) c.keep = (c.keep || 0) + 1;
+            if (value === -1) c.discard = (c.discard || 0) + 1;
+            if (!previous && value) c.unlabeled = Math.max(0, (c.unlabeled || 0) - 1);
+            if (previous && !value) c.unlabeled = (c.unlabeled || 0) + 1;
+            c.labelled = (c.keep || 0) + (c.discard || 0);
+        }
+        updateLabelButton();
+        updateLabelBar();
+        const card = elements.galleryGrid && elements.galleryGrid.querySelector(
+            `.photo-card[data-rel-path="${cssEscape(photo.rel_path)}"]`
+        );
+        if (card) {
+            const pill = card.querySelector('.taste-pill');
+            const html = tasteBadgeHtml(photo);
+            if (pill && html) pill.outerHTML = html;
+            else if (pill && !html) pill.remove();
+            else if (!pill && html) card.insertAdjacentHTML('beforeend', html);
+        }
+        if (advance) {
+            const next = state.photos[state.lightboxIndex + 1];
+            if (state.labelFilter === 'unlabeled') {
+                const rel = photo.rel_path;
+                removePhotosFromView([rel]);
+                if (next) {
+                    const idx = state.photos.findIndex((p) => p.rel_path === next.rel_path);
+                    if (idx >= 0) openLightbox(idx);
+                    else closeLightbox();
+                } else {
+                    closeLightbox();
+                }
+            } else {
+                navigateLightbox(1);
+            }
+        }
+    } catch (err) {
+        photo.taste_label = previous;
+        showToast('Could not save label');
+    }
+}
+
+function handleLabelKey(e) {
+    if (!state.labelMode || state.lightboxIndex < 0) return false;
+    const el = document.activeElement;
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) {
+        return false;
+    }
+    const key = e.key.toLowerCase();
+    if (key === 'k' || key === '1') {
+        setTasteLabel(1, { advance: true });
+        return true;
+    }
+    if (key === 'x' || key === '-') {
+        setTasteLabel(-1, { advance: true });
+        return true;
+    }
+    if (key === '0') {
+        setTasteLabel(0, { advance: true });
+        return true;
+    }
+    if (key === ' ' || e.code === 'Space') {
+        navigateLightbox(1);
+        return true;
+    }
+    return false;
+}
+
 function enterReviewMode(creator, verdict = 'reject') {
     // Review mode's surface is the photo gallery. Entered from the Outputs view
     // — which the classify toast can do while the user is browsing generations
     // — it would otherwise turn on with nothing on screen to review.
     if (state.outputsView) showOutputsView(false);
+    if (state.labelMode) exitLabelMode({ refetch: false });
     if (creator && creator !== state.selectedCreator) {
         state.selectedCreator = creator;
         state.creatorPanelOpen = true;
@@ -7285,6 +8505,27 @@ function handleTriageKey(e) {
         return true;
     }
     return false;
+}
+
+function setupLabelListeners() {
+    if (elements.labelBtn) {
+        elements.labelBtn.addEventListener('click', () => {
+            if (state.labelMode) exitLabelMode();
+            else enterLabelMode();
+        });
+    }
+    if (elements.labelExitBtn) {
+        elements.labelExitBtn.addEventListener('click', () => exitLabelMode());
+    }
+    if (elements.labelSeedBtn) {
+        elements.labelSeedBtn.addEventListener('click', () => seedTasteLabels());
+    }
+    if (elements.labelBarFilters) {
+        elements.labelBarFilters.addEventListener('click', (e) => {
+            const chip = e.target.closest('[data-label]');
+            if (chip) setLabelFilter(chip.dataset.label);
+        });
+    }
 }
 
 function setupClassifyListeners() {

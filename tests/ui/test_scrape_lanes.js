@@ -206,6 +206,30 @@ const RUNNING_REDDIT = {
   r.check('dismissal tracked per lane', dismissed.tracked.join(',') === 'reddit',
     dismissed.tracked.join(','));
 
+  r.section('dismissing a paused chip survives the next poll');
+  const pauseDismiss = await s.eval(`
+    ${stub({
+      instagram: {
+        source: 'instagram',
+        paused: true,
+        pause_reason: 'Paused after Instagram 429 — do not auto-retry web_profile_info',
+        pending: [],
+        running_job: null,
+      },
+    })}
+    document.querySelector('#scrapeJobChip [data-role="dismiss"]').click();
+    await pollScrapeStatus();
+    await new Promise((r) => setTimeout(r, 200));
+    const el = document.getElementById('scrapeJobChip');
+    return {
+      visible: el ? getComputedStyle(el).display !== 'none' : false,
+      tracked: [...state.scrapeChipDismissed],
+    };
+  `);
+  r.check('paused Instagram chip stays hidden after Hide', pauseDismiss.visible === false);
+  r.check('instagram remains in the dismissed set',
+    pauseDismiss.tracked.includes('instagram'), pauseDismiss.tracked.join(','));
+
   // ── idle lanes disappear ───────────────────────────────────────────
   r.section('a lane going idle removes its chip');
   const idled = await s.eval(`
@@ -269,6 +293,20 @@ const RUNNING_REDDIT = {
   console.log('   ', JSON.stringify(flat));
   r.check('flat payload synthesises the Instagram lane', flat.visible === true);
   r.check('and shows its running creator', /@legacy_run/.test(flat.title), flat.title);
+
+  r.section('instagram backend hint');
+  const hint = await s.eval(`
+    if (elements.scrapeSourceSelect) elements.scrapeSourceSelect.value = 'instagram';
+    applyInstagramBackendFrom({
+      instagram_backend: 'gallery-dl',
+      instagram_cookies: { mode: 'browser', browser: 'brave', ready: true },
+    });
+    return document.getElementById('scrapeSourceHint')
+      ? document.getElementById('scrapeSourceHint').textContent
+      : '';
+  `);
+  r.check('gallery-dl hint names brave cookies',
+    /gallery-dl/i.test(hint) && /brave/i.test(hint), hint);
 
   await sleep(200);
   r.finish(s) || process.exit(1);
