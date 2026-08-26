@@ -111,6 +111,9 @@ const state = {
     // Archive-wide unclassified count from /api/stats. Deliberately separate
     // from the sidebar's per-creator counters, which the source filter narrows.
     archiveUnclassified: 0,
+    // Whole-archive photo count from /api/stats — first-run empty state
+    // cannot use state.photos.length, which is also 0 for a filter miss.
+    archivePhotoTotal: 0,
     // {total, counts, shares, warn_above} from /api/stats — the B4 pass rate
     // of every verdict filter. Archive-wide on purpose: the badge answers
     // "does this filter still tell me anything", which is a property of the
@@ -166,6 +169,14 @@ const elements = {
     semanticSearchBtn: document.getElementById('semanticSearchBtn'),
     clearSearch: document.getElementById('clearSearch'),
     emptyState: document.getElementById('emptyState'),
+    emptyStateIcon: document.getElementById('emptyStateIcon'),
+    emptyStateTitle: document.getElementById('emptyStateTitle'),
+    emptyStateCopy: document.getElementById('emptyStateCopy'),
+    emptyScrapeForm: document.getElementById('emptyScrapeForm'),
+    emptyScrapeSource: document.getElementById('emptyScrapeSource'),
+    emptyScrapeHandle: document.getElementById('emptyScrapeHandle'),
+    emptyScrapeBtn: document.getElementById('emptyScrapeBtn'),
+    emptyClearFiltersBtn: document.getElementById('emptyClearFiltersBtn'),
     refreshBtn: document.getElementById('refreshBtn'),
     gridNormal: document.getElementById('gridNormal'),
     gridLarge: document.getElementById('gridLarge'),
@@ -377,7 +388,9 @@ const elements = {
     reviewBarHint: document.getElementById('reviewBarHint'),
     reviewSelectToggleBtn: document.getElementById('reviewSelectToggleBtn'),
     reviewSelectAllBtn: document.getElementById('reviewSelectAllBtn'),
+    reviewSelectPileBtn: document.getElementById('reviewSelectPileBtn'),
     reviewClearBtn: document.getElementById('reviewClearBtn'),
+    reviewKeepBtn: document.getElementById('reviewKeepBtn'),
     reviewDeleteBtn: document.getElementById('reviewDeleteBtn'),
     reviewExitBtn: document.getElementById('reviewExitBtn'),
     // Triage block in the lightbox inspector
@@ -955,6 +968,7 @@ async function fetchStats() {
         // Archive-wide, never narrowed by the source filter — the navbar
         // Classify All button needs the number its job actually covers.
         state.archiveUnclassified = Number(data.unclassified_total) || 0;
+        state.archivePhotoTotal = Number(data.total_photos) || 0;
         state.labelCounts = data.labels || null;
         updateLabelButton();
         // Pass rates for the verdict filters (B4). Rides on /api/stats rather
@@ -1314,6 +1328,53 @@ async function fetchCreators() {
     }
 }
 
+/**
+ * Query string for the current gallery view. Shared by the paged fetch and
+ * the whole-pile path list (`ids=1`) so "select all 400" cannot drift from
+ * the filter the user is looking at.
+ */
+function galleryQueryParams({ offset = 0, limit = null, ids = false } = {}) {
+    const params = new URLSearchParams();
+    if (state.selectedCreator) params.append('creator', state.selectedCreator);
+    if (state.searchQuery) {
+        params.append('search', state.searchQuery);
+        if (state.searchMode === 'semantic') params.append('mode', 'semantic');
+    }
+    if (state.collectionId) params.append('collection', String(state.collectionId));
+    ['Setting', 'Outfit', 'Pose', 'Lighting'].forEach((name) => {
+        const value = state[`facet${name}`];
+        if (value) params.append(name.toLowerCase(), value);
+    });
+    if (state.unanalyzedOnly) params.append('unanalyzed', '1');
+    if (state.favoritesOnly) params.append('favorite', '1');
+    params.append('media_type', state.mediaType || 'all');
+    if (state.sourceFilter) params.append('source', state.sourceFilter);
+    if (state.reviewMode && state.verdictFilter) {
+        params.append('verdict', state.verdictFilter);
+        // Harshest first while triaging — the files most likely to be
+        // deleted should be the ones on screen without scrolling.
+        params.append('sort', 'tier');
+    } else {
+        if (state.browseVerdict) params.append('verdict', state.browseVerdict);
+        params.append('sort', state.sortMode || 'name');
+    }
+    if (state.labelMode && state.labelFilter) {
+        params.append('label', state.labelFilter);
+    }
+    // Review mode deliberately opts out: triage adjudicates one file at a
+    // time, and a collapsed carousel would hide rejects behind a tile.
+    if (state.groupPosts && !state.reviewMode && !ids) {
+        params.append('group', 'post');
+    }
+    if (ids) {
+        params.append('ids', '1');
+        return params;
+    }
+    params.append('offset', String(offset));
+    params.append('limit', String(limit == null ? state.photoLimit : limit));
+    return params;
+}
+
 async function fetchPhotos({ append = false } = {}) {
     // Infinite-scroll appends must not stack, or the same page loads twice.
     // A new filter/search/sort, by contrast, must never be dropped — it
@@ -1334,59 +1395,10 @@ async function fetchPhotos({ append = false } = {}) {
         // aborted request cannot corrupt paging or blank out state.photos.
         const requestOffset = append ? state.photoOffset : 0;
 
-        let url = '/api/photos';
-        const params = new URLSearchParams();
-
-        if (state.selectedCreator) {
-            params.append('creator', state.selectedCreator);
-        }
-        if (state.searchQuery) {
-            params.append('search', state.searchQuery);
-            if (state.searchMode === 'semantic') params.append('mode', 'semantic');
-        }
-        if (state.collectionId) {
-            params.append('collection', String(state.collectionId));
-        }
-        ['Setting', 'Outfit', 'Pose', 'Lighting'].forEach((name) => {
-            const value = state[`facet${name}`];
-            if (value) params.append(name.toLowerCase(), value);
-        });
-        if (state.unanalyzedOnly) {
-            params.append('unanalyzed', '1');
-        }
-        if (state.favoritesOnly) {
-            params.append('favorite', '1');
-        }
-        params.append('media_type', state.mediaType || 'all');
-        if (state.sourceFilter) {
-            params.append('source', state.sourceFilter);
-        }
-        if (state.reviewMode && state.verdictFilter) {
-            params.append('verdict', state.verdictFilter);
-            // Harshest first while triaging — the files most likely to be
-            // deleted should be the ones on screen without scrolling.
-            params.append('sort', 'tier');
-        } else {
-            // Outside review, the verdict is a browse filter like any other:
-            // "show me every tier-4 shot" should not require entering a
-            // delete-oriented mode first.
-            if (state.browseVerdict) {
-                params.append('verdict', state.browseVerdict);
-            }
-            params.append('sort', state.sortMode || 'name');
-        }
-        if (state.labelMode && state.labelFilter) {
-            params.append('label', state.labelFilter);
-        }
-        // Review mode deliberately opts out: triage adjudicates one file at a
-        // time, and a collapsed carousel would hide rejects behind a tile.
-        if (state.groupPosts && !state.reviewMode) {
-            params.append('group', 'post');
-        }
-        params.append('offset', String(requestOffset));
-        params.append('limit', String(state.photoLimit));
-
-        url += '?' + params.toString();
+        const url = '/api/photos?' + galleryQueryParams({
+            offset: requestOffset,
+            limit: state.photoLimit,
+        }).toString();
 
         const res = await fetch(url, { signal: controller.signal });
         const data = await res.json();
@@ -1419,9 +1431,7 @@ async function fetchPhotos({ append = false } = {}) {
             setGalleryLoading(false);
             // renderGallery replaces them on success; on error they'd linger
             clearGallerySkeletons();
-            if (!state.photos.length) {
-                elements.emptyState.style.display = 'flex';
-            }
+            if (!state.photos.length) updateEmptyState();
             // photoTotal is only known once the page lands, and the review
             // strip prints it.
             if (state.reviewMode) updateReviewBar();
@@ -1562,7 +1572,7 @@ function removePhotosFromView(relPaths) {
     }
 
     elements.galleryCount.textContent = galleryCountLabel();
-    elements.emptyState.style.display = state.photos.length === 0 ? 'flex' : 'none';
+    updateEmptyState();
     updateBulkBar();
     return removed;
 }
@@ -2346,6 +2356,152 @@ function galleryCountLabel() {
     return `${shown}${total} posts · ${state.photos.length} photos`;
 }
 
+function galleryHasActiveFilters() {
+    return Boolean(
+        state.searchQuery
+        || state.browseVerdict
+        || state.favoritesOnly
+        || state.unanalyzedOnly
+        || state.sourceFilter
+        || (state.mediaType && state.mediaType !== 'all')
+        || state.collectionId
+        || state.facetSetting
+        || state.facetOutfit
+        || state.facetPose
+        || state.facetLighting
+    );
+}
+
+/**
+ * First-run, a filter miss, and an empty review pile used to share one
+ * sentence. They are different situations: only the first one has a next
+ * action that is "add media", and only the second has filters to clear.
+ */
+function updateEmptyState() {
+    const el = elements.emptyState;
+    if (!el) return;
+    if (state.photos.length > 0) {
+        el.style.display = 'none';
+        return;
+    }
+    el.style.display = 'flex';
+    const firstRun = !state.selectedCreator
+        && !state.reviewMode
+        && (state.archivePhotoTotal === 0)
+        && (state.creators.length === 0)
+        && !galleryHasActiveFilters();
+    const reviewEmpty = Boolean(state.reviewMode);
+    const filtered = !firstRun && !reviewEmpty && galleryHasActiveFilters();
+    const creatorEmpty = !firstRun && !reviewEmpty && !filtered && Boolean(state.selectedCreator);
+
+    el.classList.toggle('is-first-run', firstRun);
+    if (elements.emptyStateIcon) {
+        elements.emptyStateIcon.className = firstRun
+            ? 'fa-solid fa-sparkles empty-icon'
+            : 'fa-solid fa-image-slash empty-icon';
+    }
+    if (elements.emptyStateTitle) {
+        elements.emptyStateTitle.textContent = firstRun
+            ? 'Your studio is empty'
+            : reviewEmpty
+                ? 'Nothing in this pile'
+                : filtered
+                    ? 'No matches'
+                    : creatorEmpty
+                        ? `No photos for @${state.selectedCreator}`
+                        : 'No photos found';
+    }
+    if (elements.emptyStateCopy) {
+        elements.emptyStateCopy.textContent = firstRun
+            ? 'Paste an Instagram or X handle to start building your studio.'
+            : reviewEmpty
+                ? 'This verdict filter is empty. Try another chip, or you are done here.'
+                : filtered
+                    ? 'Nothing matches the current filters. Clear them, or pick a different creator.'
+                    : creatorEmpty
+                        ? 'Sync new posts for this creator, or pick someone else in the sidebar.'
+                        : 'Try selecting a different creator or clearing your search query.';
+    }
+    if (elements.emptyScrapeForm) {
+        elements.emptyScrapeForm.style.display = firstRun ? 'block' : 'none';
+    }
+    if (elements.emptyClearFiltersBtn) {
+        elements.emptyClearFiltersBtn.style.display = filtered ? '' : 'none';
+    }
+}
+
+function parsePastedTarget(raw) {
+    const text = String(raw || '').trim();
+    if (!text) return { source: '', handle: '' };
+    const withScheme = /^https?:\/\//i.test(text) ? text : `https://${text}`;
+    try {
+        const u = new URL(withScheme);
+        const host = u.hostname.replace(/^www\./, '').toLowerCase();
+        const parts = u.pathname.split('/').filter(Boolean);
+        if (host.includes('instagram.com')) {
+            return { source: 'instagram', handle: (parts[0] || '').replace(/^@/, '') };
+        }
+        if (host === 'x.com' || host === 'twitter.com') {
+            return { source: 'x', handle: (parts[0] || '').replace(/^@/, '') };
+        }
+        if (host.includes('reddit.com')) {
+            const sub = parts[0] === 'r' ? parts[1] : parts[0];
+            return { source: 'reddit', handle: sub || '' };
+        }
+    } catch (err) {
+        // Not a URL — fall through to handle parsing.
+    }
+    if (/^r\//i.test(text)) {
+        return { source: 'reddit', handle: text.replace(/^r\//i, '').split('/')[0] };
+    }
+    return { source: '', handle: text.replace(/^@/, '').split(/[/?#\s]/)[0] };
+}
+
+async function submitEmptyScrape(event) {
+    if (event) event.preventDefault();
+    const raw = (elements.emptyScrapeHandle?.value || '').trim();
+    const parsed = parsePastedTarget(raw);
+    const source = parsed.source || (elements.emptyScrapeSource?.value || 'instagram');
+    const handle = parsed.handle;
+    if (!handle) {
+        showToast({ title: 'Enter a handle', body: 'Paste an Instagram or X handle, or a profile URL.', variant: 'error' });
+        elements.emptyScrapeHandle?.focus();
+        return;
+    }
+    if (elements.emptyScrapeSource) elements.emptyScrapeSource.value = source;
+    if (elements.emptyScrapeHandle) elements.emptyScrapeHandle.value = handle;
+    if (elements.scrapeSourceSelect) elements.scrapeSourceSelect.value = source;
+    if (elements.scrapeCreatorInput) elements.scrapeCreatorInput.value = handle;
+    updateScrapeSourceUI();
+    openSyncModal();
+    await enqueueCreatorScrape();
+}
+
+function clearGalleryFilters() {
+    state.searchQuery = '';
+    state.browseVerdict = '';
+    state.favoritesOnly = false;
+    state.unanalyzedOnly = false;
+    state.mediaType = 'all';
+    state.collectionId = null;
+    state.collectionName = '';
+    state.facetSetting = '';
+    state.facetOutfit = '';
+    state.facetPose = '';
+    state.facetLighting = '';
+    if (elements.searchInput) elements.searchInput.value = '';
+    if (elements.verdictFilterSelect) {
+        elements.verdictFilterSelect.value = '';
+        elements.verdictFilterSelect.classList.remove('is-active');
+    }
+    if (elements.mediaTypeSelect) elements.mediaTypeSelect.value = 'all';
+    if (elements.favoritesFilterBtn) elements.favoritesFilterBtn.classList.remove('active');
+    if (elements.unanalyzedFilterBtn) elements.unanalyzedFilterBtn.classList.remove('active');
+    saveViewPrefs();
+    if (typeof renderFacetChips === 'function') renderFacetChips();
+    fetchPhotos();
+}
+
 function renderGallery({ append = false, fromIndex = 0 } = {}) {
     if (!append) {
         elements.galleryGrid.innerHTML = '';
@@ -2356,12 +2512,12 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
     elements.galleryCount.textContent = galleryCountLabel();
 
     if (state.photos.length === 0) {
-        elements.emptyState.style.display = 'flex';
+        updateEmptyState();
         updateBulkBar();
         return;
     }
 
-    elements.emptyState.style.display = 'none';
+    updateEmptyState();
 
     const sliceStart = append ? fromIndex : 0;
     const toRender = state.galleryTiles.slice(sliceStart);
@@ -5634,6 +5790,24 @@ function setupEventListeners() {
         elements.scrapeSourceSelect.addEventListener('change', updateScrapeSourceUI);
     }
     updateScrapeSourceUI();
+    if (elements.emptyScrapeForm) {
+        elements.emptyScrapeForm.addEventListener('submit', submitEmptyScrape);
+    }
+    if (elements.emptyScrapeHandle) {
+        elements.emptyScrapeHandle.addEventListener('paste', (e) => {
+            const text = (e.clipboardData || window.clipboardData)?.getData('text') || '';
+            const parsed = parsePastedTarget(text);
+            if (!parsed.handle) return;
+            e.preventDefault();
+            if (parsed.source && elements.emptyScrapeSource) {
+                elements.emptyScrapeSource.value = parsed.source;
+            }
+            elements.emptyScrapeHandle.value = parsed.handle;
+        });
+    }
+    if (elements.emptyClearFiltersBtn) {
+        elements.emptyClearFiltersBtn.addEventListener('click', clearGalleryFilters);
+    }
     if (elements.scrapeCreatorInput) {
         elements.scrapeCreatorInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') enqueueCreatorScrape();
@@ -8310,10 +8484,36 @@ function updateReviewBar() {
     }
 
     const selected = state.selectedPaths.size;
+    const loaded = state.photos.length;
+    const pile = Number(state.photoTotal) || 0;
+    const moreInPile = pile > loaded;
     if (elements.reviewBarCount) {
-        elements.reviewBarCount.textContent = selected
-            ? `${selected} selected of ${state.photoTotal}`
-            : `${state.photoTotal} item${state.photoTotal === 1 ? '' : 's'}`;
+        if (selected) {
+            const loadedNote = moreInPile ? ` · ${loaded} loaded` : '';
+            elements.reviewBarCount.textContent =
+                `${selected} selected of ${pile}${loadedNote}`;
+        } else if (moreInPile) {
+            elements.reviewBarCount.textContent =
+                `${pile} items · ${loaded} loaded`;
+        } else {
+            elements.reviewBarCount.textContent =
+                `${pile} item${pile === 1 ? '' : 's'}`;
+        }
+    }
+    if (elements.reviewSelectAllBtn) {
+        const n = loaded;
+        elements.reviewSelectAllBtn.innerHTML = moreInPile
+            ? `<i class="fa-solid fa-check-double"></i> Select loaded (${n})`
+            : '<i class="fa-solid fa-check-double"></i> Select non-favourites';
+        elements.reviewSelectAllBtn.title = moreInPile
+            ? `Select the ${n} non-favourite items currently in the grid, not the whole pile`
+            : 'Select every non-favourite in this pile';
+    }
+    if (elements.reviewSelectPileBtn) {
+        const showPile = moreInPile && selected < pile;
+        elements.reviewSelectPileBtn.style.display = showPile ? '' : 'none';
+        elements.reviewSelectPileBtn.innerHTML =
+            `<i class="fa-solid fa-list-check"></i> Select all ${pile}`;
     }
     if (elements.reviewSelectToggleBtn) {
         elements.reviewSelectToggleBtn.classList.toggle('active', Boolean(state.selectMode));
@@ -8324,6 +8524,12 @@ function updateReviewBar() {
     }
     if (elements.reviewClearBtn) {
         elements.reviewClearBtn.style.display = selected ? '' : 'none';
+    }
+    if (elements.reviewKeepBtn) {
+        elements.reviewKeepBtn.disabled = selected === 0;
+        elements.reviewKeepBtn.innerHTML = selected
+            ? `<i class="fa-solid fa-heart"></i> Keep ${selected}`
+            : '<i class="fa-solid fa-heart"></i> Keep selected';
     }
     if (elements.reviewDeleteBtn) {
         elements.reviewDeleteBtn.disabled = selected === 0;
@@ -8337,6 +8543,8 @@ function updateReviewBar() {
  * Select everything on the page except favourites. Favourites are the one
  * signal that is unambiguously the user's own, so they are never swept into a
  * bulk delete by a machine verdict.
+ *
+ * This is the loaded page only. `selectEntirePile` is the whole-filter action.
  */
 function selectNonFavourites() {
     if (!state.reviewMode) return;
@@ -8353,10 +8561,166 @@ function selectNonFavourites() {
     renderGallery();
     updateReviewBar();
     const n = state.selectedPaths.size;
+    const more = (state.photoTotal || 0) > state.photos.length;
     if (!n) {
         showToast('Nothing to select on this page');
+    } else if (more) {
+        showToast(`Selected ${n} loaded of ${state.photoTotal}${skipped ? ` · skipped ${skipped} favourite${skipped === 1 ? '' : 's'}` : ''}`);
     } else {
         showToast(`Selected ${n}${skipped ? ` · skipped ${skipped} favourite${skipped === 1 ? '' : 's'}` : ''}`);
+    }
+}
+
+/**
+ * Select every path matching the current review filter, including items the
+ * infinite scroll has not loaded. Favourites are still skipped.
+ */
+async function selectEntirePile() {
+    if (!state.reviewMode) return;
+    setSelectMode(true);
+    let controller = null;
+    try {
+        controller = new AbortController();
+        const res = await fetch('/api/photos?' + galleryQueryParams({ ids: true }).toString(), {
+            signal: controller.signal,
+        });
+        const data = await res.json();
+        const rows = Array.isArray(data.paths) ? data.paths : [];
+        let skipped = 0;
+        rows.forEach((row) => {
+            if (row.favorite) {
+                state.selectedPaths.delete(row.rel_path);
+                skipped += 1;
+            } else {
+                state.selectedPaths.add(row.rel_path);
+            }
+        });
+        renderGallery();
+        updateReviewBar();
+        const n = state.selectedPaths.size;
+        const truncated = Boolean(data.truncated);
+        if (!n) {
+            showToast('Nothing to select in this pile');
+            return;
+        }
+        const extra = [
+            skipped ? `skipped ${skipped} favourite${skipped === 1 ? '' : 's'}` : '',
+            truncated ? `capped at ${rows.length} of ${data.total}` : '',
+        ].filter(Boolean).join(' · ');
+        showToast(`Selected ${n} of ${data.total}${extra ? ` · ${extra}` : ''}`);
+    } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        showToast('Could not load the full pile');
+    }
+}
+
+function activeVerdictFilter() {
+    if (state.reviewMode) return state.verdictFilter || '';
+    return state.browseVerdict || '';
+}
+
+/** Manual keep/reject leaves these views; the item no longer matches. */
+function verdictLeavesFilter(filter, value) {
+    if (!filter) return false;
+    if (filter === 'keep') return value !== 'keep';
+    if (filter === 'reject') return value !== 'reject';
+    return true;
+}
+
+/**
+ * Drop cards that no longer match the current filter, without treating it as
+ * a delete — photo_count and the archive total stay put.
+ */
+function removePhotosFromFilter(relPaths) {
+    const targets = new Set(relPaths || []);
+    if (!targets.size) return 0;
+    const before = state.photos.length;
+    const tilesBefore = state.galleryTiles.length;
+    state.photos = state.photos.filter((p) => !targets.has(p.rel_path));
+    const removed = before - state.photos.length;
+    targets.forEach((rel) => {
+        state.selectedPaths.delete(rel);
+        const card = elements.galleryGrid.querySelector(
+            `.photo-card[data-rel-path="${cssEscape(rel)}"]`
+        );
+        if (card) card.remove();
+    });
+    rebuildGalleryTiles();
+    const tilesRemoved = Math.max(0, tilesBefore - state.galleryTiles.length);
+    state.photoOffset = Math.max(0, state.photoOffset - tilesRemoved);
+    state.photoTotal = Math.max(0, (state.photoTotal || 0) - tilesRemoved);
+    // Unloaded paths that left the filter still count against photoTotal.
+    const unloadedLeft = Math.max(0, targets.size - removed);
+    if (unloadedLeft) {
+        state.photoTotal = Math.max(0, (state.photoTotal || 0) - unloadedLeft);
+    }
+    if (state.lightboxIndex >= 0) {
+        reconcileLightboxAfterRemoval(state.lightboxIndex);
+    }
+    elements.galleryCount.textContent = galleryCountLabel();
+    updateEmptyState();
+    updateReviewBar();
+    return removed;
+}
+
+async function applyBulkManualVerdict(value) {
+    const paths = Array.from(state.selectedPaths);
+    if (!paths.length || !state.reviewMode) return;
+    const noun = value === 'keep' ? 'keep' : 'reject';
+    if (paths.length > 1 && !window.confirm(
+        `Pin ${paths.length} item(s) to ${noun}? Favourites in the selection are included.`
+    )) {
+        return;
+    }
+    try {
+        const res = await fetch('/api/classify/verdict', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rel_paths: paths, verdict: value }),
+        });
+        const data = await res.json();
+        if (!res.ok || data.status !== 'ok') {
+            showToast(data.message || 'Could not save those verdicts');
+            return;
+        }
+        const updated = Array.isArray(data.updated) ? data.updated : [];
+        const missing = Array.isArray(data.missing) ? data.missing : [];
+        const verdicts = data.verdicts || {};
+        updated.forEach((rel) => {
+            const photo = state.photos.find((p) => p.rel_path === rel);
+            if (photo && verdicts[rel]) photo.verdict = verdicts[rel];
+        });
+        const filter = activeVerdictFilter();
+        if (verdictLeavesFilter(filter, value)) {
+            removePhotosFromFilter(updated);
+        } else {
+            updated.forEach((rel) => {
+                const photo = state.photos.find((p) => p.rel_path === rel);
+                if (!photo) return;
+                const card = elements.galleryGrid.querySelector(
+                    `.photo-card[data-rel-path="${cssEscape(rel)}"]`
+                );
+                if (card) {
+                    card.className = card.className
+                        .replace(/ verdict-(reject|keep|error|none)/g, '') + verdictCardClass(photo);
+                    const pill = card.querySelector('.verdict-pill');
+                    if (pill) pill.outerHTML = verdictBadgeHtml(photo);
+                }
+            });
+            clearSelection();
+            updateReviewBar();
+        }
+        fetchCreators();
+        fetchStats();
+        const skipped = missing.length
+            ? ` · ${missing.length} not yet classified`
+            : '';
+        const verb = value === 'keep' ? 'Kept' : 'Rejected';
+        showToast(updated.length
+            ? `${verb} ${updated.length}${skipped}`
+            : `Nothing to ${noun}${skipped}`);
+    } catch (err) {
+        showToast('Verdict request failed');
     }
 }
 
@@ -8587,11 +8951,19 @@ function setupClassifyListeners() {
     if (elements.reviewSelectAllBtn) {
         elements.reviewSelectAllBtn.addEventListener('click', selectNonFavourites);
     }
+    if (elements.reviewSelectPileBtn) {
+        elements.reviewSelectPileBtn.addEventListener('click', () => {
+            selectEntirePile();
+        });
+    }
     if (elements.reviewClearBtn) {
         elements.reviewClearBtn.addEventListener('click', () => {
             clearSelection();
             updateReviewBar();
         });
+    }
+    if (elements.reviewKeepBtn) {
+        elements.reviewKeepBtn.addEventListener('click', () => applyBulkManualVerdict('keep'));
     }
     if (elements.reviewDeleteBtn) {
         elements.reviewDeleteBtn.addEventListener('click', promptBulkDelete);

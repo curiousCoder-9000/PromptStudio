@@ -265,6 +265,89 @@ const { Session, Report, sleep } = require('./cdp');
 
   await s.eval(`clearSelection(); updateReviewBar(); return true;`);
 
+  // ── bulk keep + select-all honesty (U13/U14) ───────────────────────
+  r.section('bulk keep and select-all honesty');
+
+  const keepIdle = await s.eval(`
+    const b = document.getElementById('reviewKeepBtn');
+    const pile = document.getElementById('reviewSelectPileBtn');
+    const count = document.getElementById('reviewBarCount').textContent.trim();
+    return {
+      disabled: b.disabled,
+      label: b.textContent.trim(),
+      pileDisplay: getComputedStyle(pile).display,
+      count
+    };
+  `);
+  r.check('keep is disabled with an empty selection', keepIdle.disabled === true,
+    JSON.stringify(keepIdle));
+  r.check('select-all-pile is hidden when the page is the whole pile',
+    keepIdle.pileDisplay === 'none', keepIdle.pileDisplay);
+
+  const forcedPile = await s.eval(`
+    state.photoHasMore = true;
+    state.photoTotal = 400;
+    updateReviewBar();
+    const pile = document.getElementById('reviewSelectPileBtn');
+    const count = document.getElementById('reviewBarCount').textContent.trim();
+    const loaded = document.getElementById('reviewSelectAllBtn').textContent.trim();
+    return { pileLabel: pile.textContent.trim(), pileDisplay: getComputedStyle(pile).display, count, loaded };
+  `);
+  r.check('count names loaded vs total when the pile is larger',
+    /loaded/.test(forcedPile.count) && forcedPile.count.includes('400'),
+    forcedPile.count);
+  r.check('select-all-pile offers the true total',
+    forcedPile.pileDisplay !== 'none' && /Select all 400/.test(forcedPile.pileLabel),
+    JSON.stringify(forcedPile));
+  r.check('loaded-page sweep is labelled as loaded, not as the pile',
+    /loaded/i.test(forcedPile.loaded), forcedPile.loaded);
+
+  await s.eval(`
+    state.photoHasMore = false;
+    state.photoTotal = state.photos.length;
+    updateReviewBar();
+    return true;
+  `);
+
+  await s.resetFetchLog();
+  const pileFetch = await s.eval(`
+    return selectEntirePile().then(() => true);
+  `);
+  r.check('selectEntirePile runs', pileFetch === true, String(pileFetch));
+  await sleep(600);
+  const pileLog = (await s.fetchLog()).calls.filter((u) => u.includes('/api/photos'));
+  r.check('select-all-pile requests ids=1',
+    pileLog.some((u) => u.includes('ids=1') && u.includes('verdict=reject')),
+    pileLog[0] || '');
+
+  const onePath = await s.eval(`
+    const fav = ${JSON.stringify(favPath)};
+    const p = state.photos.find((x) => x.rel_path !== fav) || state.photos[0];
+    clearSelection();
+    state.selectedPaths.add(p.rel_path);
+    setSelectMode(true);
+    updateReviewBar();
+    return p.rel_path;
+  `);
+  const keepArmed = await s.eval(`
+    const b = document.getElementById('reviewKeepBtn');
+    return { disabled: b.disabled, label: b.textContent.trim() };
+  `);
+  r.check('keep enables with a selection', keepArmed.disabled === false,
+    JSON.stringify(keepArmed));
+
+  await s.resetFetchLog();
+  await s.eval(`window.confirm = () => true; return applyBulkManualVerdict('keep');`);
+  await sleep(800);
+  const keepLog = (await s.fetchLog()).calls;
+  const keepPosts = keepLog.filter((u) => u.includes('/api/classify/verdict'));
+  r.check('Keep selected POSTs the verdict endpoint', keepPosts.length >= 1,
+    keepLog.join(' | '));
+  const stillThere = await s.eval(`
+    return state.photos.some((p) => p.rel_path === ${JSON.stringify(onePath)});
+  `);
+  r.check('kept item leaves the reject pile', stillThere === false, String(stillThere));
+
   // ── triage panel ───────────────────────────────────────────────────
   r.section('triage panel');
 

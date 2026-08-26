@@ -2012,16 +2012,54 @@ class ArchiveIndex:
         Returns False when there is no verdict row yet — a manual call on an
         unclassified file is a UI bug, not something to invent a tier for.
         """
+        result = self.set_manual_verdicts([rel_path], value)
+        return bool(result["updated"])
+
+    def set_manual_verdicts(
+        self, rel_paths: Sequence[str], value: Optional[str]
+    ) -> Dict[str, List[str]]:
+        """Pin many files in one transaction. Same contract as the single-path
+        form: unclassified paths are reported in `missing`, never invented.
+
+        Chunked at 400 because SQLite caps host parameters. Order of
+        `updated`/`missing` follows the de-duplicated input.
+        """
         if value not in (None, "keep", "reject"):
             raise ValueError(f"bad manual verdict: {value!r}")
-        rel = normalize_rel_path(rel_path)
+        seen: set[str] = set()
+        uniq: List[str] = []
+        for raw in rel_paths:
+            rel = normalize_rel_path(str(raw)) if raw else ""
+            if not rel or rel in seen:
+                continue
+            seen.add(rel)
+            uniq.append(rel)
+        if not uniq:
+            return {"updated": [], "missing": []}
+        found: set[str] = set()
         with self._lock:
-            cur = self._conn.execute(
-                "UPDATE media_verdicts SET manual = ? WHERE rel_path = ?",
-                (value, rel),
-            )
+            for start in range(0, len(uniq), 400):
+                chunk = uniq[start : start + 400]
+                placeholders = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"SELECT rel_path FROM media_verdicts "
+                    f"WHERE rel_path IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                chunk_found = [r["rel_path"] for r in rows]
+                if not chunk_found:
+                    continue
+                found.update(chunk_found)
+                found_ph = ",".join("?" * len(chunk_found))
+                self._conn.execute(
+                    f"UPDATE media_verdicts SET manual = ? "
+                    f"WHERE rel_path IN ({found_ph})",
+                    [value, *chunk_found],
+                )
             self._conn.commit()
-            return bool(cur.rowcount)
+        updated = [rel for rel in uniq if rel in found]
+        missing = [rel for rel in uniq if rel not in found]
+        return {"updated": updated, "missing": missing}
 
     def verdicts_for(
         self, rel_paths: Sequence[str], *, cut: Optional[int] = None
@@ -3201,6 +3239,7 @@ class ArchiveIndex:
         outfit: Optional[str] = None,
         pose: Optional[str] = None,
         lighting: Optional[str] = None,
+        paths_only: bool = False,
     ) -> Tuple[List[Dict[str, Any]], int]:
         """Gallery page + the total the caller pages against.
 
@@ -3209,6 +3248,10 @@ class ArchiveIndex:
         groups, not files** — it is what drives the infinite-scroll sentinel,
         and a file count against a group-rendering grid drifts a little further
         every page until it silently skips content.
+
+        `paths_only` returns `{rel_path, favorite}` for every match (capped by
+        `limit`) so "select the whole pile" does not have to page the gallery.
+        Grouping is ignored: selection is per file.
         """
         where: List[str] = []
         params: List[Any] = []
@@ -3369,6 +3412,31 @@ class ArchiveIndex:
 
         select_cols, join = _photo_select(verdict_case)
 
+        if paths_only and not semantic:
+            # Selection is per file even when the grid is grouped. Favourite
+            # rides along so "select all" can skip them without a second pass.
+            # Semantic ranking is a different branch: the WHERE clause does
+            # not include the search text, so this shortcut would over-select.
+            with self._lock:
+                total = int(
+                    self._conn.execute(
+                        f"SELECT COUNT(*) AS c{join}{where_sql}", params
+                    ).fetchone()["c"]
+                )
+                sql = f"SELECT p.rel_path, p.favorite{join}{where_sql} {order}"
+                page_params = list(params)
+                if limit is not None:
+                    sql += " LIMIT ?"
+                    page_params.append(int(limit))
+                rows = self._conn.execute(sql, page_params).fetchall()
+            return (
+                [
+                    {"rel_path": r["rel_path"], "favorite": bool(r["favorite"])}
+                    for r in rows
+                ],
+                total,
+            )
+
         if semantic:
             # Rank the filtered set by cosine to the query embedding, then page.
             # Grouping is skipped: a carousel as one tile fights nearest-neighbour
@@ -3392,6 +3460,18 @@ class ArchiveIndex:
             page_paths = (
                 ordered[start : start + int(limit)] if limit is not None else ordered[start:]
             )
+            if paths_only:
+                fav_lookup = self.photos_for_rel_paths(page_paths, reject_cut=cut)
+                return (
+                    [
+                        {
+                            "rel_path": p,
+                            "favorite": bool((fav_lookup.get(p) or {}).get("favorite")),
+                        }
+                        for p in page_paths
+                    ],
+                    total,
+                )
             lookup = self.photos_for_rel_paths(page_paths, reject_cut=cut)
             photos = [lookup[p] for p in page_paths if p in lookup]
             return photos, total

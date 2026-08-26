@@ -485,6 +485,10 @@ LOG_MAX_BYTES = int(os.environ.get("PROMPTSTUDIO_LOG_MAX_BYTES", str(5 * 1024 * 
 LOG_BACKUPS = int(os.environ.get("PROMPTSTUDIO_LOG_BACKUPS", "3"))
 LOG_CONSOLE = _env_bool("PROMPTSTUDIO_LOG_CONSOLE", "1")
 MAX_PHOTOS_API_PAGE = int(os.environ.get("PROMPTSTUDIO_PHOTO_PAGE", "300"))
+# Path-list for "select all N" — not a gallery page, so the page cap does not
+# apply. 10k short strings is a small JSON payload; past that the UI must say
+# the selection was truncated rather than pretend the whole pile is covered.
+MAX_PHOTO_IDS_API = int(os.environ.get("PROMPTSTUDIO_PHOTO_IDS", "10000"))
 THUMB_MAX_SIZE = int(os.environ.get("PROMPTSTUDIO_THUMB_SIZE", "400"))
 
 # Ollama vision engine

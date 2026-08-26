@@ -280,10 +280,16 @@
                         <button class="filter-chip review-select-toggle" id="reviewSelectToggleBtn" type="button" title="Select multiple items to delete (Esc to leave)">
                             <i class="fa-solid fa-check-double"></i> Select
                         </button>
-                        <button class="btn btn-secondary btn-sm" id="reviewSelectAllBtn" type="button" title="Select every non-favourite on this page">
-                            <i class="fa-solid fa-check-double"></i> Select non-favourites
+                        <button class="btn btn-secondary btn-sm" id="reviewSelectAllBtn" type="button" title="Select every non-favourite loaded in the grid">
+                            <i class="fa-solid fa-check-double"></i> Select loaded
+                        </button>
+                        <button class="btn btn-secondary btn-sm" id="reviewSelectPileBtn" type="button" style="display:none;" title="Select every matching item, including ones not yet scrolled into view">
+                            <i class="fa-solid fa-list-check"></i> Select all
                         </button>
                         <button class="btn btn-ghost btn-sm" id="reviewClearBtn" type="button" style="display:none;" title="Clear the selection">Clear</button>
+                        <button class="btn btn-keep btn-sm" id="reviewKeepBtn" type="button" disabled title="Pin selected items to keep — they leave this pile">
+                            <i class="fa-solid fa-heart"></i> Keep selected
+                        </button>
                         <button class="btn btn-danger btn-sm" id="reviewDeleteBtn" type="button" disabled>
                             <i class="fa-solid fa-trash-can"></i> Delete selected
                         </button>
@@ -314,11 +320,30 @@
                     <!-- Dynamic Photo Cards -->
                 </div>
 
-                <!-- Empty State -->
+                <!-- Empty State. Copy is rewritten by updateEmptyState() —
+                     first-run, a filter miss, and an empty review pile are
+                     different situations and used to share one lie. -->
                 <div class="empty-state" id="emptyState" style="display:none;">
-                    <i class="fa-solid fa-image-slash empty-icon"></i>
-                    <h3>No photos found</h3>
-                    <p>Try selecting a different creator or clearing your search query.</p>
+                    <i class="fa-solid fa-image-slash empty-icon" id="emptyStateIcon"></i>
+                    <h3 id="emptyStateTitle">No photos found</h3>
+                    <p id="emptyStateCopy">Try selecting a different creator or clearing your search query.</p>
+                    <form class="empty-scrape" id="emptyScrapeForm" style="display:none;" autocomplete="off">
+                        <div class="empty-scrape-row">
+                            <select id="emptyScrapeSource" class="sort-select" aria-label="Platform">
+                                <option value="instagram" selected>Instagram</option>
+                                <option value="x">X / Twitter</option>
+                                <option value="reddit">Reddit</option>
+                            </select>
+                            <input type="text" id="emptyScrapeHandle" class="modal-input" placeholder="@handle or profile URL" autocomplete="off" aria-label="Creator handle">
+                            <button class="btn btn-primary" id="emptyScrapeBtn" type="submit">
+                                <i class="fa-solid fa-plus"></i> Start
+                            </button>
+                        </div>
+                        <p class="empty-scrape-hint">Paste an Instagram or X handle to start building your studio.</p>
+                    </form>
+                    <button class="btn btn-secondary" id="emptyClearFiltersBtn" type="button" style="display:none;">
+                        Clear filters
+                    </button>
                 </div>
             </main>
 

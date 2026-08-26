@@ -196,6 +196,45 @@ def test_overridden_rows_leave_the_unusable_bucket(index, make_photo):
     assert index.query_photos(verdict="unusable")[1] == 0
 
 
+def test_bulk_override_is_one_transaction(index, make_photo):
+    rels = _seed(index, make_photo, [("a.jpg", 0), ("b.jpg", 1), ("c.jpg", 4)])
+    unclassified, _ = make_photo(name="never.jpg")
+    result = index.set_manual_verdicts(
+        [rels["a.jpg"], rels["b.jpg"], unclassified, rels["a.jpg"]],
+        "keep",
+    )
+    assert set(result["updated"]) == {rels["a.jpg"], rels["b.jpg"]}
+    assert result["missing"] == [unclassified]
+    assert index.get_verdict(rels["a.jpg"])["verdict"] == "keep"
+    assert index.get_verdict(rels["b.jpg"])["verdict"] == "keep"
+    assert index.get_verdict(rels["c.jpg"])["manual"] is None
+    assert index.query_photos(verdict="keep")[1] == 3  # c was already keep
+
+
+def test_bulk_override_empty_input(index):
+    assert index.set_manual_verdicts([], "keep") == {"updated": [], "missing": []}
+
+
+def test_paths_only_returns_favorite_flags(index, make_photo):
+    rels = _seed(index, make_photo, [("a.jpg", 0), ("b.jpg", 0), ("c.jpg", 4)])
+    index.set_favorite(rels["b.jpg"], True)
+    rows, total = index.query_photos(verdict="reject", paths_only=True)
+    assert total == 2
+    by_path = {r["rel_path"]: r["favorite"] for r in rows}
+    assert by_path[rels["a.jpg"]] is False
+    assert by_path[rels["b.jpg"]] is True
+    assert rels["c.jpg"] not in by_path
+    # Full photo payloads must not leak into a path-list response.
+    assert set(rows[0]) == {"rel_path", "favorite"}
+
+
+def test_paths_only_honours_limit_without_lying_about_total(index, make_photo):
+    _seed(index, make_photo, [(f"r{i}.jpg", 0) for i in range(8)])
+    rows, total = index.query_photos(verdict="reject", paths_only=True, limit=3)
+    assert total == 8
+    assert len(rows) == 3
+
+
 # ── counters ─────────────────────────────────────────────────────────
 
 def test_creator_counts_add_up_to_photo_count(index, make_photo):

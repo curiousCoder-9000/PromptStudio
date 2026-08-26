@@ -345,6 +345,68 @@ const { Session, Report, sleep } = require('./cdp');
     JSON.stringify(modes.boundedPayload));
   r.check('exactly one option highlighted', modes.activeHighlight === 1, `${modes.activeHighlight}`);
 
+  // ── empty states (U10) ─────────────────────────────────────────────
+  r.section('empty states distinguish first-run from a filter miss');
+  const empty = await s.eval(`
+    const snapshot = {
+      photos: state.photos,
+      creators: state.creators,
+      archivePhotoTotal: state.archivePhotoTotal,
+      selectedCreator: state.selectedCreator,
+      searchQuery: state.searchQuery,
+      reviewMode: state.reviewMode,
+      browseVerdict: state.browseVerdict,
+    };
+    state.photos = [];
+    state.creators = [];
+    state.archivePhotoTotal = 0;
+    state.selectedCreator = null;
+    state.searchQuery = '';
+    state.reviewMode = false;
+    state.browseVerdict = '';
+    updateEmptyState();
+    const first = {
+      title: document.getElementById('emptyStateTitle').textContent,
+      form: getComputedStyle(document.getElementById('emptyScrapeForm')).display,
+      clear: getComputedStyle(document.getElementById('emptyClearFiltersBtn')).display,
+    };
+    const parsedIg = parsePastedTarget('https://www.instagram.com/some.model/');
+    const parsedX = parsePastedTarget('https://x.com/someone');
+    state.creators = [{ name: 'someone', photo_count: 12 }];
+    state.archivePhotoTotal = 12;
+    state.searchQuery = 'zzzz-no-match';
+    updateEmptyState();
+    const filtered = {
+      title: document.getElementById('emptyStateTitle').textContent,
+      form: getComputedStyle(document.getElementById('emptyScrapeForm')).display,
+      clear: getComputedStyle(document.getElementById('emptyClearFiltersBtn')).display,
+    };
+    state.photos = snapshot.photos;
+    state.creators = snapshot.creators;
+    state.archivePhotoTotal = snapshot.archivePhotoTotal;
+    state.selectedCreator = snapshot.selectedCreator;
+    state.searchQuery = snapshot.searchQuery;
+    state.reviewMode = snapshot.reviewMode;
+    state.browseVerdict = snapshot.browseVerdict;
+    updateEmptyState();
+    return { first, filtered, parsedIg, parsedX };
+  `);
+  r.check('first-run title invites adding media',
+    empty.first.title === 'Your studio is empty', empty.first.title);
+  r.check('first-run shows the scrape field', empty.first.form !== 'none', empty.first.form);
+  r.check('first-run hides clear-filters', empty.first.clear === 'none', empty.first.clear);
+  r.check('filter miss is not the first-run copy',
+    empty.filtered.title === 'No matches', empty.filtered.title);
+  r.check('filter miss offers a clear-filters action',
+    empty.filtered.clear !== 'none', empty.filtered.clear);
+  r.check('filter miss hides the scrape field', empty.filtered.form === 'none', empty.filtered.form);
+  r.check('instagram URL parses to a handle',
+    empty.parsedIg.source === 'instagram' && empty.parsedIg.handle === 'some.model',
+    JSON.stringify(empty.parsedIg));
+  r.check('x.com URL parses to the x source',
+    empty.parsedX.source === 'x' && empty.parsedX.handle === 'someone',
+    JSON.stringify(empty.parsedX));
+
   r.finish(s);
   process.exit(process.exitCode || 0);
 })().catch((e) => {

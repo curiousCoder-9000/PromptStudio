@@ -95,6 +95,7 @@ class ArchiveStore:
         outfit: Optional[str] = None,
         pose: Optional[str] = None,
         lighting: Optional[str] = None,
+        paths_only: bool = False,
     ) -> Tuple[List[Dict[str, Any]], int]:
         return self._index.query_photos(
             creator=creator,
@@ -116,6 +117,7 @@ class ArchiveStore:
             outfit=outfit,
             pose=pose,
             lighting=lighting,
+            paths_only=paths_only,
         )
 
     def photos_for_rel_paths(

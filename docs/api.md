@@ -38,7 +38,7 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/classify/start` | Background keep/reject classify — one creator, or the whole archive |
 | `GET` | `/api/classify/status` | Classify job progress + tier histogram |
 | `POST` | `/api/classify/cancel` | Cooperative cancel after the current item |
-| `POST` | `/api/classify/verdict` | Pin one file to keep/reject by hand (or clear) |
+| `POST` | `/api/classify/verdict` | Pin one file — or `rel_paths[]` — to keep/reject by hand (or clear) |
 | `GET` | `/api/labels` | Taste-label counts, or `?path=` for one row |
 | `PUT` | `/api/labels` | `{path, label}` where label is `1` keep / `-1` discard / `0` clear |
 | `POST` | `/api/labels/seed` | Copy favorites → keep and trash → discard without overwriting |
@@ -268,6 +268,18 @@ the item in flight, since a vision call is not interruptible.
 model's tier). Returns `{"status": "ok", "verdict": {…}}` with the refreshed
 block, or `404 {"status": "not_classified"}` when the file has no verdict row —
 there is no tier to override yet.
+
+Bulk form (U13 — rescue a reject pile without opening each card):
+
+```json
+{ "rel_paths": ["someone/a.jpg", "someone/b.jpg"], "verdict": "keep" }
+```
+
+Returns `{"status": "ok", "verdict": "keep", "updated": […], "missing": […],
+"verdicts": { "<rel>": {…} }}`. Unclassified paths land in `missing` and are
+not invented. Cap is `MAX_PHOTO_IDS_API` (default 10 000). Sending both
+`rel_path` and `rel_paths` prefers the list. A one-item `rel_paths` still uses
+the bulk shape, so existing single-path clients are unchanged.
 
 The override is stored separately from the tier, so it survives a re-classify and
 a soft delete + Undo.
@@ -664,10 +676,14 @@ Reads local `following_list.json` (no live Instagram call).
 
 ### `GET /api/photos`
 
-Query: `creator`, `search`, `mode` (`text` | `semantic` — C1 cosine over taste embeddings), `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `verdict` (see below), `source` (`instagram` | `x` | `reddit` | omit/`all`), `path` (exact `rel_path`; for opening one photo that is not on the current gallery page), `label` (`unlabeled` | `keep` | `discard` — B3 taste labels), `collection` (board id), `setting` / `outfit` / `pose` / `lighting` (C5 facet chips), `sort` (`name` | `newest` | `oldest` | `posted` | `posted_oldest` | `tier` | `foryou`), `group` (`post` | omit), `offset` (default 0), `limit` (default/max from config, typically 300).
+Query: `creator`, `search`, `mode` (`text` | `semantic` — C1 cosine over taste embeddings), `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `verdict` (see below), `source` (`instagram` | `x` | `reddit` | omit/`all`), `path` (exact `rel_path`; for opening one photo that is not on the current gallery page), `label` (`unlabeled` | `keep` | `discard` — B3 taste labels), `collection` (board id), `setting` / `outfit` / `pose` / `lighting` (C5 facet chips), `sort` (`name` | `newest` | `oldest` | `posted` | `posted_oldest` | `tier` | `foryou`), `group` (`post` | omit), `ids` (`1` — return `{rel_path, favorite}` for the whole match set, not a gallery page), `offset` (default 0), `limit` (default/max from config, typically 300).
 
 - `source` — ANDs with `creator`, so a merged folder can be split by platform. An unregistered value is a **400**.
 - `group=post` — collapse a carousel into one post. See [Post grouping](#post-grouping) below; any other value is a **400**.
+- `ids=1` — return `{paths: [{rel_path, favorite}], total, truncated}` for every
+  file matching the same filters, capped at `MAX_PHOTO_IDS_API` (default 10 000).
+  Used by review-mode "Select all N". Grouping is ignored: selection is per file.
+  The gallery page cap does **not** apply.
 
 - `newest` / `oldest` — archive ingest time (`added_at`; when the file was downloaded/indexed).
 - `posted` / `posted_oldest` — remote post time (`mtime`, which downloaders stamp to the post date); falls back to `added_at` when `mtime` is missing or zero.

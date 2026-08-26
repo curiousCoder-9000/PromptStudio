@@ -6,7 +6,7 @@
 | **Scope** | Frontend (`index.html` · `app.js` · `style.css`), UX, and product gaps not covered elsewhere |
 | **Companions** | [`product_review.md`](product_review.md) — value chain, Themes A/B/C/E · [`review_backend_architecture.md`](review_backend_architecture.md) — durability, storage, observability |
 | **Why a third review** | Neither companion audits the UI, and both rest on one premise (§0) that turned out to be false |
-| **Status** | Stage 1 shipped (§5) · Stage 2 shipped (§6) · review-mode trap fixed (§8), U13–U16 deferred |
+| **Status** | Stage 1 shipped (§5) · Stage 2 shipped (§6) · review-mode trap fixed (§8) · U13–U14 shipped (§9) · U15–U16 deferred |
 
 ---
 
@@ -215,8 +215,8 @@ one you rubber-stamp.
 
 | ID | Plan | Cost |
 |----|------|------|
-| **U13** bulk keep/reject | Accept `rel_paths[]` alongside `rel_path` on `POST /api/classify/verdict`; add `set_manual_verdicts()` to `ArchiveIndex` in one transaction; **Keep selected** / **Reject selected** beside Delete in the strip. Makes the non-destructive path as cheap as the destructive one. Touches `handler.py`, `storage/db.py`, `docs/api.md`, pytest + browser suite. | S/M |
-| **U14** paged select honesty | Relabel to **Select non-favourites on this page**, and when `photoHasMore` is true say so in the count. Alternative — a real pile-wide select — needs a server-side path-list endpoint; not worth it before U13. | S |
+| **U13** bulk keep/reject | ✅ shipped §9 | S/M |
+| **U14** paged select honesty | ✅ shipped §9 (and the real pile-wide select) | S |
 | **U15** selection-loss guard | Keep the selection across a verdict-chip switch (paths are stable), or confirm before dropping a non-empty one. Prefer keeping: the chips are views over one pile. | S |
 | **U16** grid-level triage | Keep/Reject directly on the card in review mode, so a decision costs one click instead of open → decide → close. Deliberately last: it lands on `.photo-card`, which U11 already calls crowded at four affordances in a 200px tile, and U13 removes most of the pressure for it. | M |
 
@@ -250,3 +250,11 @@ which windowing would break.
 
 Imperceptible at real archive size. Worth noting from the same run: at 40k rows search is
 already 65–120 ms, which is the scale at which S5's FTS5 decision deserves revisiting.
+
+## 9. Fix log — U13/U14 bulk rescue + U10 empty states
+
+| Item | Status | What changed |
+|------|--------|--------------|
+| **U13** bulk keep | ✅ | `POST /api/classify/verdict` accepts `rel_paths[]`; `ArchiveIndex.set_manual_verdicts()` writes one transaction. Review strip gained **Keep selected** beside Delete. Kept items leave the current filter (they are rescued, not still sitting in the reject pile). Unclassified paths are reported in `missing`, never invented. Single-path clients are unchanged. |
+| **U14** select-all honesty | ✅ | Count reads `N selected of 400 · 60 loaded` when the pile is larger than the page. **Select loaded (N)** is the page sweep; **Select all 400** fetches `GET /api/photos?ids=1` (same filters, `{rel_path, favorite}` only) and still skips favourites. |
+| **U10** empty states | ✅ | First-run, a filter miss, an empty review pile, and an empty creator each have their own copy. First-run shows a scrape field (handle or profile URL → Instagram / X / Reddit) rather than "try a different creator." Not the onboarding wizard §7 cut. |

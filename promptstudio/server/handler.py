@@ -19,6 +19,7 @@ from promptstudio.config import (
     FOLLOWING_LIST_FILE,
     HOST,
     INCLUDE_VIDEOS_DEFAULT,
+    MAX_PHOTO_IDS_API,
     MAX_PHOTOS_API_PAGE,
     MODEL_NAME,
     PORT,
@@ -1528,14 +1529,31 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/classify/verdict":
             # Manual override: pins a file to keep/reject regardless of tier, and
             # survives re-classify. `verdict: null` hands it back to the model.
+            # `rel_paths` is the bulk form (U13) — one transaction, same
+            # unclassified-is-missing contract as the single-path call.
             try:
                 data = self._read_json_body()
             except json.JSONDecodeError:
                 self.send_error(400, "Invalid JSON body")
                 return
-            rel_path = (data.get("rel_path") or "").strip().replace("\\", "/")
-            if not rel_path:
-                self.send_error(400, "rel_path required")
+            raw_list = data.get("rel_paths")
+            bulk = isinstance(raw_list, list)
+            if bulk:
+                paths = [
+                    str(p).strip().replace("\\", "/")
+                    for p in raw_list
+                    if str(p).strip()
+                ]
+            else:
+                rel_path = (data.get("rel_path") or "").strip().replace("\\", "/")
+                paths = [rel_path] if rel_path else []
+            if not paths:
+                self.send_error(400, "rel_path or rel_paths required")
+                return
+            if len(paths) > MAX_PHOTO_IDS_API:
+                self.send_error(
+                    400, f"rel_paths exceeds {MAX_PHOTO_IDS_API} (got {len(paths)})"
+                )
                 return
             raw = data.get("verdict")
             value = None if raw in (None, "", "auto") else str(raw).strip().lower()
@@ -1545,21 +1563,36 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             from promptstudio.storage.db import ArchiveIndex
 
             index = ArchiveIndex.get()
-            if not index.set_manual_verdict(rel_path, value):
+            result = index.set_manual_verdicts(paths, value)
+            updated = result["updated"]
+            missing = result["missing"]
+            if not bulk:
+                if not updated:
+                    self._send_json(
+                        {
+                            "status": "not_classified",
+                            "message": "classify this creator before overriding",
+                            "rel_path": paths[0],
+                        },
+                        404,
+                    )
+                    return
                 self._send_json(
                     {
-                        "status": "not_classified",
-                        "message": "classify this creator before overriding",
-                        "rel_path": rel_path,
-                    },
-                    404,
+                        "status": "ok",
+                        "rel_path": paths[0],
+                        "verdict": index.get_verdict(paths[0]),
+                    }
                 )
                 return
+            verdicts = index.verdicts_for(updated) if updated else {}
             self._send_json(
                 {
                     "status": "ok",
-                    "rel_path": rel_path,
-                    "verdict": index.get_verdict(rel_path),
+                    "verdict": value,
+                    "updated": updated,
+                    "missing": missing,
+                    "verdicts": verdicts,
                 }
             )
             return
@@ -2049,8 +2082,45 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 limit = MAX_PHOTOS_API_PAGE
             limit = max(1, min(limit, MAX_PHOTOS_API_PAGE))
             offset = max(0, offset)
+            ids_only = (query.get("ids", ["0"])[0] or "").lower() in _TRUTHY
 
             path_exact = (query.get("path", [""])[0] or "").strip() or None
+            if ids_only:
+                # Whole-pile path list for "select all N". Not a gallery page,
+                # so the page cap does not apply — grouping is ignored because
+                # selection is per file.
+                paths, total = _archive.query_photos(
+                    creator=creator,
+                    search=search,
+                    unanalyzed=unanalyzed,
+                    favorite_only=favorite_only,
+                    media_type=media_type,
+                    verdict=verdict,
+                    source=source,
+                    path=path_exact,
+                    label=label,
+                    sort=sort,
+                    limit=MAX_PHOTO_IDS_API,
+                    offset=0,
+                    group_posts=False,
+                    search_mode=search_mode,
+                    collection_id=collection_id,
+                    setting=setting,
+                    outfit=outfit,
+                    pose=pose,
+                    lighting=lighting,
+                    paths_only=True,
+                )
+                self._send_json(
+                    {
+                        "paths": paths,
+                        "total": total,
+                        "truncated": total > len(paths),
+                        "verdict": verdict or "",
+                        "source": source or "",
+                    }
+                )
+                return
             photos, total = _archive.query_photos(
                 creator=creator,
                 search=search,
