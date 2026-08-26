@@ -450,6 +450,11 @@ framing (full body/portrait), pose — stored as columns and exposed as filter
 chips. Better browsing, and better Comfy conditioning, at no extra inference
 cost since it rides on a call you already make.
 
+**Shipped as C5, then removed (2026-08-26).** The taxonomy never closed: outfit /
+pose / lighting dumped first-phrases from Qwen, the chips were unused chrome,
+and Comfy never consumed them. Structured vision fields remain on the prompt
+bundle.
+
 ### F5 — Archive export / backup for derived state
 
 Prompts, glam scores, favorites and styles represent many GPU-hours and exist in

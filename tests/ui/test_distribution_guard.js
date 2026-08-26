@@ -98,7 +98,7 @@ const SATURATED = {
   await sleep(700);
 
   const chips = await s.eval(`
-    return [...document.querySelectorAll('.review-chip')].map((chip) => ({
+    return [...document.querySelectorAll('#reviewBarFilters .review-chip')].map((chip) => ({
       key: chip.dataset.verdict,
       count: chip.querySelector('.review-chip-n').textContent.trim(),
       share: chip.querySelector('.review-chip-share').textContent.trim(),
@@ -130,7 +130,7 @@ const SATURATED = {
     state.verdictFacets = ${JSON.stringify(SATURATED)};
     renderVerdictPassRates();
     const byKey = {};
-    document.querySelectorAll('.review-chip').forEach((chip) => {
+    document.querySelectorAll('#reviewBarFilters .review-chip').forEach((chip) => {
       byKey[chip.dataset.verdict] = {
         share: chip.querySelector('.review-chip-share').textContent.trim(),
         warn: chip.classList.contains('is-saturated'),
@@ -165,33 +165,94 @@ const SATURATED = {
     const sel = document.getElementById('verdictFilterSelect');
     return [...sel.options].map((o) => ({ value: o.value, label: o.textContent }));
   `);
-  r.check('verdict options carry their share',
-    options.filter((o) => o.value).every((o) => /· \d+%$/.test(o.label)),
+  const valued = options.filter((o) => o.value);
+  r.check('verdict options carry a count, not a blanket percentage',
+    valued.every((o) => /· \d/.test(o.label)),
     JSON.stringify(options.map((o) => o.label)));
+  r.check('archive-wide saturation does not leak onto this view\'s labels',
+    valued.every((o) => !o.label.includes('%')),
+    JSON.stringify(valued.map((o) => `${o.value}:${o.label}`)));
   r.check('"any verdict" does not pretend to be a filter',
-    options[0].value === '' && !options[0].label.includes('%'), options[0].label);
+    options[0].value === '' && !options[0].label.includes('·'), options[0].label);
+
+  const mixedDenom = await s.eval(`
+    const prevCreators = state.creators;
+    const prevSelected = state.selectedCreator;
+    state.creators = [{
+      name: 'fully_done',
+      photo_count: 40,
+      keep_count: 40,
+      reject_count: 0,
+      unusable_count: 0,
+      modest_count: 0,
+      unclassified_count: 0,
+      error_count: 0,
+      stale_count: 0
+    }];
+    state.selectedCreator = 'fully_done';
+    renderVerdictSelectPassRates();
+    const sel = document.getElementById('verdictFilterSelect');
+    const byValue = Object.fromEntries(
+      [...sel.options].map((o) => [o.value, o.textContent])
+    );
+    state.creators = prevCreators;
+    state.selectedCreator = prevSelected;
+    renderVerdictSelectPassRates();
+    return byValue;
+  `);
+  r.check('a creator with nothing left to classify does not inherit the archive 62%',
+    mixedDenom.unclassified === 'Not classified · 0'
+      && !String(mixedDenom.unclassified).includes('%'),
+    JSON.stringify(mixedDenom));
 
   const selWarn = await s.eval(`
+    const prevCreators = state.creators;
+    const prevSelected = state.selectedCreator;
+    state.creators = [{
+      name: 'sat',
+      photo_count: 100,
+      keep_count: 5,
+      reject_count: 95,
+      unusable_count: 90,
+      modest_count: 5,
+      unclassified_count: 0,
+      error_count: 0,
+      stale_count: 0
+    }];
+    state.selectedCreator = 'sat';
+    renderVerdictSelectPassRates();
     const sel = document.getElementById('verdictFilterSelect');
     sel.value = 'reject';
     sel.dispatchEvent(new Event('change'));
-    await new Promise((done) => setTimeout(done, 300));
-    return {
+    const out = {
       warn: sel.classList.contains('is-saturated'),
       label: sel.options[sel.selectedIndex].textContent
     };
+    sel.value = '';
+    sel.dispatchEvent(new Event('change'));
+    state.creators = prevCreators;
+    state.selectedCreator = prevSelected;
+    renderVerdictSelectPassRates();
+    return out;
   `);
-  r.check('picking a saturated filter marks the control', selWarn.warn === true,
-    JSON.stringify(selWarn));
+  r.check('picking a filter that dominates THIS view marks the control',
+    selWarn.warn === true, JSON.stringify(selWarn));
+  r.check('that label is this view\'s count and this view\'s share',
+    selWarn.label === 'Rejects · 95 · 95%', selWarn.label);
 
   const relabelled = await s.eval(`
-    renderVerdictPassRates();
-    renderVerdictPassRates();
     const sel = document.getElementById('verdictFilterSelect');
-    return sel.options[1].textContent;
+    const before = [...sel.options].map((o) => o.textContent);
+    renderVerdictPassRates();
+    renderVerdictPassRates();
+    return {
+      before,
+      after: [...sel.options].map((o) => o.textContent)
+    };
   `);
   r.check('re-rendering does not stack suffixes',
-    (relabelled.match(/%/g) || []).length === 1, relabelled);
+    JSON.stringify(relabelled.before) === JSON.stringify(relabelled.after),
+    JSON.stringify(relabelled.after));
 
   await s.eval(`
     const sel = document.getElementById('verdictFilterSelect');
@@ -229,17 +290,22 @@ const SATURATED = {
     renderVerdictPassRates();
     const badges = [...document.querySelectorAll('.review-chip-share')];
     const sel = document.getElementById('verdictFilterSelect');
+    const labels = [...sel.options].map((o) => o.textContent);
     return {
       hidden: badges.every((b) => b.hidden && b.textContent === ''),
       flagged: [...document.querySelectorAll('.review-chip.is-saturated')].length,
-      labels: [...sel.options].every((o) => !o.textContent.includes('%'))
+      labels
     };
   `);
   r.check('before stats land, no badge claims anything', missing.hidden === true,
     JSON.stringify(missing));
   r.check('and no chip is left flagged', missing.flagged === 0, String(missing.flagged));
-  r.check('the dropdown reverts to its plain labels', missing.labels === true,
-    String(missing.labels));
+  r.check('the dropdown drops the percentage without stats',
+    (missing.labels || []).every((l) => !String(l).includes('%')),
+    JSON.stringify(missing.labels));
+  r.check('but keeps the scoped count — that number still means something',
+    (missing.labels || []).filter((_, i) => i > 0).every((l) => /· \d/.test(l)),
+    JSON.stringify(missing.labels));
 
   await sleep(200);
   r.finish(s) || process.exit(1);

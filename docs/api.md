@@ -17,12 +17,11 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `GET` | `/api/creator/style` | Learned style prefix for a creator |
 | `POST` | `/api/creator/style/rebuild` | Rebuild style from cached prompts |
 | `GET` | `/api/following` | Accounts from local `following_list.json` |
-| `GET` | `/api/photos` | Paginated (`offset`, `limit`, `creator`, `search`, `unanalyzed`, `favorite`, `media_type`, `verdict`, `source`, `sort`, `group`, `mode`, `collection`, `setting`/`outfit`/`pose`/`lighting`) |
+| `GET` | `/api/photos` | Paginated (`offset`, `limit`, `creator`, `search`, `unanalyzed`, `favorite`, `media_type`, `verdict`, `source`, `sort`, `group`, `mode`, `collection`) |
 | `GET` | `/api/duplicates` | Near-dup groups (`kind=phash\|embed\|all`). Favourites never `preselected` |
 | `GET`/`POST`/`DELETE` | `/api/views` | Saved filter sets (F8) |
 | `GET`/`POST`/`DELETE` | `/api/collections` | Cross-creator boards (C4) |
 | `POST`/`DELETE` | `/api/collections/items` | `{id, paths}` add / remove members |
-| `GET` | `/api/facets` | C5 chip values from structured vision |
 | `POST` | `/api/taste/train` | Embed + fit P(keep) (B2) |
 | `GET` | `/api/taste/status` | Taste job snapshot |
 | `POST` | `/api/taste/cancel` | Cooperative cancel |
@@ -676,7 +675,7 @@ Reads local `following_list.json` (no live Instagram call).
 
 ### `GET /api/photos`
 
-Query: `creator`, `search`, `mode` (`text` | `semantic` — C1 cosine over taste embeddings), `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `verdict` (see below), `source` (`instagram` | `x` | `reddit` | omit/`all`), `path` (exact `rel_path`; for opening one photo that is not on the current gallery page), `label` (`unlabeled` | `keep` | `discard` — B3 taste labels), `collection` (board id), `setting` / `outfit` / `pose` / `lighting` (C5 facet chips), `sort` (`name` | `newest` | `oldest` | `posted` | `posted_oldest` | `tier` | `foryou`), `group` (`post` | omit), `ids` (`1` — return `{rel_path, favorite}` for the whole match set, not a gallery page), `offset` (default 0), `limit` (default/max from config, typically 300).
+Query: `creator`, `search`, `mode` (`text` | `semantic` — C1 cosine over taste embeddings), `unanalyzed` (`1`/`true`), `favorite` (`1`/`true`), `media_type` (`photo` | `video` | omit/`all`), `verdict` (see below), `source` (`instagram` | `x` | `reddit` | omit/`all`), `path` (exact `rel_path`; for opening one photo that is not on the current gallery page), `label` (`unlabeled` | `keep` | `discard` — B3 taste labels), `collection` (board id), `sort` (`name` | `newest` | `oldest` | `posted` | `posted_oldest` | `tier` | `foryou`), `group` (`post` | omit), `ids` (`1` — return `{rel_path, favorite}` for the whole match set, not a gallery page), `offset` (default 0), `limit` (default/max from config, typically 300).
 
 - `source` — ANDs with `creator`, so a merged folder can be split by platform. An unregistered value is a **400**.
 - `group=post` — collapse a carousel into one post. See [Post grouping](#post-grouping) below; any other value is a **400**.

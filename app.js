@@ -95,13 +95,8 @@ const state = {
     // sidebar AND the gallery, so a merged folder shows only its X half when
     // X is picked. Comes from photos.source, never the folder-name suffix.
     sourceFilter: '',
-    facetSetting: '',
-    facetOutfit: '',
-    facetPose: '',
-    facetLighting: '',
     collectionId: null,
     collectionName: '',
-    facetOptions: null,
     savedViews: [],
     collections: [],
     activityKind: '',
@@ -203,7 +198,6 @@ const elements = {
     collectionsList: document.getElementById('collectionsList'),
     newCollectionBtn: document.getElementById('newCollectionBtn'),
     addToCollectionBtn: document.getElementById('addToCollectionBtn'),
-    facetChipRow: document.getElementById('facetChipRow'),
     tasteTrainBtn: document.getElementById('tasteTrainBtn'),
     tasteJobChip: document.getElementById('tasteJobChip'),
     tasteJobChipIcon: document.getElementById('tasteJobChipIcon'),
@@ -535,11 +529,7 @@ const PREF_FIELDS = [
     'sourceFilter',
     // How the grid is shaped, not where you are — a view pref like grid size.
     'groupPosts',
-    'searchMode',
-    'facetSetting',
-    'facetOutfit',
-    'facetPose',
-    'facetLighting'
+    'searchMode'
 ];
 
 function loadViewPrefs() {
@@ -690,11 +680,10 @@ async function initApp() {
     await fetchKnownSources();
     await fetchWorkflows();
     await fetchCreators();
-    // Views/boards/facets are sidebar chrome — don't delay the first gallery
+    // Views/boards are sidebar chrome — don't delay the first gallery
     // page on them. delete_flow (and first paint) wait on fetchPhotos.
     fetchSavedViews();
     fetchCollections();
-    fetchFacets();
     await photosReady;
     await statsReady;
     // Resume job chips if work is mid-flight — jobs live on the server, so a
@@ -1222,11 +1211,6 @@ function renderInsights(data) {
                 <h4><i class="fa-solid fa-heart"></i> For You</h4>
                 ${renderTasteInsights(data.taste)}
             </section>
-
-            <section class="insights-section">
-                <h4><i class="fa-solid fa-filter"></i> Facets</h4>
-                ${renderFacetInsights(data.facets)}
-            </section>
         </div>
     `;
 }
@@ -1252,26 +1236,6 @@ function renderTasteInsights(t) {
                 <span class="insights-metric-label">Labels used</span>
             </div>
         </div>`;
-}
-
-function renderFacetInsights(f) {
-    const data = f || {};
-    if (data.error) {
-        return `<span class="insights-muted">Unavailable: ${escapeHtml(String(data.error))}</span>`;
-    }
-    const keys = ['setting', 'outfit', 'pose', 'lighting'];
-    const parts = keys.map((key) => {
-        const block = data[key] || {};
-        const n = Number(block.n || 0);
-        const sat = block.saturation || {};
-        const top = (block.values || []).slice(0, 4).map((row) =>
-            `<span class="insights-chip"><b>${escapeHtml(row.value)}</b> ${Number(row.count).toLocaleString()}</span>`
-        ).join(' ');
-        return `<div class="insights-sublabel">${escapeHtml(key)} · ${n.toLocaleString()} filled`
-            + (sat.saturated ? ' · saturated' : '')
-            + `</div><div class="insights-dist">${top || '<span class="insights-muted">—</span>'}</div>`;
-    });
-    return parts.join('');
 }
 
 async function loadInsights() {
@@ -1341,10 +1305,6 @@ function galleryQueryParams({ offset = 0, limit = null, ids = false } = {}) {
         if (state.searchMode === 'semantic') params.append('mode', 'semantic');
     }
     if (state.collectionId) params.append('collection', String(state.collectionId));
-    ['Setting', 'Outfit', 'Pose', 'Lighting'].forEach((name) => {
-        const value = state[`facet${name}`];
-        if (value) params.append(name.toLowerCase(), value);
-    });
     if (state.unanalyzedOnly) params.append('unanalyzed', '1');
     if (state.favoritesOnly) params.append('favorite', '1');
     params.append('media_type', state.mediaType || 'all');
@@ -2025,6 +1985,9 @@ function renderCreatorList() {
         elements.creatorList.appendChild(item);
     });
     updateCreatorStylePanel();
+    // Counts on the verdict dropdown are scoped to this sidebar, so they
+    // have to refresh whenever the creator list or the selection does.
+    renderVerdictSelectPassRates();
 }
 
 /**
@@ -2365,10 +2328,6 @@ function galleryHasActiveFilters() {
         || state.sourceFilter
         || (state.mediaType && state.mediaType !== 'all')
         || state.collectionId
-        || state.facetSetting
-        || state.facetOutfit
-        || state.facetPose
-        || state.facetLighting
     );
 }
 
@@ -2485,10 +2444,6 @@ function clearGalleryFilters() {
     state.mediaType = 'all';
     state.collectionId = null;
     state.collectionName = '';
-    state.facetSetting = '';
-    state.facetOutfit = '';
-    state.facetPose = '';
-    state.facetLighting = '';
     if (elements.searchInput) elements.searchInput.value = '';
     if (elements.verdictFilterSelect) {
         elements.verdictFilterSelect.value = '';
@@ -4990,8 +4945,6 @@ function copyToClipboard(text, message) {
 }
 
 // Event Listeners
-const FACET_LABELS = { setting: 'Setting', outfit: 'Outfit', pose: 'Pose', lighting: 'Lighting' };
-
 function currentViewFilters() {
     return {
         creator: state.selectedCreator || '',
@@ -5004,10 +4957,6 @@ function currentViewFilters() {
         unanalyzedOnly: Boolean(state.unanalyzedOnly),
         sourceFilter: state.sourceFilter || '',
         groupPosts: Boolean(state.groupPosts),
-        facetSetting: state.facetSetting || '',
-        facetOutfit: state.facetOutfit || '',
-        facetPose: state.facetPose || '',
-        facetLighting: state.facetLighting || '',
     };
 }
 
@@ -5023,10 +4972,6 @@ function applySavedFilters(filters) {
     state.unanalyzedOnly = Boolean(f.unanalyzedOnly);
     state.sourceFilter = f.sourceFilter || '';
     state.groupPosts = Boolean(f.groupPosts);
-    state.facetSetting = f.facetSetting || '';
-    state.facetOutfit = f.facetOutfit || '';
-    state.facetPose = f.facetPose || '';
-    state.facetLighting = f.facetLighting || '';
     state.collectionId = null;
     state.collectionName = '';
     if (elements.searchInput) {
@@ -5219,60 +5164,6 @@ async function addSelectionToCollection() {
     } catch (err) {
         showToast('Could not add to board');
     }
-}
-
-async function fetchFacets() {
-    try {
-        const res = await fetch('/api/facets');
-        const data = await res.json();
-        state.facetOptions = data.facets || {};
-        renderFacetChips();
-    } catch (err) {
-        console.error('facets failed', err);
-    }
-}
-
-function renderFacetChips() {
-    const host = elements.facetChipRow;
-    if (!host) return;
-    host.innerHTML = '';
-    const facets = state.facetOptions || {};
-    Object.keys(FACET_LABELS).forEach((key) => {
-        const values = facets[key] || [];
-        if (!values.length) return;
-        const wrap = document.createElement('label');
-        wrap.className = 'facet-select-wrap';
-        wrap.textContent = '';
-        const title = document.createElement('span');
-        title.className = 'control-label';
-        title.textContent = FACET_LABELS[key];
-        const sel = document.createElement('select');
-        sel.className = 'sort-select';
-        sel.dataset.facet = key;
-        const any = document.createElement('option');
-        any.value = '';
-        any.textContent = `Any ${key}`;
-        sel.appendChild(any);
-        const current = state[`facet${key.charAt(0).toUpperCase()}${key.slice(1)}`] || '';
-        values.forEach((row) => {
-            const opt = document.createElement('option');
-            opt.value = row.value;
-            opt.textContent = `${row.value} (${row.count})`;
-            sel.appendChild(opt);
-        });
-        sel.value = current;
-        sel.classList.toggle('is-active', Boolean(current));
-        sel.addEventListener('change', () => {
-            const field = `facet${key.charAt(0).toUpperCase()}${key.slice(1)}`;
-            state[field] = sel.value || '';
-            sel.classList.toggle('is-active', Boolean(sel.value));
-            saveViewPrefs();
-            fetchPhotos();
-        });
-        wrap.appendChild(title);
-        wrap.appendChild(sel);
-        host.appendChild(wrap);
-    });
 }
 
 async function loadActivity(kind) {
@@ -8417,24 +8308,70 @@ function renderVerdictPassRates() {
     renderVerdictSelectPassRates();
 }
 
+const VERDICT_SELECT_COUNT = {
+    keep: 'keep_count',
+    reject: 'reject_count',
+    unusable: 'unusable_count',
+    modest: 'modest_count',
+    unclassified: 'unclassified_count',
+    error: 'error_count',
+};
+
+function verdictFilterCount(key) {
+    const field = VERDICT_SELECT_COUNT[key];
+    if (!field) return null;
+    const n = Number(scopedVerdictCounts()[field]);
+    return Number.isFinite(n) ? n : null;
+}
+
+function verdictFilterScopedShare(key) {
+    const count = verdictFilterCount(key);
+    const total = Number(scopedVerdictCounts().photo_count);
+    if (count === null || !Number.isFinite(total) || total <= 0) return null;
+    return count / total;
+}
+
 /**
- * The browse dropdown carries the same number. Review mode is a deliberate
- * detour, and a guard that only shows up once you have gone looking is the
- * insights panel all over again.
+ * The browse dropdown answers "how many will I see?". Count and (rare) %
+ * must share a denominator: this creator, or the current sidebar if none
+ * is selected. An archive-wide 62% next to a creator's 0 unclassified is
+ * two different piles and reads as a contradiction. A % only appears when
+ * *this view's* share is past the B4 guard. Review chips keep the
+ * archive-wide badge — they are the triage surface the guard was built for.
  */
 function renderVerdictSelectPassRates() {
     const sel = elements.verdictFilterSelect;
     if (!sel) return;
+    const limit = saturationLimit();
+    const scoped = scopedVerdictCounts();
+    const total = Number(scoped.photo_count) || 0;
+    const scope = state.selectedCreator
+        ? `@${state.selectedCreator}`
+        : 'this view';
     let activeSaturated = false;
     Array.from(sel.options).forEach((opt) => {
         if (!opt.dataset.baseLabel) opt.dataset.baseLabel = opt.textContent;
-        const share = opt.value ? verdictPassRate(opt.value) : null;
-        opt.textContent = share === null
-            ? opt.dataset.baseLabel
-            : `${opt.dataset.baseLabel} · ${Math.round(share * 100)}%`;
-        if (share !== null && share > saturationLimit() && opt.value === sel.value) {
-            activeSaturated = true;
+        const base = opt.dataset.baseLabel;
+        if (!opt.value) {
+            opt.textContent = base;
+            opt.removeAttribute('title');
+            return;
         }
+        const count = verdictFilterCount(opt.value);
+        const share = verdictFilterScopedShare(opt.value);
+        const saturated = share !== null && share > limit;
+        let label = base;
+        if (count !== null) label += ` · ${count.toLocaleString()}`;
+        if (saturated) label += ` · ${Math.round(share * 100)}%`;
+        opt.textContent = label;
+        if (count !== null) {
+            opt.title = total
+                ? `${count.toLocaleString()} of ${total.toLocaleString()} in ${scope}`
+                : `${count.toLocaleString()} in ${scope}`;
+        } else {
+            opt.removeAttribute('title');
+        }
+        if (saturated && opt.value === sel.value) activeSaturated = true;
     });
     sel.classList.toggle('is-saturated', activeSaturated);
 }

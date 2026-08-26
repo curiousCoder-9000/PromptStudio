@@ -14,7 +14,7 @@ model. Set ``OLLAMA_EMBED_MODEL`` to switch the vectors to Ollama
 ``/api/embed`` without changing the rest of the pipeline.
 
 The VLM stays for the jobs it is good at: the human-readable brief, and
-the structured fields C5 facets already read.
+the structured vision fields the hashed embedding already reads.
 """
 
 from __future__ import annotations
@@ -258,7 +258,6 @@ def train(index: Any, *, force: bool = False, on_progress: Optional[Any] = None)
 
     cache = PromptCache()
     model = embed_model_name()
-    faceted = index.backfill_facets()
     missing = (
         index.paths_missing_embedding(model=model)
         if not force
@@ -309,7 +308,6 @@ def train(index: Any, *, force: bool = False, on_progress: Optional[Any] = None)
                 n_disc,
             )
     return {
-        "faceted": faceted,
         "embedded": embedded,
         "embed_failed": failed,
         "scored": scored,

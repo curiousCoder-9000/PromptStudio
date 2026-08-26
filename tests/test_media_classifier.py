@@ -54,12 +54,155 @@ def test_tier_data_round_trips():
     v = mc._verdict_from_tier_data(
         "x.jpg",
         {"has_woman": True, "exposure_tier": 3, "confidence": 0.9,
-         "brief_reason": "crop top", "figure_visible": True},
+         "brief_reason": "crop top", "figure_visible": True,
+         "figure": "curvy", "body_focus": True},
         source="image",
         prompt_version="v",
     )
     assert (v.ok, v.exposure_tier, v.has_woman, v.figure_visible) == (True, 3, True, True)
     assert v.brief_reason == "crop top"
+    assert v.figure == "curvy"
+    assert v.body_focus is True
+
+
+def test_v8_prompt_treats_t3_as_the_horny_keep_bucket():
+    """v7a escalated any listed reveal to 3 and tied up; v8 is the keep-hot bar."""
+    prompt = mc.CLASSIFY_FRAME_PROMPT
+    assert "If unsure between 2 and 3 on a covering dress" in prompt
+    assert "If unsure between 2 and 3, choose 3" not in prompt
+    assert "YouTube plaque" in prompt
+    assert "curvy or voluptuous" in prompt
+    assert "Tight covering bodycon" in prompt
+    assert "ALWAYS 3, never 2" in prompt
+    assert mc.CLASSIFY_FRAME_VERSION == "v4-ordinal-frame-v8"
+    sheet = mc.reel_sheet_prompt(9)
+    assert "horny viewer" in sheet
+    assert "not 3" in sheet
+
+
+def _t3_data(**overrides):
+    data = {
+        "has_woman": True,
+        "exposure_tier": 3,
+        "confidence": 0.9,
+        "brief_reason": "tight dress with deep cleavage",
+        "figure": "curvy",
+        "body_focus": True,
+    }
+    data.update(overrides)
+    return mc._verdict_from_tier_data("x.jpg", data, source="image", prompt_version="v")
+
+
+@pytest.mark.parametrize(
+    "figure",
+    ["slim", "skinny", "athletic", "average", "petite"],
+)
+def test_t3_is_capped_when_the_figure_is_not_curvy(figure):
+    v = _t3_data(figure=figure)
+    assert v.exposure_tier == 2
+    assert "capped 3→2" in v.brief_reason
+    assert "not curvy" in v.brief_reason
+
+
+def test_t3_is_capped_when_the_body_is_not_the_subject():
+    """The amberna YouTube-plaque case: tight dress, but the award is the shot."""
+    v = _t3_data(body_focus=False)
+    assert v.exposure_tier == 2
+    assert "body not the subject" in v.brief_reason
+
+
+def test_t3_stays_when_curvy_and_body_focused():
+    v = _t3_data(figure="voluptuous", body_focus=True)
+    assert v.exposure_tier == 3
+    assert "capped" not in v.brief_reason
+
+
+def test_t3_figure_aliases_map_onto_the_keep_set():
+    assert _t3_data(figure="busty").exposure_tier == 3
+    assert _t3_data(figure="hourglass").exposure_tier == 3
+    assert _t3_data(figure="thick").exposure_tier == 3
+
+
+def test_missing_figure_and_body_focus_fail_open():
+    """A model that omits the new fields must not collapse every T3 to 2."""
+    v = mc._verdict_from_tier_data(
+        "x.jpg",
+        {"has_woman": True, "exposure_tier": 3, "confidence": 0.9,
+         "brief_reason": "crop top"},
+        source="image",
+        prompt_version="v",
+    )
+    assert v.exposure_tier == 3
+    assert v.figure == ""
+    assert v.body_focus is None
+
+
+def test_t4_is_never_capped_by_figure_or_body_focus():
+    v = mc._verdict_from_tier_data(
+        "x.jpg",
+        {"has_woman": True, "exposure_tier": 4, "confidence": 0.9,
+         "brief_reason": "bikini set", "figure": "slim", "body_focus": False},
+        source="image",
+        prompt_version="v",
+    )
+    assert v.exposure_tier == 4
+
+
+def test_body_focus_string_false_does_not_become_true():
+    """bool('false') is True — the gate has to parse the word."""
+    v = _t3_data(body_focus="false")
+    assert v.body_focus is False
+    assert v.exposure_tier == 2
+
+
+def _t2_data(**overrides):
+    data = {
+        "has_woman": True,
+        "exposure_tier": 2,
+        "confidence": 0.9,
+        "brief_reason": "tight dress",
+        "figure": "curvy",
+        "body_focus": True,
+    }
+    data.update(overrides)
+    return mc._verdict_from_tier_data("x.jpg", data, source="image", prompt_version="v")
+
+
+def test_bikini_reason_with_tier_2_is_floored_to_4():
+    """The model names the garment then sits on 2; policy must not trust the int."""
+    v = _t2_data(brief_reason="bikini set")
+    assert v.exposure_tier == 4
+
+
+def test_a_bikini_on_an_event_flyer_is_still_tier_0():
+    v = _t2_data(brief_reason="swimsuit", is_graphic=True)
+    assert v.exposure_tier == 0
+
+
+def test_crop_top_t2_floors_to_t3_when_curvy_and_body_focused():
+    v = _t2_data(brief_reason="crop top + jeans")
+    assert v.exposure_tier == 3
+    assert "floored 2→3" in v.brief_reason
+
+
+def test_crop_top_stays_t2_when_the_body_is_not_the_subject():
+    v = _t2_data(brief_reason="crop top + jeans", body_focus=False)
+    assert v.exposure_tier == 2
+
+
+def test_crop_top_stays_t2_when_the_figure_is_not_curvy():
+    v = _t2_data(brief_reason="crop top + jeans", figure="slim")
+    assert v.exposure_tier == 2
+
+
+def test_bare_midriff_floors_t2_without_a_crop_reason():
+    v = _t2_data(brief_reason="yellow top + pants", bare_midriff=True)
+    assert v.exposure_tier == 3
+
+
+def test_undress_class_flag_wins_over_a_modest_reason():
+    v = _t2_data(brief_reason="outfit", undress_class=True)
+    assert v.exposure_tier == 4
 
 
 def test_no_woman_forces_tier_zero():

@@ -217,7 +217,7 @@ Base: `http://localhost:5000`. Full schemas → [api.md](api.md).
 | GET | `/api/health` | Ollama + Comfy reachability |
 | GET | `/api/stats` | photos, creators, `prompts_ready` |
 | GET | `/api/creators` | folders + sync badges |
-| GET | `/api/photos` | `creator`, `search` (prompts **+ caption**; `mode=semantic` for C1), `unanalyzed`, `favorite`, `media_type`, `verdict`, `sort` (incl. `tier`, `foryou`), `group=post`, `collection`, `setting`/`outfit`/`pose`/`lighting`, `offset`, `limit` |
+| GET | `/api/photos` | `creator`, `search` (prompts **+ caption**; `mode=semantic` for C1), `unanalyzed`, `favorite`, `media_type`, `verdict`, `sort` (incl. `tier`, `foryou`), `group=post`, `collection`, `offset`, `limit` |
 | GET/PUT | `/api/prompt` | get bundle / save edits |
 | POST | `/api/prompt/restore` | history index |
 | POST | `/api/prompt/mode-e` | Mode E rewrite; `apply` |

@@ -99,8 +99,7 @@ def clean_archive():
         index._conn.execute("DELETE FROM collection_items")
         index._conn.execute("DELETE FROM collections")
         index._conn.execute(
-            "DELETE FROM meta WHERE key IN "
-            "('taste_weights', 'facets_backfilled')"
+            "DELETE FROM meta WHERE key = 'taste_weights'"
         )
         if index.fts_enabled:
             index._conn.execute("DELETE FROM prompts_fts")

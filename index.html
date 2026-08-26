@@ -209,10 +209,13 @@
                             <option value="photo">Photos</option>
                             <option value="video">Reels</option>
                         </select>
-                        <!-- Verdict as a browse axis. The tier is a measurement, so
-                             it is useful for finding things, not only for triage —
-                             review mode has its own strip and is unaffected. -->
-                        <select id="verdictFilterSelect" class="sort-select" title="Filter by keep/reject verdict">
+                        <!-- Verdict as a browse axis. Labels show how many photos
+                             the filter currently selects in this view. A percent
+                             is appended only when that share of *this view* is
+                             past DISTRIBUTION_MAX_SHARE — never an archive-wide
+                             % next to a per-creator count. Review mode has its
+                             own strip and is unaffected. -->
+                        <select id="verdictFilterSelect" class="sort-select" title="How many photos each verdict currently selects in this view">
                             <option value="">Any verdict</option>
                             <option value="keep">Keeps</option>
                             <option value="reject">Rejects</option>
@@ -243,7 +246,6 @@
                         <button class="icon-btn active" id="gridNormal"><i class="fa-solid fa-border-all"></i></button>
                         <button class="icon-btn" id="gridLarge"><i class="fa-solid fa-table-cells-large"></i></button>
                     </div>
-                    <div class="facet-chip-row" id="facetChipRow" role="group" aria-label="Filter by visual attributes"></div>
                 </div>
 
                 <!-- Review mode strip. Replaces the view controls while

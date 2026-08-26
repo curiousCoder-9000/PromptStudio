@@ -2613,19 +2613,6 @@ button.tag-pill.tag-clickable:hover {
     padding: 4px 6px 8px;
 }
 
-.facet-chip-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 6px 0 2px;
-}
-
-.facet-select-wrap {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
 .search-mode-chip {
     flex: 0 0 auto;
     margin-right: 4px;

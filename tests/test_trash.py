@@ -89,6 +89,46 @@ def test_delete_missing_path_returns_none(store):
     assert store.delete_photo("test_creator/absent.jpg") is None
 
 
+def test_delete_ghost_index_row_drops_the_catalog_entry(store, make_photo):
+    """File already gone (folder wiped / deleted outside the app) used to 404."""
+    rel, full = make_photo(
+        creator="voidclub.bkk",
+        name="voidclub.bkk_2024-12-12_08-00-00_UTC.jpg",
+        meta=META,
+    )
+    os.remove(full)
+    sidecar = full + METADATA_SUFFIX
+    if os.path.isfile(sidecar):
+        os.remove(sidecar)
+
+    result = store.delete_photo(rel)
+
+    assert result is not None
+    assert result["permanent"] is True
+    assert result["trash_id"] is None
+    assert result["rel_path"] == rel
+    assert ArchiveIndex.get().get_photo_identity(rel)[0] is None
+    # Delete still tombstones, so a later scrape does not bring the ghost back.
+    assert ArchiveIndex.get().is_deleted_post(
+        "voidclub.bkk", shortcode="ABC123"
+    ) is True
+
+
+def test_delete_ghost_via_api(api, make_photo):
+    rel, full = make_photo(
+        creator="voidclub.bkk",
+        name="voidclub.bkk_2024-12-12_08-00-00_UTC.jpg",
+    )
+    os.remove(full)
+    from urllib.parse import quote
+
+    status, payload = api("DELETE", f"/api/photo?path={quote(rel, safe='')}")
+    assert status == 200
+    assert payload["status"] == "deleted"
+    assert payload["trash_id"] is None
+    assert ArchiveIndex.get().get_photo_identity(rel)[0] is None
+
+
 def test_photo_without_sidecar_or_prompt_still_trashes(store, make_photo):
     rel, full = make_photo(name="bare.jpg")
     result = store.delete_photo(rel)

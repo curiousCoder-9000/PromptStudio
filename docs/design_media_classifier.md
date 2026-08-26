@@ -58,17 +58,28 @@ recall risk below survivable.
 
 ## 2. The ontology
 
-Unchanged from `v4-ordinal-frame-v7a`, the last and best version to ship. It is
-recovered verbatim rather than rewritten, because the anchors are the product
-of six measured revisions and rewording them would invalidate that history.
+`v4-ordinal-frame-v8` (photos) / `v4-reel-sheet-v8` (reels). v8 redefines the
+`2↔3` cut — v7a treated any listed reveal (crop, cleavage, bodycon) as T3 and
+tied upward, which put covering cocktail dresses and award/OOTD shots in the
+keep-hot bucket. T0/T1/T4 garment rules are unchanged.
 
 | Tier | Label | Meaning |
 |------|-------|---------|
 | 0 | Unusable | no woman as main subject · any man in frame · poster/flyer/graphic · unusable quality (blur, pixelation, distortion) |
 | 1 | Fully modest | opaque everyday clothes, skin only face/hands |
-| 2 | Normal fashion | street/casual/office wear with some skin, no midriff/cleavage/thigh |
-| 3 | Revealing daywear | crop top, deep cleavage, bare back, mini hem, torso cut-outs |
+| 2 | Normal fashion | cute/street/event wear, including tight covering dresses; not a sexual keep |
+| 3 | Revealing daywear | sexy daywear a horny viewer would keep: curvy/voluptuous figure AND body as the subject AND a real reveal (or painted-on bodycon on a voluptuous figure) |
 | 4 | Swim / lingerie | bikini, swimwear, lingerie, sheer over bare skin, near-nude |
+
+Keep-policy is applied in code after the model returns, because the VLM
+contradicts itself (``brief_reason: bikini set`` with ``exposure_tier: 2``):
+
+- `is_graphic` → 0 (a bikini on an event flyer is still a flyer)
+- `undress_class` or a bikini/lingerie/swimsuit reason → 4
+- T2 + curvy + `body_focus` + (`bare_midriff` or a crop/midriff reason) → 3
+- T3 + `figure` not in `{curvy, voluptuous}` or `body_focus=false` → 2
+
+Missing fields fail open. T4 is never capped by the figure gate.
 
 **Default cut: `tier ≤ 1` is a reject.**
 
@@ -78,6 +89,12 @@ The `1↔2` boundary has never been measured. The only holdout numbers are for
 `2↔3`, and there recall was **0.576** — meaning a boundary this classifier is
 asked to judge got four in ten wrong in the direction of dropping keepers.
 Cutting at `≤1` will therefore reject some things worth keeping.
+
+v8 flips the `2↔3` error budget the other way on purpose: covering bodycon,
+award/product shots, and non-curvy figures were over-admitted as T3. The
+prompt now ties down when unsure, and `figure` / `body_focus` cap a T3 to 2
+in code. Expect T3 precision to rise and T3 recall to fall; check
+`top_tier_share` after the first rescore.
 
 Three guards, none of which override the default:
 

@@ -4,7 +4,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from promptstudio.config import EXCLUDED_FOLDERS, SAVED_DIR, TRASH_ENABLED
+from promptstudio.config import EXCLUDED_FOLDERS, METADATA_SUFFIX, SAVED_DIR, TRASH_ENABLED
 from promptstudio.logging_setup import get_logger
 from promptstudio.storage.db import (
     DEFAULT_SOURCE,
@@ -91,10 +91,6 @@ class ArchiveStore:
         group_posts: bool = False,
         search_mode: str = "text",
         collection_id: Optional[int] = None,
-        setting: Optional[str] = None,
-        outfit: Optional[str] = None,
-        pose: Optional[str] = None,
-        lighting: Optional[str] = None,
         paths_only: bool = False,
     ) -> Tuple[List[Dict[str, Any]], int]:
         return self._index.query_photos(
@@ -113,10 +109,6 @@ class ArchiveStore:
             group_posts=group_posts,
             search_mode=search_mode,
             collection_id=collection_id,
-            setting=setting,
-            outfit=outfit,
-            pose=pose,
-            lighting=lighting,
             paths_only=paths_only,
         )
 
@@ -144,6 +136,30 @@ class ArchiveStore:
     def create_creator(self, name: str) -> str:
         return ensure_creator_folder(name, base_dir=self.base_dir)["name"]
 
+    def _forget_photo(self, rel: str, filename: str, *, drop_verdict: bool) -> None:
+        """Drop derived state and the catalog row. The file is already gone."""
+        try:
+            from promptstudio.storage.thumbs import resolve_thumb_file
+
+            thumb = resolve_thumb_file(rel)
+            if thumb and os.path.isfile(thumb):
+                os.remove(thumb)
+        except OSError:
+            pass
+        try:
+            from promptstudio.prompts.cache import PromptCache
+
+            PromptCache().delete(rel, filename)
+        except Exception as exc:
+            log.warning("prompt cache delete failed for %s: %s", rel, exc)
+        try:
+            from promptstudio.storage.favorites import FavoritesStore
+
+            FavoritesStore().set_favorite(rel, False)
+        except Exception as exc:
+            log.warning("favorite clear failed for %s: %s", rel, exc)
+        self._index.delete_photo(rel, drop_verdict=drop_verdict)
+
     def delete_photo(
         self, rel_path: str, *, permanent: Optional[bool] = None
     ) -> Optional[Dict[str, Any]]:
@@ -153,27 +169,65 @@ class ArchiveStore:
         the path does not resolve. Soft deletes capture the prompt bundle and
         favorite flag into the trash manifest *before* clearing them, so a
         restore brings back the full state.
+
+        A catalog row whose file is already gone (folder wiped, failed move,
+        deleted outside the app) still succeeds: there is nothing to trash, so
+        the row is dropped as a permanent delete. Returning 404 left a ghost
+        tile in the gallery that the confirm modal could never clear.
         """
-        full = self.resolve_path(rel_path)
-        if not full:
+        rel = normalize_rel_path(rel_path)
+        if not rel:
+            return None
+        full = safe_join(self.base_dir, rel)
+        if full is None:
             return None
         soft = TRASH_ENABLED if permanent is None else not permanent
         filename = os.path.basename(full)
-        rel = rel_path.replace("\\", "/").lstrip("/")
         creator = os.path.basename(os.path.dirname(full))
+        missing = not os.path.isfile(full)
 
         # Tombstone Instagram identity so future sync never re-downloads this post
         post_id: Optional[str] = None
         shortcode: Optional[str] = None
         taken_at: Optional[str] = None
+        indexed_creator: Optional[str] = None
         try:
-            c, pid, sc = self._index.get_photo_identity(rel)
-            if c:
-                creator = c
+            indexed_creator, pid, sc = self._index.get_photo_identity(rel)
+            if indexed_creator:
+                creator = indexed_creator
             post_id = pid
             shortcode = sc
         except Exception:
             pass
+        if missing and not indexed_creator:
+            return None
+        if missing:
+            if post_id or shortcode:
+                try:
+                    self._index.record_deleted_post(
+                        creator,
+                        shortcode=shortcode,
+                        post_id=post_id,
+                        rel_path=rel,
+                        source="ui",
+                        platform=self._index.get_photo_source(rel) or DEFAULT_SOURCE,
+                    )
+                except Exception:
+                    pass
+            sidecar = full + METADATA_SUFFIX
+            if os.path.isfile(sidecar):
+                try:
+                    os.remove(sidecar)
+                except OSError:
+                    pass
+            self._forget_photo(rel, filename, drop_verdict=True)
+            log.info("dropped ghost catalog row %s (file already gone)", rel)
+            return {
+                "filename": filename,
+                "rel_path": rel,
+                "trash_id": None,
+                "permanent": True,
+            }
         meta: Dict[str, Any] = {}
         try:
             from promptstudio.storage.metadata import load_post_metadata
@@ -253,32 +307,9 @@ class ArchiveStore:
             except OSError:
                 pass
 
-        # Thumbs are derived data — drop them either way; they regenerate on demand
-        try:
-            from promptstudio.storage.thumbs import resolve_thumb_file
-
-            thumb = resolve_thumb_file(rel_path)
-            if thumb and os.path.isfile(thumb):
-                os.remove(thumb)
-        except OSError:
-            pass
-
-        try:
-            from promptstudio.prompts.cache import PromptCache
-
-            PromptCache().delete(rel, filename)
-        except Exception as exc:
-            log.warning("prompt cache delete failed for %s: %s", rel, exc)
-        try:
-            from promptstudio.storage.favorites import FavoritesStore
-
-            FavoritesStore().set_favorite(rel, False)
-        except Exception as exc:
-            log.warning("favorite clear failed for %s: %s", rel, exc)
-
         # Soft delete keeps the classify verdict so Undo restores the review
         # pile intact; TrashStore.purge drops it when the file really goes.
-        self._index.delete_photo(rel_path, drop_verdict=not soft)
+        self._forget_photo(rel, filename, drop_verdict=not soft)
         return {
             "filename": filename,
             "rel_path": rel,

@@ -36,6 +36,14 @@ const { Session, Report, sleep } = require('./cdp');
   r.check('default is "any verdict"', hasControl && hasControl[0] === '',
     String(hasControl && hasControl[0]));
 
+  const countLabels = await s.eval(`
+    const sel = document.getElementById('verdictFilterSelect');
+    return [...sel.options].map((o) => ({ value: o.value, label: o.textContent }));
+  `);
+  r.check('options show how many photos they select, not a blanket %',
+    countLabels.filter((o) => o.value).every((o) => /· \d/.test(o.label) && !/· \d+%$/.test(o.label)),
+    JSON.stringify(countLabels.map((o) => o.label)));
+
   const tierOption = await s.eval(`
     return [...document.getElementById('sortSelect').options].map((o) => o.value);
   `);

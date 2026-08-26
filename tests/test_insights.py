@@ -24,6 +24,7 @@ def test_empty_archive_insights_are_zero(store):
     assert data["prompts"]["total"] == 0
     assert data["prompts"]["edit_rate"] is None
     assert data["generations"]["total_outputs"] == 0
+    assert "facets" not in data
 
 
 def test_prompt_edit_and_regenerate_rates(store, make_photo):

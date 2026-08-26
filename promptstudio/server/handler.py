@@ -573,27 +573,27 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             )
             if rel_path:
                 rel_path = urllib.parse.unquote(rel_path)
-                full_path = _archive.resolve_path(rel_path)
-                if full_path:
-                    try:
-                        # delete_photo owns cache/favorite/tombstone bookkeeping so
-                        # restorable state is captured before it is cleared.
-                        result = _archive.delete_photo(rel_path, permanent=permanent)
-                        if not result:
-                            self.send_error(404, "Photo not found")
-                            return
-                        self._send_json(
-                            {
-                                "status": "deleted" if result["permanent"] else "trashed",
-                                "filename": result["filename"],
-                                "rel_path": result["rel_path"],
-                                "trash_id": result["trash_id"],
-                            }
-                        )
+                try:
+                    # delete_photo owns containment, missing-file ghosts, and
+                    # cache/favorite/tombstone bookkeeping. resolve_path requires
+                    # the bytes to still be on disk, which is exactly the case
+                    # a ghost catalog row fails — so do not 404 on that here.
+                    result = _archive.delete_photo(rel_path, permanent=permanent)
+                    if not result:
+                        self.send_error(404, "Photo not found")
                         return
-                    except OSError as e:
-                        self.send_error(500, f"Error deleting file: {e}")
-                        return
+                    self._send_json(
+                        {
+                            "status": "deleted" if result["permanent"] else "trashed",
+                            "filename": result["filename"],
+                            "rel_path": result["rel_path"],
+                            "trash_id": result["trash_id"],
+                        }
+                    )
+                    return
+                except OSError as e:
+                    self.send_error(500, f"Error deleting file: {e}")
+                    return
             self.send_error(404, "Photo not found")
             return
 
@@ -2060,10 +2060,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 except ValueError:
                     self.send_error(400, "collection must be an id")
                     return
-            setting = (query.get("setting", [""])[0] or "").strip() or None
-            outfit = (query.get("outfit", [""])[0] or "").strip() or None
-            pose = (query.get("pose", [""])[0] or "").strip() or None
-            lighting = (query.get("lighting", [""])[0] or "").strip() or None
             # Collapse a carousel into one tile. Anything other than `post` is
             # a 400 rather than a silent fallback: ungrouped rows against a
             # client that believes it is paging in posts drifts a page at a
@@ -2105,10 +2101,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     group_posts=False,
                     search_mode=search_mode,
                     collection_id=collection_id,
-                    setting=setting,
-                    outfit=outfit,
-                    pose=pose,
-                    lighting=lighting,
                     paths_only=True,
                 )
                 self._send_json(
@@ -2137,10 +2129,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 group_posts=group == "post",
                 search_mode=search_mode,
                 collection_id=collection_id,
-                setting=setting,
-                outfit=outfit,
-                pose=pose,
-                lighting=lighting,
             )
             # What the caller must advance `offset` by. Grouped, `total` counts
             # posts while `photos` carries every slide, so neither array length
@@ -2364,12 +2352,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             from promptstudio.storage.db import ArchiveIndex
 
             self._send_json({"collections": ArchiveIndex.get().list_collections()})
-            return
-
-        if path == "/api/facets":
-            from promptstudio.storage.db import ArchiveIndex
-
-            self._send_json({"facets": ArchiveIndex.get().facet_counts()})
             return
 
         if path == "/api/taste/status":

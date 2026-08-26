@@ -1,5 +1,5 @@
 /**
- * Phase 15 — activity, duplicates, trash grid, saved views, facets, For You.
+ * Phase 15 — activity, duplicates, trash grid, saved views, For You.
  */
 const { Session, Report, sleep } = require('./cdp');
 
@@ -37,7 +37,7 @@ const { Session, Report, sleep } = require('./cdp');
   r.check('Semantic search chip exists', wired.semantic === true);
   r.check('save-view button exists', wired.saveView === true);
   r.check('new board button exists', wired.boards === true);
-  r.check('facet chip row exists', wired.facets === true);
+  r.check('C5 facet chip row is gone', wired.facets === false);
   r.check('Train For You exists', wired.train === true);
   r.check('openActivityModal is wired', wired.openActivity === true);
   r.check('openDuplicatesModal is wired', wired.openDups === true);

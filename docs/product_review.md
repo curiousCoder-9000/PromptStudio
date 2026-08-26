@@ -286,14 +286,15 @@ Cross-creator boards and saved filter sets.
 - **Why:** the first organizational unit that is not a scraper artifact.
 - **Touches:** `collections` + `collection_items` tables, `/api/collections`, sidebar section.
 
-#### C5 — Faceted attributes (M)
+#### C5 — Faceted attributes (M) — **removed**
 
 Setting (studio / beach / street), outfit type, shot framing, pose — as columns and filter chips.
 
-- **Why:** rides **free** on a vision call already being made. Better browsing *and* better Comfy
-  conditioning. Replaces the single collapsed `glam_score` int as the browsing axis.
-- **Touches:** extend the structured-vision schema in `prompts/engine.py`, additive columns in
-  `storage/db.py`, chips in `app.js`.
+- **Why (as proposed):** rides **free** on a vision call already being made. Better browsing *and*
+  better Comfy conditioning. Replaces the single collapsed `glam_score` int as the browsing axis.
+- **What shipped:** four dropdowns over freeform first-phrases from `structured_vision`. Only
+  setting was canonicalized; outfit / pose / lighting were unique-ish strings. Comfy never read
+  them. Removed 2026-08-26 as unused chrome — vision fields themselves stay on the prompt bundle.
 
 ### Theme E — Don't lose the irreplaceable
 
@@ -359,7 +360,7 @@ and is standing policy from that point on.
 
 8. **B3** labeling mode → **B2** preference model → **C1** semantic search → **C3** near-dup
    collapse. One embedding job, four features: build the infrastructure once and mine it repeatedly.
-9. **C5** faceted attributes · **C4** collections.
+9. **C4** collections. (**C5** faceted attributes shipped then removed — unused chrome.)
 10. **E2** activity view, once logging exists.
 
 **Continuous**

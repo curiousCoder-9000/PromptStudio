@@ -588,7 +588,7 @@ labels the product has been discarding, and mine the same embeddings three ways.
 | Embeddings cached in `archive.db` (hashed n-grams over vision JSON + prompt; optional Ollama `/api/embed`) + logistic head → `P(keep)`, "For You" sort | B2 | **Done** |
 | Semantic search — `?search=…&mode=semantic` cosine over the same vectors | C1 | **Done** |
 | Near-dup collapse — pHash groups first, embedding kNN second; Duplicates review UI | C3 | **Done** |
-| Faceted attributes (setting / outfit / pose / lighting) as columns + filter chips | C5 | **Done** |
+| Faceted attributes (setting / outfit / pose / lighting) as columns + filter chips | C5 | **Removed** — freeform vision phrases were not a usable browse axis |
 | Collections / saved views — cross-creator boards, saved filter sets | C4 | **Done** |
 | Activity view over the run journal (JSONL per job kind) | E2 | **Done** |
 

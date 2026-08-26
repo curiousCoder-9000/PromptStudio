@@ -159,26 +159,6 @@ _VERDICT_CASE = (
 VERDICT_FILTERS = ("keep", "reject", "unclassified", "error", "unusable", "modest")
 LABEL_FILTERS = ("unlabeled", "keep", "discard")
 SEARCH_MODES = ("text", "semantic")
-# C5 — chips over structured_vision fields already produced by the vision call.
-# setting ← background, outfit ← clothing. Framing is not a vision field.
-FACET_KEYS = ("setting", "outfit", "pose", "lighting")
-FACET_SOURCE_FIELDS = {
-    "setting": "background",
-    "outfit": "clothing",
-    "pose": "pose",
-    "lighting": "lighting",
-}
-_FACET_EMPTY = frozenset(("", "unknown", "n/a", "none", "null", "n.a.", "-"))
-_SETTING_CANON = (
-    ("studio", "studio"),
-    ("beach", "beach"),
-    ("street", "street"),
-    ("indoor", "indoor"),
-    ("outdoor", "outdoor"),
-    ("bedroom", "indoor"),
-    ("bathroom", "indoor"),
-    ("pool", "pool"),
-)
 
 # C2 — carousel grouping. One tile per post instead of one per slide.
 #
@@ -385,13 +365,10 @@ CREATE TABLE IF NOT EXISTS collection_items (
 CREATE INDEX IF NOT EXISTS idx_collection_items_path ON collection_items(rel_path);
 """
 
-# Additive columns on photos: C5 facets + B2 p_keep. Applied in
-# _migrate_taste_columns so existing DBs pick them up without a rebuild.
+# Additive columns on photos: B2 p_keep. Applied in _migrate_taste_columns
+# so existing DBs pick them up without a rebuild. C5 facet_* columns may
+# still exist on older archives; they are leftover and unused.
 _TASTE_COLUMNS = (
-    ("facet_setting", "TEXT"),
-    ("facet_outfit", "TEXT"),
-    ("facet_pose", "TEXT"),
-    ("facet_lighting", "TEXT"),
     ("p_keep", "REAL"),
 )
 
@@ -442,37 +419,6 @@ def _fts_query(raw: str) -> str:
     if not tokens:
         return ""
     return " AND ".join(f'"{t}"*' for t in tokens)
-
-
-def normalize_facet(raw: Any, *, facet: str = "") -> Optional[str]:
-    """First phrase, lowercased, empty/unknown dropped. Setting gets a canon."""
-    if raw is None:
-        return None
-    text = str(raw).strip().lower()
-    if not text:
-        return None
-    text = re.split(r"[,;|/]", text, maxsplit=1)[0]
-    text = re.sub(r"\s+", " ", text).strip()
-    if not text or text in _FACET_EMPTY:
-        return None
-    if facet == "setting":
-        for needle, canon in _SETTING_CANON:
-            if needle in text:
-                return canon
-    if len(text) > 48:
-        text = text[:48].rsplit(" ", 1)[0] or text[:48]
-    return text
-
-
-def facets_from_prompt(entry: Optional[Dict[str, Any]]) -> Dict[str, Optional[str]]:
-    """C5 values from a prompt bundle's structured_vision object."""
-    sv = (entry or {}).get("structured_vision") if isinstance(entry, dict) else None
-    if not isinstance(sv, dict):
-        sv = {}
-    return {
-        facet: normalize_facet(sv.get(src), facet=facet)
-        for facet, src in FACET_SOURCE_FIELDS.items()
-    }
 
 
 def _ratio(num: int, den: int) -> Optional[float]:
@@ -718,7 +664,6 @@ class ArchiveIndex:
                 self._prompt_row(rel_path, entry),
             )
             self._reindex_prompt(rel_path, entry)
-            self._apply_facets(rel_path, facets_from_prompt(entry))
             self._conn.commit()
 
     def prompt_get(self, rel_path: str, filename: str = "") -> Optional[Dict[str, Any]]:
@@ -1189,83 +1134,6 @@ class ArchiveIndex:
             "skipped": skipped,
         }
 
-    # ── C5 facets ─────────────────────────────────────────────────────
-
-    def _apply_facets(self, rel_path: str, facets: Dict[str, Optional[str]]) -> None:
-        """Caller MUST hold self._lock. No-op when the photo row is gone."""
-        self._conn.execute(
-            "UPDATE photos SET facet_setting=?, facet_outfit=?, facet_pose=?, "
-            "facet_lighting=? WHERE rel_path = ?",
-            (
-                facets.get("setting"),
-                facets.get("outfit"),
-                facets.get("pose"),
-                facets.get("lighting"),
-                normalize_rel_path(rel_path),
-            ),
-        )
-
-    def backfill_facets(self, *, force: bool = False) -> int:
-        """Copy structured_vision fields onto photos. Idempotent unless force."""
-        if not force and self._meta_get("facets_backfilled") == "1":
-            # Still apply any prompt written since the last backfill.
-            force = False
-        updated = 0
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT p.rel_path, pr.payload FROM photos p "
-                "JOIN prompts pr ON pr.rel_path = p.rel_path"
-                + (
-                    ""
-                    if force
-                    else " WHERE p.facet_setting IS NULL AND p.facet_outfit IS NULL "
-                    "AND p.facet_pose IS NULL AND p.facet_lighting IS NULL"
-                )
-            ).fetchall()
-            for row in rows:
-                try:
-                    entry = json.loads(row["payload"])
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                facets = facets_from_prompt(entry if isinstance(entry, dict) else None)
-                if not any(facets.values()):
-                    continue
-                self._apply_facets(row["rel_path"], facets)
-                updated += 1
-            self._meta_set("facets_backfilled", "1")
-            self._conn.commit()
-        return updated
-
-    def facet_counts(self) -> Dict[str, List[Dict[str, Any]]]:
-        """Per-facet value histogram over photos that have the column set.
-
-        The denominator for B4 is "has this facet", never the whole archive —
-        un-analysed photos are not a vote that the chip is a no-op.
-        """
-        out: Dict[str, List[Dict[str, Any]]] = {k: [] for k in FACET_KEYS}
-        with self._lock:
-            for facet in FACET_KEYS:
-                col = f"facet_{facet}"
-                rows = self._conn.execute(
-                    f"SELECT {col} AS value, COUNT(*) AS n FROM photos "
-                    f"WHERE {col} IS NOT NULL AND {col} != '' "
-                    f"GROUP BY {col} ORDER BY n DESC, value ASC LIMIT 40"
-                ).fetchall()
-                out[facet] = [{"value": r["value"], "count": int(r["n"])} for r in rows]
-        return out
-
-    def facet_bucket_map(self, facet: str) -> Dict[str, int]:
-        """``{value: count}`` for one facet — B4's denominator."""
-        if facet not in FACET_KEYS:
-            return {}
-        col = f"facet_{facet}"
-        with self._lock:
-            rows = self._conn.execute(
-                f"SELECT {col} AS value, COUNT(*) AS n FROM photos "
-                f"WHERE {col} IS NOT NULL AND {col} != '' GROUP BY {col}"
-            ).fetchall()
-        return {str(r["value"]): int(r["n"]) for r in rows}
-
     # ── B2 embeddings + p_keep ────────────────────────────────────────
 
     def set_embedding(self, rel_path: str, vector: bytes, *, dim: int, model: str) -> None:
@@ -1404,7 +1272,7 @@ class ArchiveIndex:
                 "SUM(CASE WHEN p_keep >= 0.75 THEN 1 ELSE 0 END) AS high, "
                 "SUM(CASE WHEN p_keep >= 0.5 AND p_keep < 0.75 THEN 1 ELSE 0 END) AS mid, "
                 "SUM(CASE WHEN p_keep >= 0.25 AND p_keep < 0.5 THEN 1 ELSE 0 END) AS low, "
-                "SUM(CASE WHEN p_keep < 0.25 THEN 1 ELSE 0 END) AS drop "
+                'SUM(CASE WHEN p_keep < 0.25 THEN 1 ELSE 0 END) AS "drop" '
                 "FROM photos WHERE p_keep IS NOT NULL"
             ).fetchone()
         out: Dict[str, int] = {}
@@ -1617,7 +1485,6 @@ class ArchiveIndex:
             self._conn.commit()
         if table == "prompts":
             self.reindex_all_prompts()
-            self.backfill_facets(force=True)
         return applied
 
     def reindex_all_prompts(self) -> None:
@@ -2441,7 +2308,7 @@ class ArchiveIndex:
         )
 
     def _migrate_taste_columns(self) -> None:
-        """C5 facet columns + B2 p_keep on existing photos tables."""
+        """B2 p_keep on existing photos tables. Drop leftover C5 facet indexes."""
         cols = {
             row[1]
             for row in self._conn.execute("PRAGMA table_info(photos)").fetchall()
@@ -2449,14 +2316,14 @@ class ArchiveIndex:
         for name, col_type in _TASTE_COLUMNS:
             if name not in cols:
                 self._conn.execute(f"ALTER TABLE photos ADD COLUMN {name} {col_type}")
-        for facet in FACET_KEYS:
-            self._conn.execute(
-                f"CREATE INDEX IF NOT EXISTS idx_photos_facet_{facet} "
-                f"ON photos(facet_{facet})"
-            )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_photos_p_keep ON photos(p_keep)"
         )
+        # C5 shipped as filter chips over freeform vision phrases, then was
+        # ripped. Leave the columns if present (SQLite rewrite of photos is
+        # not worth it) but stop paying for the indexes.
+        for facet in ("setting", "outfit", "pose", "lighting"):
+            self._conn.execute(f"DROP INDEX IF EXISTS idx_photos_facet_{facet}")
 
     @classmethod
     def get(cls) -> "ArchiveIndex":
@@ -3043,10 +2910,6 @@ class ArchiveIndex:
             photo["added_at"] = float(row["added_at"])
         if "p_keep" in keys and row["p_keep"] is not None:
             photo["p_keep"] = round(float(row["p_keep"]), 4)
-        for facet in FACET_KEYS:
-            col = f"facet_{facet}"
-            if col in keys and row[col]:
-                photo[facet] = row[col]
         if "taste_label" in keys and row["taste_label"] is not None:
             photo["taste_label"] = int(row["taste_label"])
             photo["taste_labelled_at"] = row["taste_labelled_at"] or ""
@@ -3235,10 +3098,6 @@ class ArchiveIndex:
         group_posts: bool = False,
         search_mode: str = "text",
         collection_id: Optional[int] = None,
-        setting: Optional[str] = None,
-        outfit: Optional[str] = None,
-        pose: Optional[str] = None,
-        lighting: Optional[str] = None,
         paths_only: bool = False,
     ) -> Tuple[List[Dict[str, Any]], int]:
         """Gallery page + the total the caller pages against.
@@ -3309,15 +3168,6 @@ class ArchiveIndex:
                 "WHERE collection_id = ?)"
             )
             params.append(int(collection_id))
-        for facet, value in (
-            ("setting", setting),
-            ("outfit", outfit),
-            ("pose", pose),
-            ("lighting", lighting),
-        ):
-            if value:
-                where.append(f"p.facet_{facet} = ?")
-                params.append(normalize_facet(value, facet=facet) or value.strip().lower())
 
         semantic = (search_mode or "text").lower() == "semantic" and bool(
             search and str(search).strip()

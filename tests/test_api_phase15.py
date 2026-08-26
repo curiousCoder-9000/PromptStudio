@@ -1,4 +1,4 @@
-"""Phase 15 HTTP: duplicates, views, collections, facets, trash thumbs, taste."""
+"""Phase 15 HTTP: duplicates, views, collections, trash thumbs, taste."""
 
 from __future__ import annotations
 
@@ -84,19 +84,21 @@ def test_collections_membership_filters_photos(api, make_photo):
     assert after["total"] == 0
 
 
-def test_facets_from_prompt_and_filter(api, make_photo):
+def test_c5_facet_route_and_photo_fields_are_gone(api, make_photo):
+    """C5 chips were chrome over freeform vision phrases — ripped, not hidden."""
     rel, _ = make_photo(name="studio.jpg")
     PromptCache().set(rel, dict(PROMPT), push_history=False)
 
-    status, payload = api("GET", "/api/facets")
-    assert status == 200
-    settings = {row["value"] for row in payload["facets"]["setting"]}
-    assert "studio" in settings
+    status, _payload = api("GET", "/api/facets")
+    assert status == 404
 
     _s, photos = api("GET", "/api/photos?setting=studio")
     assert photos["total"] == 1
-    assert photos["photos"][0]["setting"] == "studio"
-    assert photos["photos"][0]["outfit"] == "red bikini"
+    row = photos["photos"][0]
+    assert "setting" not in row
+    assert "outfit" not in row
+    assert "pose" not in row
+    assert "lighting" not in row
 
 
 def test_duplicates_exclude_carousel_and_never_preselect_favorite(api, make_photo):

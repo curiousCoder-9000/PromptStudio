@@ -79,7 +79,7 @@ def test_logistic_separates_two_clouds():
     assert p[20:].mean() < 0.3
 
 
-def test_train_writes_p_keep_and_facets(make_photo):
+def test_train_writes_p_keep(make_photo):
     index = ArchiveIndex.get()
     keep_paths = []
     disc_paths = []
@@ -105,10 +105,9 @@ def test_train_writes_p_keep_and_facets(make_photo):
     keep_score = index.query_photos(path=keep_paths[0])[0][0]["p_keep"]
     disc_score = index.query_photos(path=disc_paths[0])[0][0]["p_keep"]
     assert keep_score > disc_score
-
     photo = index.query_photos(path=keep_paths[0])[0][0]
-    assert photo.get("setting") == "studio"
-    assert photo.get("outfit") == "red bikini"
+    assert "setting" not in photo
+    assert "outfit" not in photo
 
 
 def test_semantic_search_ranks_keep_first(make_photo):
@@ -146,6 +145,21 @@ def test_foryou_sort_puts_high_p_keep_first(make_photo):
     index.set_p_keeps([(low, 0.1), (high, 0.9)])
     photos, _ = index.query_photos(sort="foryou")
     assert photos[0]["rel_path"] == high
+
+
+def test_p_keep_bucket_map_accepts_drop_alias(make_photo):
+    """`drop` is a SQLite reserved word — the alias must be quoted."""
+    index = ArchiveIndex.get()
+    high, _ = make_photo(name="pk_high.jpg")
+    mid, _ = make_photo(name="pk_mid.jpg")
+    low, _ = make_photo(name="pk_low.jpg")
+    bottom, _ = make_photo(name="pk_drop.jpg")
+    index.set_p_keeps([(high, 0.9), (mid, 0.6), (low, 0.3), (bottom, 0.1)])
+    buckets = index.p_keep_bucket_map()
+    assert buckets["high"] == 1
+    assert buckets["mid"] == 1
+    assert buckets["low"] == 1
+    assert buckets["drop"] == 1
 
 
 def test_text_blob_uses_structured_vision():

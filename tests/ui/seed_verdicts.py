@@ -22,6 +22,7 @@ if ARCHIVE:
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from promptstudio.scraping.media_classifier import CLASSIFY_FRAME_VERSION
 from promptstudio.storage.db import ArchiveIndex
 
 # (tier, reason) cycled over the seeded photos in filename order.
@@ -53,7 +54,7 @@ def main() -> int:
             media_kind="photo",
             verdict_source="image",
             confidence=0.81,
-            prompt_version="v4-ordinal-frame-v7a",
+            prompt_version=CLASSIFY_FRAME_VERSION,
             error=None if tier >= 0 else "vision timeout",
         )
 

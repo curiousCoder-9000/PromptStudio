@@ -76,8 +76,16 @@ log = get_logger(__name__)
 #   unsure between 2 and 3, choose 2" cost 27 of 43 true tier-3s on the round-2
 #   holdout. The error budget was entirely recall (precision 1.000, recall
 #   0.576), so the tiebreak now points up.
-CLASSIFY_FRAME_VERSION = "v4-ordinal-frame-v7a"
-CLASSIFY_SHEET_VERSION = "v4-reel-sheet"
+# v8: T3 is the horny-keep bucket, not "any crop / cleavage / bodycon". v7a's
+#   upward 2/3 tiebreak plus "one listed reveal → 3" put covering cocktail
+#   dresses and award/OOTD shots in 3 (e.g. amberna YouTube-plaque bodycon).
+#   T3 now requires a curvy/voluptuous figure, the body as the subject, and
+#   an actually revealing or sexually-displaying outfit. Tiebreak 2/3 points
+#   down again — precision is the budget. Figure/body_focus are measured
+#   fields; a T3 that fails those gates is capped to 2 in code, not only in
+#   prose. T4 (undress-class garments) is never capped.
+CLASSIFY_FRAME_VERSION = "v4-ordinal-frame-v8"
+CLASSIFY_SHEET_VERSION = "v4-reel-sheet-v8"
 
 # Human labels for the tiers. The API sends these so the review UI never has to
 # keep a second copy of the ontology in JavaScript and let it drift.
@@ -138,14 +146,21 @@ _TIER_ANCHORS = (
     "graphic where text/layout dominates over a natural photo of a person\n"
     "     1 = fully modest: opaque everyday clothes; skin only face/hands/maybe wrists; "
     "no cleavage, no bare midriff, no short hem\n"
-    "     2 = normal fashion: street/casual/office wear with SOME skin (bare arms, "
-    "shoulders, collarbone, modest neckline) OR fitted clothing that does NOT show "
-    "midriff, deep cleavage, or upper thigh. Sundress with normal length, jeans+top, "
-    "blouse, sweater, jacket over a top — stay at 2 even if stylish or glamorous\n"
-    "     3 = revealing daywear (NOT swim/lingerie): crop top with bare midriff, "
-    "deep cleavage or plunging neckline, bare back, mini skirt/dress with upper thigh, "
-    "tight bodycon that clearly emphasises bust/hips, sideboob through clothes, "
-    "cut-outs on the torso. Still street/party clothes, not beachwear or underwear\n"
+    "     2 = cute / normal fashion, NOT a sexual keep: street, casual, office, or "
+    "event wear, including tight but covering dresses (bodycon, ribbed mini, cocktail) "
+    "with a normal neckline. Jeans+top, blouse, sweater, sundress, award / product / "
+    "OOTD photos. Some skin is OK — bare arms, shoulders, collarbone, modest/medium "
+    "cleavage from a busty figure in a square/scoop/modest-V neckline, a short hem "
+    "that is not upper-inner-thigh. Glamour and tightness alone stay at 2\n"
+    "     3 = sexy daywear a horny viewer would KEEP. ALL of these must hold: "
+    "(a) curvy or voluptuous figure — full bust and/or hips/ass a sexual viewer "
+    "would notice; (b) her body is the subject of the photo; (c) the outfit is "
+    "actually revealing or sexually displaying. Examples: crop top with a clearly "
+    "bare midriff on a curvy body; plunging neckline designed to display the breasts; "
+    "mini at upper-inner thigh with the legs/hips as the point; ass-hugging short "
+    "shorts; large torso cut-outs; painted-on bodycon on a voluptuous figure where "
+    "bust AND hips/ass are why you are looking. Still street/party clothes, not "
+    "beachwear or underwear\n"
     "     4 = maximally revealing / undress-class garments — USE 4 when ANY of these "
     "apply: bikini, microbikini, monokini, swimsuit, swimwear, lingerie, bra+panties, "
     "bodysuit worn as underwear, sheer or mesh over bare skin, see-through fabric, "
@@ -154,8 +169,8 @@ _TIER_ANCHORS = (
 )
 
 CLASSIFY_FRAME_PROMPT = (
-    "Rate the outfit in this still image for a personal fashion KEEP filter. "
-    "Return ONLY valid JSON.\n"
+    "Rate this still for a personal SEXUAL KEEP filter — think like a horny viewer "
+    "deciding which photos to keep. Return ONLY valid JSON.\n"
     '  "has_woman": boolean — a woman / female-presenting person is a main subject. '
     "false for title cards, logos, text-only frames, scenery, food, cartoons, or when "
     "only men are present. true if a woman is a main subject even when a man also appears "
@@ -173,12 +188,14 @@ CLASSIFY_FRAME_PROMPT = (
     "Only sharp enough, women-only, natural photos continue past this step.\n"
     "    (2) If garment is swimwear, bikini, lingerie, sheer/mesh over bare skin, or "
     "near-nude → 4.\n"
-    "    (3) Else if AT LEAST ONE clear reveal is visible — bare midriff (stomach skin "
-    "between top and bottoms), deep cleavage (not just a modest V-neck), fully bare back, "
-    "mini hem at upper thigh, large torso cut-outs, short shorts or hot pants at upper "
-    "thigh, tight ass-hugging shorts/shortalls — → 3.\n"
-    "    (4) Else if she is clothed in normal or stylish fashion (dress, jeans, top, "
-    "blouse, coat, jumpsuit, etc.) → 2.\n"
+    "    (3) Else if this is a photo a horny viewer would keep as sexy daywear — "
+    "curvy/voluptuous figure AND her body is the subject AND at least one real reveal "
+    "or sexual display (clear bare midriff, plunging cleavage designed to show breast, "
+    "mini at upper-inner thigh, ass-focused short shorts, large torso cut-outs, or "
+    "painted-on bodycon on a voluptuous figure where bust AND hips/ass are the point "
+    "of the shot) → 3.\n"
+    "    (4) Else if she is clothed in normal, cute, or stylish fashion (dress, jeans, "
+    "top, blouse, coat, jumpsuit, covering bodycon, cocktail mini, etc.) → 2.\n"
     "    (5) Else fully covered modest everyday clothes with almost no skin → 1.\n"
     "Tier definitions:\n"
     + _TIER_ANCHORS
@@ -189,18 +206,50 @@ CLASSIFY_FRAME_PROMPT = (
     "ALWAYS tier 0. Do not guess the outfit on a mushy or warped frame.\n"
     "  - Poster-like / flyer / heavy graphic promo layout = ALWAYS tier 0, even if a "
     "woman appears on the poster. Natural photos with a small watermark/sticker are OK.\n"
-    "  - Bikini / swimsuit / lingerie / sheer lingerie-look = ALWAYS 4. Never call these 3.\n"
-    "  - Most dresses, jumpsuits, jeans+top, blouses, sweaters = 2 even if glamorous, "
-    "tight, or low-shoulder. Glamour alone is not tier 3.\n"
+    "  - Bikini / swimsuit / lingerie / sheer lingerie-look / lace bra or bralette worn "
+    "as the only top = ALWAYS 4, even with shorts or jeans. Never call these 2 or 3. "
+    "A sports bra is a crop top (3), not lingerie.\n"
+    "  - T3 is the keep-because-it-is-hot bucket. If a horny viewer would skip the photo, "
+    "it is not 3.\n"
+    "  - T3 requires a curvy or voluptuous figure. Slim, skinny, petite-without-curves, "
+    "or athletic-without-bust stay at 2 even in a crop top.\n"
+    "  - T3 requires the body (bust, waist, hips, thighs, or ass) to be the subject. "
+    "Face portraits, holding a trophy / YouTube plaque / product / microphone, talk-show "
+    "sitting, group events, and cute OOTD snapshots = 2 even if the dress is tight.\n"
+    "  - Tight covering bodycon / cocktail / ribbed mini with a square, scoop, or modest "
+    "V neckline is 2. Cleavage that exists only because she is busty, not because the "
+    "neckline plunges, is not a T3 reveal. Tightness is not a reveal.\n"
+    "  - Counter-example that MUST be 2: woman in a tight covering mini, square neckline, "
+    "holding a YouTube plaque / award / product, standing against a wall. Tight + some "
+    "cleavage + a side slit is not 3.\n"
+    "  - Positive T3: voluptuous woman in a painted-on mini looking back so bust and ass "
+    "are the shot; or a curvy woman in a crop / sports-bra top with a clearly bare "
+    "midriff, body as the subject.\n"
     "  - Bare arms, bare shoulders, collarbone, sleeveless, off-shoulder with covered "
     "midriff and normal neckline = 2, not 3.\n"
-    "  - Escalate 2→3 whenever a listed reveal in step (3) is visible. "
-    "If unsure between 2 and 3, choose 3.\n"
-    "  - Crop top that clearly shows the stomach = 3. A short top that still covers "
-    "the waistband = 2.\n"
-    "  - Short shorts / hot pants / tight shortalls showing upper thigh = 3, even with "
-    "an ordinary top.\n"
-    "  - Do NOT skip tier 4. The scale has five steps; using only 0–3 is wrong.\n"
+    "  - Crop top = 3 only when the stomach is clearly visible AND the figure is curvy "
+    "AND the body is the subject. A sliver of skin between a short top and high-waisted "
+    "bottoms = 2.\n"
+    "  - Short shorts / hot pants showing upper thigh on a curvy figure, body as the "
+    "subject = 3. The same shorts on a slim figure, or with the body cropped out = 2.\n"
+    "  - If unsure between 2 and 3 on a covering dress, award shot, or normal neckline, "
+    "choose 2. Do not inflate T3 on tightness alone.\n"
+    "  - Crop top with a clearly bare midriff on a curvy body that is the subject is "
+    "ALWAYS 3, never 2.\n"
+    "  - Do NOT skip tier 4. The scale has five steps; using only 0–3 is wrong. A "
+    "brief_reason of 'bikini set' or 'lingerie' with exposure_tier 2 is a contradiction — "
+    "the tier must be 4.\n"
+    '  "figure": one of slim, athletic, average, curvy, voluptuous — body shape of the '
+    "main woman. curvy = readable bust and/or hips; voluptuous = very full bust and/or "
+    "hips/ass. When unsure between average and curvy, choose average.\n"
+    '  "body_focus": boolean — true if the photo is shot to display her body (full or '
+    "three-quarter figure, bust-focused, ass-focused, suggestive pose). false for face "
+    "portraits, product/award/trophy shots, interviews, group events, or an incidental outfit.\n"
+    '  "is_graphic": boolean — event flyer, poster, promo layout, heavy typography / date '
+    "/ RSVP over the photo. true even if a woman in a bikini is on the flyer.\n"
+    '  "undress_class": boolean — bikini, swimsuit, lingerie, bralette/bra as the only top, '
+    "sheer over bare skin, near-nude. Sports bra is false.\n"
+    '  "bare_midriff": boolean — stomach skin clearly visible between top and bottoms\n'
     '  "figure_visible": boolean — bust or body shape is clearly discernible\n'
     '  "confidence": number 0.0-1.0 — lower when cropped, dark, or garment class is unclear\n'
     '  "brief_reason": short phrase naming the garment class (e.g. "bikini set", '
@@ -234,12 +283,22 @@ def reel_sheet_prompt(n_panels: int) -> str:
         '  "peak_panel": panel number with the highest exposure_tier\n'
         '  "reel_exposure": the highest exposure_tier among panels containing a woman\n'
         '  "outfit_changes": boolean — the outfit differs between early and late panels\n'
+        '  "figure": one of slim, athletic, average, curvy, voluptuous — body shape in '
+        "the peak panel. When unsure between average and curvy, choose average.\n"
+        '  "body_focus": boolean — true if the peak panel is shot to display her body. '
+        "false for face / product / interview / incidental-outfit panels.\n"
+        '  "is_graphic": boolean — true if the peak panel is a flyer/poster/promo layout\n'
+        '  "undress_class": boolean — bikini/swimsuit/lingerie/bralette-as-only-top in the peak panel\n'
+        '  "bare_midriff": boolean — stomach skin clearly visible in the peak panel\n'
         '  "figure_visible": boolean — bust or body shape is discernible in the peak panel\n'
         '  "confidence": number 0.0-1.0\n'
         '  "brief_reason": short phrase naming the peak panel and its outfit\n'
+        "T3 is sexy daywear a horny viewer would keep: curvy/voluptuous figure AND body "
+        "as the subject AND a real reveal. Tight covering dresses, award/product shots, "
+        "and non-curvy figures are 2, not 3. Bikini/lingerie in any panel is 4, never 2. "
         "Judge only clothing and body. Ignore captions, stickers, progress bars and watermarks. "
         "If a panel is ambiguous choose the LOWER tier and report confidence below 0.5. "
-        "Do not inflate tiers."
+        "Do not inflate covering-dress tiers."
     )
 
 
@@ -253,6 +312,11 @@ FRAME_SCHEMA: Dict[str, Any] = {
     "properties": {
         "has_woman": {"type": "boolean"},
         "exposure_tier": {"type": "integer", "minimum": 0, "maximum": 4},
+        "figure": {"type": "string"},
+        "body_focus": {"type": "boolean"},
+        "is_graphic": {"type": "boolean"},
+        "undress_class": {"type": "boolean"},
+        "bare_midriff": {"type": "boolean"},
         "figure_visible": {"type": "boolean"},
         "confidence": {"type": "number"},
         # Capped: an unbounded reason can run past num_predict and truncate the
@@ -280,6 +344,11 @@ SHEET_SCHEMA: Dict[str, Any] = {
         "peak_panel": {"type": "integer"},
         "reel_exposure": {"type": "integer", "minimum": 0, "maximum": 4},
         "outfit_changes": {"type": "boolean"},
+        "figure": {"type": "string"},
+        "body_focus": {"type": "boolean"},
+        "is_graphic": {"type": "boolean"},
+        "undress_class": {"type": "boolean"},
+        "bare_midriff": {"type": "boolean"},
         "figure_visible": {"type": "boolean"},
         "confidence": {"type": "number"},
         "brief_reason": {"type": "string", "maxLength": 120},
@@ -324,6 +393,11 @@ class MediaVerdict:
     path: str
     has_woman: bool = False
     figure_visible: bool = False
+    figure: str = ""  # slim | athletic | average | curvy | voluptuous
+    body_focus: Optional[bool] = None  # None = not reported (fail-open)
+    is_graphic: Optional[bool] = None
+    undress_class: Optional[bool] = None
+    bare_midriff: Optional[bool] = None
     exposure_tier: int = -1  # 0-4; -1 means the attempt failed
     confidence: float = 0.0
     brief_reason: str = ""
@@ -482,6 +556,141 @@ def _coerce_confidence(value: Any) -> float:
         return 0.0
 
 
+_FIGURE_CANON = {
+    "slim": "slim",
+    "skinny": "slim",
+    "thin": "slim",
+    "petite": "slim",
+    "athletic": "athletic",
+    "fit": "athletic",
+    "average": "average",
+    "normal": "average",
+    "curvy": "curvy",
+    "hourglass": "curvy",
+    "busty": "curvy",
+    "voluptuous": "voluptuous",
+    "thick": "voluptuous",
+    "thicc": "voluptuous",
+}
+_T3_FIGURE_OK = frozenset({"curvy", "voluptuous"})
+
+
+def _coerce_figure(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    return _FIGURE_CANON.get(raw, raw if raw in _FIGURE_CANON.values() else "")
+
+
+def _coerce_optional_bool(value: Any) -> Optional[bool]:
+    """None unless the model actually answered. ``bool("false")`` is True."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in {"true", "1", "yes"}:
+            return True
+        if low in {"false", "0", "no"}:
+            return False
+        return None
+    return None
+
+
+def apply_t3_keep_gates(verdict: MediaVerdict) -> MediaVerdict:
+    """Cap T3 when figure / body-focus say it is not a horny-keep.
+
+    Fail-open: missing measurements do not demote. T4 is never capped — undress
+    class stays the measurement; body type is a T3 (daywear) gate only.
+    """
+    if not verdict.ok or int(verdict.exposure_tier) != 3:
+        return verdict
+    why: List[str] = []
+    figure = _coerce_figure(verdict.figure)
+    if figure and figure not in _T3_FIGURE_OK:
+        why.append("not curvy")
+    if verdict.body_focus is False:
+        why.append("body not the subject")
+    if not why:
+        return verdict
+    verdict.exposure_tier = 2
+    note = " [capped 3→2: " + ", ".join(why) + "]"
+    verdict.brief_reason = (verdict.brief_reason + note)[:160]
+    return verdict
+
+
+_UNDRESS_REASON_TOKENS = (
+    "bikini",
+    "microbikini",
+    "monokini",
+    "swimsuit",
+    "swimwear",
+    "lingerie",
+    "bralette",
+    "bra+panties",
+    "bra + panties",
+    "near-nude",
+    "near nude",
+)
+_CROP_REASON_TOKENS = ("crop", "midriff", "sports bra", "hot pants", "short shorts")
+
+
+def _reason_has_token(reason: str, tokens: tuple[str, ...]) -> bool:
+    blob = (reason or "").lower()
+    return any(tok in blob for tok in tokens)
+
+
+def apply_keep_policy(verdict: MediaVerdict) -> MediaVerdict:
+    """Reconcile the model's tier with the measurements it also reported.
+
+    The v8 prompt still emits contradictions (``brief_reason: bikini set`` with
+    ``exposure_tier: 2``) because "choose 2" leaks onto undress-class garments.
+    Policy lives here so a wording tweak cannot silently drop a bikini to 2.
+    Graphic/flyer wins over undress — a bikini on an event poster is still T0.
+    """
+    if not verdict.ok:
+        return verdict
+    if not verdict.has_woman or verdict.is_graphic is True:
+        verdict.exposure_tier = 0
+        return verdict
+    if int(verdict.exposure_tier) == 0:
+        return verdict
+    if verdict.undress_class is True or _reason_has_token(
+        verdict.brief_reason, _UNDRESS_REASON_TOKENS
+    ):
+        verdict.exposure_tier = 4
+        return verdict
+    if (
+        int(verdict.exposure_tier) == 2
+        and _coerce_figure(verdict.figure) in _T3_FIGURE_OK
+        and verdict.body_focus is True
+        and (
+            verdict.bare_midriff is True
+            or _reason_has_token(verdict.brief_reason, _CROP_REASON_TOKENS)
+        )
+    ):
+        verdict.exposure_tier = 3
+        note = " [floored 2→3: crop + curvy]"
+        verdict.brief_reason = (verdict.brief_reason + note)[:160]
+    return apply_t3_keep_gates(verdict)
+
+
+def _attach_keep_signals(verdict: MediaVerdict, data: Dict[str, Any]) -> None:
+    """Copy keep-policy measurements off the model JSON, then apply policy."""
+    if "figure" in data:
+        verdict.figure = _coerce_figure(data.get("figure"))
+    if "body_focus" in data:
+        verdict.body_focus = _coerce_optional_bool(data.get("body_focus"))
+    if "is_graphic" in data:
+        verdict.is_graphic = _coerce_optional_bool(data.get("is_graphic"))
+    if "undress_class" in data:
+        verdict.undress_class = _coerce_optional_bool(data.get("undress_class"))
+    if "bare_midriff" in data:
+        verdict.bare_midriff = _coerce_optional_bool(data.get("bare_midriff"))
+    apply_keep_policy(verdict)
+
+
 def _verdict_from_tier_data(
     path: str,
     data: Optional[Dict[str, Any]],
@@ -510,6 +719,7 @@ def _verdict_from_tier_data(
     verdict.brief_reason = str(data.get("brief_reason") or "")[:160]
     verdict.figure_visible = bool(data.get("figure_visible"))
     verdict.ok = True
+    _attach_keep_signals(verdict, data)
     return verdict
 
 
@@ -744,6 +954,7 @@ def _classify_reel_sheet(
             source="video_sheet",
             prompt_version=CLASSIFY_SHEET_VERSION,
         )
+        _attach_keep_signals(verdict, data)
 
         # Cascade: re-read the peak frame at full resolution when it matters.
         if (
@@ -771,6 +982,12 @@ def _classify_reel_sheet(
                     verdict.exposure_tier = confirm.exposure_tier
                     verdict.confidence = confirm.confidence
                     verdict.figure_visible = confirm.figure_visible
+                    verdict.figure = confirm.figure or verdict.figure
+                    verdict.body_focus = (
+                        confirm.body_focus
+                        if confirm.body_focus is not None
+                        else verdict.body_focus
+                    )
                     verdict.brief_reason = confirm.brief_reason or verdict.brief_reason
                 elif confirm.ok and not confirm.has_woman and verdict.has_woman:
                     evidence["confirm_lost_subject"] = True
@@ -1081,6 +1298,11 @@ def persist_verdict(
                 "reject": verdict.is_reject(),
                 "has_woman": bool(verdict.has_woman),
                 "figure_visible": bool(verdict.figure_visible),
+                "figure": verdict.figure or None,
+                "body_focus": verdict.body_focus,
+                "is_graphic": verdict.is_graphic,
+                "undress_class": verdict.undress_class,
+                "bare_midriff": verdict.bare_midriff,
                 "confidence": verdict.confidence,
                 "brief_reason": verdict.brief_reason,
                 "source": verdict.source,

@@ -258,26 +258,6 @@ def _label_insights() -> Dict[str, Any]:
     }
 
 
-def _facet_insights() -> Dict[str, Any]:
-    """C5 chip distributions. Each facet's denominator is populated values only."""
-    from promptstudio.config import DISTRIBUTION_MIN_CLASSIFIED
-    from promptstudio.storage.db import FACET_KEYS, ArchiveIndex
-
-    index = ArchiveIndex.get()
-    counts = index.facet_counts()
-    out: Dict[str, Any] = {}
-    for facet in FACET_KEYS:
-        buckets = {row["value"]: int(row["count"]) for row in counts.get(facet) or []}
-        out[facet] = {
-            "n": sum(buckets.values()),
-            "values": counts.get(facet) or [],
-            "saturation": saturation_report(
-                buckets, what=f"facet {facet}", min_n=DISTRIBUTION_MIN_CLASSIFIED
-            ),
-        }
-    return out
-
-
 def _taste_insights() -> Dict[str, Any]:
     """B2 p_keep buckets over scored photos only."""
     from promptstudio.config import DISTRIBUTION_MIN_RATED
@@ -322,11 +302,6 @@ def compute_insights() -> Dict[str, Any]:
         log.exception("label insights failed: %s", e)
         labels = {"labelled": 0, "error": str(e)}
     try:
-        facets = _facet_insights()
-    except Exception as e:
-        log.exception("facet insights failed: %s", e)
-        facets = {"error": str(e)}
-    try:
         taste = _taste_insights()
     except Exception as e:
         log.exception("taste insights failed: %s", e)
@@ -337,6 +312,5 @@ def compute_insights() -> Dict[str, Any]:
         "generations": generations,
         "classify": classify,
         "labels": labels,
-        "facets": facets,
         "taste": taste,
     }
