@@ -249,14 +249,28 @@ def resolve_gallery_dl_cmd(configured: str | None = None) -> list[str]:
     """Argv prefix that actually launches gallery-dl.
 
     A custom `GALLERY_DL_BIN` (or a test fake) is used as-is. The default
-    name `gallery-dl` is resolved in order: PATH, this interpreter's
-    Scripts dir, the Windows user Scripts dir, then `python -m gallery_dl`
-    if the package is importable here.
+    name `gallery-dl` is resolved in order: on Windows, same-interpreter
+    `python -m gallery_dl` (the pip `gallery-dl.exe` shim dies with
+    STATUS_DLL_INIT_FAILED / 0xC0000142 when spawned from a background
+    thread); then PATH, this interpreter's Scripts dir, the Windows user
+    Scripts dir, then `python -m gallery_dl` if the package is importable.
     """
     raw = (configured if configured is not None else GALLERY_DL_BIN) or "gallery-dl"
     raw = str(raw).strip() or "gallery-dl"
     if raw not in ("gallery-dl", "gallery_dl"):
         return [os.path.expanduser(raw)]
+
+    # Prefer the module form on Windows before any .exe. The distlib/pip
+    # console launcher is a separate process that has to init a console
+    # and load pythonXY.dll; from a scrape-lane thread that fails as
+    # 0xC0000142, which we used to misread as "no extractor".
+    if os.name == "nt":
+        try:
+            import gallery_dl
+        except ImportError:
+            pass
+        else:
+            return [sys.executable, "-m", "gallery_dl"]
 
     found = shutil.which("gallery-dl") or shutil.which("gallery-dl.exe")
     if found:
@@ -279,6 +293,8 @@ def resolve_gallery_dl_cmd(configured: str | None = None) -> list[str]:
     except ImportError:
         return ["gallery-dl"]
     return [sys.executable, "-m", "gallery_dl"]
+
+
 GALLERY_DL_TIMEOUT_SEC = int(os.environ.get("GALLERY_DL_TIMEOUT", str(2 * 60 * 60)))
 # Optional cookie files (Netscape format). X needs one; Reddit does not.
 GALLERY_DL_COOKIES_X = os.path.expanduser(os.environ.get("X_COOKIES_FILE", ""))

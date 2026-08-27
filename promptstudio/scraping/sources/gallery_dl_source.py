@@ -111,6 +111,49 @@ _EXIT_INPUT = 32      # InputError — bad config, filter or format string (our 
 # NoExtractorError, i.e. we built a URL gallery-dl has no extractor for.
 _EXIT_NO_EXTRACTOR = 64
 _EXIT_INTERRUPT = 128
+# gallery-dl's mask fits in 8 bits. Windows NTSTATUS (e.g. 0xC0000142 =
+# STATUS_DLL_INIT_FAILED) is a 32-bit error whose bit 6 happens to be set,
+# so `code & 64` false-positives it as "no extractor".
+_WINDOWS_STATUS_NAMES = {
+    0xC0000005: "STATUS_ACCESS_VIOLATION",
+    0xC0000135: "STATUS_DLL_NOT_FOUND",
+    0xC000013A: "STATUS_CONTROL_C_EXIT",
+    0xC0000142: "STATUS_DLL_INIT_FAILED",
+}
+
+
+def _unsigned_exit(code: int) -> int:
+    return int(code) & 0xFFFFFFFF
+
+
+def _is_os_crash(code: int) -> bool:
+    """True when `code` is not a gallery-dl bitmask — usually a Windows crash."""
+    return _unsigned_exit(code) > 255
+
+
+def _popen_kwargs() -> dict:
+    """subprocess.Popen kwargs for a gallery-dl child.
+
+    On Windows the pip `gallery-dl.exe` shim (and python.exe itself) are
+    console-subsystem. Spawned from a background thread they try to attach
+    to a console and die with STATUS_DLL_INIT_FAILED (0xC0000142) before
+    printing anything. CREATE_NO_WINDOW skips that. stdout is still piped.
+    """
+    kw: dict = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+        "text": True,
+        "bufsize": 1,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    if os.name == "nt":
+        kw["creationflags"] = int(getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000))
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        kw["startupinfo"] = startupinfo
+    return kw
 
 # NOTE: `--abort N` raises StopExtraction, a ControlException with code 0, so a
 # clean catch-up stop exits 0 and is indistinguishable from a normal finish by
@@ -406,15 +449,17 @@ class GalleryDlSource:
         result: SyncResult,
     ) -> Tuple[int, List[str]]:
         """Run gallery-dl, streaming output and honouring cancel. Returns (code, lines)."""
-        proc = subprocess.Popen(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            encoding="utf-8",
-            errors="replace",
-        )
+        try:
+            proc = subprocess.Popen(argv, **_popen_kwargs())
+        except FileNotFoundError:
+            raise
+        except OSError as exc:
+            ctx.log(f"gallery-dl failed to start: {exc}")
+            # >255 so _classify_outcome treats it as an OS crash, not a
+            # gallery-dl bitmask. 0xC0000142 is the code the live Windows
+            # failures actually returned.
+            crash = 0xC0000142 if os.name == "nt" else 0x100
+            return crash, [f"gallery-dl failed to start: {exc}"]
         lines: List[str] = []
         out_q: "queue.Queue[Optional[str]]" = queue.Queue()
 
@@ -529,6 +574,18 @@ class GalleryDlSource:
             result.stop_reason = "abort"
             result.errors += 1
             result.messages.append(reason)
+
+        # Windows NTSTATUS (0xC0000142 etc.) is not a gallery-dl bitmask.
+        # Bit 6 of STATUS_DLL_INIT_FAILED is set, so `code & 64` used to
+        # report "no extractor" and the queue burned every remaining job.
+        if _is_os_crash(code):
+            unsigned = _unsigned_exit(code)
+            name = _WINDOWS_STATUS_NAMES.get(unsigned, "process crashed")
+            hard_abort(
+                f"gallery-dl process crashed (Windows {name} / {unsigned:#010x}) "
+                "— the child never started, not a missing extractor"
+            )
+            return
 
         # Auth and challenge failures must stop the queue, not just this job:
         # every following job would fail identically, and hammering a

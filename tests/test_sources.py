@@ -22,7 +22,10 @@ from promptstudio.scraping.sources.gallery_dl_source import (
     InstagramGalleryDlSource,
     RedditSource,
     XSource,
+    _is_os_crash,
     _parse_dt,
+    _popen_kwargs,
+    _unsigned_exit,
 )
 from promptstudio.scraping.sources.instagram_source import InstagramSource
 from promptstudio.storage.metadata import build_metadata_from_normalized
@@ -397,6 +400,31 @@ def test_unsupported_url_is_reported_as_our_bug():
     assert "no extractor" in " ".join(result.messages).lower()
 
 
+def test_windows_dll_init_failure_is_not_no_extractor():
+    """0xC0000142 has bit 6 set, so `code & 64` used to say 'no extractor'.
+
+    Every Instagram job then failed with that message and the queue kept
+    draining. A process crash is lane-wide — pause, don't burn the rest.
+    """
+    unsigned = 0xC0000142
+    signed = unsigned - (1 << 32)  # Python/Windows sometimes reports this
+    assert unsigned == 3221225794
+    assert _is_os_crash(unsigned)
+    assert _is_os_crash(signed)
+    assert _unsigned_exit(signed) == unsigned
+    assert not _is_os_crash(64)
+    assert not _is_os_crash(4 | 16 | 64)
+
+    for code in (unsigned, signed):
+        result = _classify(code)
+        blob = " ".join(result.messages).lower()
+        assert result.aborted is True
+        assert result.stop_reason == "abort"
+        assert "no extractor" not in blob
+        assert "status_dll_init_failed" in blob
+        assert "0xc0000142" in blob
+
+
 def test_extraction_error_refined_to_not_found():
     result = _classify(4, ["[twitter][error] 404 Not Found"])
     assert result.stop_reason == "not_found"
@@ -571,6 +599,25 @@ def test_resolve_gallery_dl_cmd_default_is_runnable():
     assert cmd[0] != "gallery-dl" or os.path.isfile(cmd[0])
     joined = " ".join(cmd)
     assert "gallery-dl" in joined or "gallery_dl" in joined
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows pip-shim workaround")
+def test_resolve_gallery_dl_cmd_windows_prefers_module():
+    """gallery-dl.exe from a scrape thread dies with 0xC0000142; -m does not."""
+    pytest.importorskip("gallery_dl")
+    cmd = resolve_gallery_dl_cmd("gallery-dl")
+    assert cmd[-2:] == ["-m", "gallery_dl"]
+    assert os.path.isfile(cmd[0])
+
+
+def test_popen_kwargs_hide_console_on_windows():
+    kw = _popen_kwargs()
+    assert kw["stdout"] is not None
+    if os.name == "nt":
+        assert kw["creationflags"] == 0x08000000
+        assert kw["startupinfo"].wShowWindow == 0
+    else:
+        assert "creationflags" not in kw
 
 
 def test_resolve_gallery_dl_cmd_custom_name_is_literal():
