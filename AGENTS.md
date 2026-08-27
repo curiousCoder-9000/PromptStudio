@@ -61,6 +61,7 @@ These are the single source of truth — other docs point here rather than resta
 | Vision / prompts | `promptstudio/prompts/engine.py` |
 | Keep/reject classify | `promptstudio/scraping/media_classifier.py` · job in `classify_job.py` |
 | Gallery index | `promptstudio/storage/db.py` |
+| Gallery feels slow | [`docs/review_gallery_performance.md`](docs/review_gallery_performance.md) — measure first; do not flip FTS5 |
 | Background job contention | `promptstudio/jobs.py` |
 | Why a job did that | `<archive>/_journal/`, `GET /api/journal` |
 | Duplicate detection | `promptstudio/storage/dedupe.py` |
@@ -94,6 +95,7 @@ Load only what the task needs.
 | [docs/multi_source_scraping.md](docs/multi_source_scraping.md) | X / Reddit via gallery-dl |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Ollama, ports, cache wipe, known bugs |
 | [docs/review_backend_architecture.md](docs/review_backend_architecture.md) | Backend decisions + measurements |
+| [docs/review_gallery_performance.md](docs/review_gallery_performance.md) | Live 61k-archive gallery latency — SQL, thumbs, HTTP/1.0; do this before FTS/windowing |
 | [docs/product_review.md](docs/product_review.md) | Product themes, accepted backlog |
 | [docs/review_ui_product.md](docs/review_ui_product.md) | UI/UX gaps U1–U11 + Stage-1 fix log |
 | [docs/backlog_features.md](docs/backlog_features.md) · [docs/backlog_engineering.md](docs/backlog_engineering.md) | F1–F8 · E1–E5, picked up directly |
@@ -116,3 +118,4 @@ the whole `scripts/` tree for non-scrape work.
 | Monolithic `server.py` | Thin shim → `handler.py` |
 | `opencv-python` only | `opencv-python-headless` (+ optional Pillow) |
 | Prompts in `prompts_cache.json` | `prompts` table in `archive.db`; JSON is a stale rollback snapshot |
+| Gallery is fine at 4.4k with `content-visibility` | Live archive is **61k**; SQL+thumbs dominate first paint. [`docs/review_gallery_performance.md`](docs/review_gallery_performance.md) |

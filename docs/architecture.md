@@ -31,7 +31,7 @@ Entrypoints: `server.py`, `prompt_engine.py` (shims). Logic: `promptstudio/`.
 
 1. Server start → `ArchiveStore.ensure_ready()` indexes disk into SQLite (unless already current; force with `PROMPTSTUDIO_REBUILD_INDEX=1`).
 2. `GET /api/photos` → SQL filter/sort/page → annotate prompt flags + favorites → JSON (no `full_path`).
-3. Grid uses `/media/thumb/...` (Pillow/OpenCV JPEG under `_thumbs/`); lightbox uses `/media/...`.
+3. Grid uses `/media/thumb/...` (Pillow/OpenCV JPEG under `_thumbs/`, currently generated **on GET**); lightbox uses `/media/...`. First-page cost at the live 61k archive: [`review_gallery_performance.md`](review_gallery_performance.md).
 4. `GET /api/prompt?path=` → cache hit or Ollama two-stage pipeline → write cache → return exports + tags.
 
 ## Prompt pipeline
@@ -107,5 +107,6 @@ the next run, so history has to live somewhere else.
   (`PROMPTSTUDIO_FTS_SEARCH=1` to flip).
 - Threaded server keeps UI responsive during sync/batch/Comfy.
 - Thumbnails and pagination (`offset`/`limit`, max `PROMPTSTUDIO_PHOTO_PAGE` default 300).
+- **Scale as of 2026-08-27:** the live archive is **61k** photos, not the 4.4k the 2026-08-09 reviews measured. `ORDER BY IFNULL(added_at, mtime)` cannot use `idx_photos_added`; thumbs are created on `GET /media/thumb/` (20% coverage). Numbers and the fix order: [`review_gallery_performance.md`](review_gallery_performance.md). Do not flip FTS5 or resurrect incremental rebuild — both already lost on measurement.
 
 See [roadmap.md](roadmap.md) for completed phases; [api.md](api.md) for contracts.

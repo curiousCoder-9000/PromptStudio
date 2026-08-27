@@ -265,6 +265,7 @@ Idempotent: skip by `post_id`/`shortcode` in DB + meta. Catch-up stop after `IG_
 | Want to… | Touch |
 |----------|--------|
 | Add/change API route | `promptstudio/server/handler.py` (+ `app.js` if UI) |
+| Gallery feels slow | [`review_gallery_performance.md`](review_gallery_performance.md) — live 61k numbers; do not flip FTS5 |
 | Change env/paths/defaults | `promptstudio/config.py` |
 | Vision / rewrite / exports | `promptstudio/prompts/engine.py` |
 | Mode E / Comfy prompt shaping | `promptstudio/prompts/comfy_mode.py` |
@@ -304,7 +305,8 @@ section drifted four rules behind.
 | [instagram_downloader.md](instagram_downloader.md) | Sync pacing, queue, resume |
 | [multi_source_scraping.md](multi_source_scraping.md) | X / Reddit via gallery-dl |
 | [troubleshooting.md](troubleshooting.md) | Ollama, ports, cache wipe, known bugs |
-| [review_backend_architecture.md](review_backend_architecture.md) | Backend decisions + measurements |
+| [review_backend_architecture.md](review_backend_architecture.md) | Backend decisions + measurements (synthetic 4.4k / 40k) |
+| [review_gallery_performance.md](review_gallery_performance.md) | Live 61k gallery latency — SQL EXPLAIN, thumbs, HTTP/1.0; implement before FTS or windowing |
 | [roadmap.md](roadmap.md) | Phase history / future |
 | [product_review.md](product_review.md) | Product themes A/B/C/E, accepted backlog + sequence |
 | [review_ui_product.md](review_ui_product.md) | UI/UX gaps (U1–U11), the loopback-bind correction, Stage-1 fix log |
