@@ -182,9 +182,11 @@ const elements = {
     duplicatesModal: document.getElementById('duplicatesModal'),
     duplicatesModalOverlay: document.getElementById('duplicatesModalOverlay'),
     duplicatesBody: document.getElementById('duplicatesBody'),
+    duplicatesSummary: document.getElementById('duplicatesSummary'),
     closeDuplicatesBtn: document.getElementById('closeDuplicatesBtn'),
     doneDuplicatesBtn: document.getElementById('doneDuplicatesBtn'),
     duplicatesSweepBtn: document.getElementById('duplicatesSweepBtn'),
+    duplicatesSweepLabel: document.getElementById('duplicatesSweepLabel'),
     activityBtn: document.getElementById('activityBtn'),
     activityModal: document.getElementById('activityModal'),
     activityModalOverlay: document.getElementById('activityModalOverlay'),
@@ -5246,6 +5248,7 @@ async function loadDuplicates() {
     if (!elements.duplicatesBody) return;
     elements.duplicatesBody.innerHTML = '<div class="insights-loading">Loading…</div>';
     state.duplicatesSelected = new Set();
+    updateDuplicatesChrome(0);
     try {
         const res = await fetch('/api/duplicates');
         const data = await res.json();
@@ -5257,50 +5260,233 @@ async function loadDuplicates() {
 
 function renderDuplicateGroups(groups) {
     if (!elements.duplicatesBody) return;
+    state.duplicatesSelected = new Set();
     if (!groups.length) {
-        elements.duplicatesBody.innerHTML = '<div class="insights-muted">No near-duplicate groups. Train For You to add embedding matches.</div>';
+        const empty = document.createElement('div');
+        empty.className = 'insights-muted dup-empty';
+        empty.textContent = 'No near-duplicate groups. Train For You to add embedding matches.';
+        elements.duplicatesBody.replaceChildren(empty);
+        updateDuplicatesChrome(0);
         return;
     }
     const host = document.createElement('div');
     host.className = 'dup-groups';
-    groups.forEach((group, gi) => {
+    groups.forEach((group) => {
+        const members = group.members || [];
         const section = document.createElement('section');
         section.className = 'dup-group';
+
         const head = document.createElement('div');
         head.className = 'dup-group-head';
-        head.textContent = `${group.kind === 'embed' ? 'Similar' : 'Near-dup'} · ${group.size} copies`;
+        const titles = document.createElement('div');
+        titles.className = 'dup-group-titles';
+        const title = document.createElement('span');
+        title.className = 'dup-group-title';
+        title.textContent = `${group.kind === 'embed' ? 'Similar' : 'Near-dup'} · ${members.length} copies`;
+        const hint = document.createElement('span');
+        hint.className = 'dup-group-hint';
+        hint.textContent = 'Click a photo to enlarge';
+        titles.appendChild(title);
+        titles.appendChild(hint);
+        const selectBtn = document.createElement('button');
+        selectBtn.type = 'button';
+        selectBtn.className = 'btn btn-secondary btn-sm dup-select-btn';
+        selectBtn.addEventListener('click', () => toggleDupGroupSelection(section));
+        head.appendChild(titles);
+        head.appendChild(selectBtn);
         section.appendChild(head);
+
         const grid = document.createElement('div');
         grid.className = 'dup-members';
-        (group.members || []).forEach((m) => {
-            const card = document.createElement('label');
-            card.className = 'dup-card' + (m.keeper ? ' is-keeper' : '');
+        members.forEach((m) => {
+            const card = document.createElement('article');
+            card.className = 'dup-card'
+                + (m.keeper ? ' is-keeper' : '')
+                + (m.favorite ? ' is-favorite' : '');
+
+            const preview = document.createElement('button');
+            preview.type = 'button';
+            preview.className = 'dup-preview';
+            preview.title = 'View full resolution';
+            preview.setAttribute(
+                'aria-label',
+                `View ${m.filename || m.rel_path || 'copy'} full resolution`
+            );
             const img = document.createElement('img');
             img.src = m.thumb_url || m.url || '';
-            img.alt = m.rel_path;
+            img.alt = m.rel_path || '';
             img.loading = 'lazy';
+            preview.appendChild(img);
+            preview.addEventListener('click', () => openDuplicatePreview(m));
+
             const check = document.createElement('input');
             check.type = 'checkbox';
-            check.checked = Boolean(m.preselected);
+            check.checked = false;
             check.disabled = Boolean(m.favorite);
-            if (check.checked) state.duplicatesSelected.add(m.rel_path);
+            check.dataset.relPath = m.rel_path || '';
+            check.setAttribute(
+                'aria-label',
+                m.favorite
+                    ? 'Favourite — cannot trash'
+                    : `Trash ${m.filename || m.rel_path || 'this copy'}`
+            );
             check.addEventListener('change', () => {
-                if (check.checked) state.duplicatesSelected.add(m.rel_path);
-                else state.duplicatesSelected.delete(m.rel_path);
+                const rel = check.dataset.relPath;
+                if (check.checked) state.duplicatesSelected.add(rel);
+                else state.duplicatesSelected.delete(rel);
+                card.classList.toggle('is-queued', check.checked);
+                updateDuplicatesChrome();
             });
-            const cap = document.createElement('div');
-            cap.className = 'dup-cap';
-            cap.textContent = (m.favorite ? '★ ' : '') + (m.keeper ? 'keep · ' : '') + (m.rel_path || '');
-            card.appendChild(img);
+
+            const meta = document.createElement('div');
+            meta.className = 'dup-meta';
+            const flags = document.createElement('div');
+            flags.className = 'dup-flags';
+            if (m.keeper) {
+                const badge = document.createElement('span');
+                badge.className = 'dup-badge keep';
+                badge.textContent = 'Keep';
+                flags.appendChild(badge);
+            }
+            if (m.favorite) {
+                const badge = document.createElement('span');
+                badge.className = 'dup-badge fav';
+                badge.textContent = 'Favourite';
+                flags.appendChild(badge);
+            }
+            const size = document.createElement('span');
+            size.className = 'dup-size';
+            size.textContent = formatBytes(m.file_size);
+            flags.appendChild(size);
+
+            const path = document.createElement('div');
+            path.className = 'dup-path';
+            const creator = String(m.creator || '').replace(/^@/, '');
+            path.textContent = creator
+                ? `@${creator} · ${m.filename || m.rel_path || ''}`
+                : (m.filename || m.rel_path || '');
+
+            meta.appendChild(flags);
+            meta.appendChild(path);
+            card.appendChild(preview);
             card.appendChild(check);
-            card.appendChild(cap);
+            card.appendChild(meta);
             grid.appendChild(card);
         });
         section.appendChild(grid);
         host.appendChild(section);
     });
-    elements.duplicatesBody.innerHTML = '';
-    elements.duplicatesBody.appendChild(host);
+    elements.duplicatesBody.replaceChildren(host);
+    updateDuplicatesChrome(groups.length);
+}
+
+function dupQueueableChecks(section) {
+    return Array.from(
+        section.querySelectorAll('.dup-card:not(.is-keeper) input[type="checkbox"]:not(:disabled)')
+    );
+}
+
+function toggleDupGroupSelection(section) {
+    const checks = dupQueueableChecks(section);
+    if (!checks.length) return;
+    const on = !checks.every((c) => c.checked);
+    checks.forEach((check) => {
+        check.checked = on;
+        const card = check.closest('.dup-card');
+        if (card) card.classList.toggle('is-queued', on);
+        const rel = check.dataset.relPath;
+        if (!rel) return;
+        if (on) state.duplicatesSelected.add(rel);
+        else state.duplicatesSelected.delete(rel);
+    });
+    updateDuplicatesChrome();
+}
+
+function syncDupGroupButton(section) {
+    const btn = section.querySelector('.dup-select-btn');
+    if (!btn) return;
+    const checks = dupQueueableChecks(section);
+    if (!checks.length) {
+        btn.disabled = true;
+        btn.textContent = 'Nothing to select';
+        btn.setAttribute('aria-pressed', 'false');
+        btn.title = 'Keeper and favourites cannot be queued';
+        return;
+    }
+    const allOn = checks.every((c) => c.checked);
+    btn.disabled = false;
+    btn.textContent = allOn
+        ? 'Clear selection'
+        : `Select ${checks.length} cop${checks.length === 1 ? 'y' : 'ies'}`;
+    btn.setAttribute('aria-pressed', allOn ? 'true' : 'false');
+    btn.title = allOn
+        ? 'Deselect extra copies in this group'
+        : 'Select extra copies in this group (keeper and favourites stay)';
+}
+
+function updateDuplicatesChrome(groupCount) {
+    const n = state.duplicatesSelected.size;
+    if (elements.duplicatesSweepLabel) {
+        elements.duplicatesSweepLabel.textContent = n
+            ? `Trash ${n} cop${n === 1 ? 'y' : 'ies'}`
+            : 'Trash selected copies';
+    }
+    if (elements.duplicatesSweepBtn) {
+        elements.duplicatesSweepBtn.disabled = n === 0;
+    }
+    if (elements.duplicatesBody) {
+        elements.duplicatesBody.querySelectorAll('.dup-group').forEach(syncDupGroupButton);
+    }
+    if (!elements.duplicatesSummary) return;
+    const groups = typeof groupCount === 'number'
+        ? groupCount
+        : (elements.duplicatesBody
+            ? elements.duplicatesBody.querySelectorAll('.dup-group').length
+            : 0);
+    if (!groups) {
+        elements.duplicatesSummary.textContent =
+            'Review a group, then Select copies. Favourites stay.';
+        return;
+    }
+    elements.duplicatesSummary.textContent = n
+        ? `${groups} group${groups === 1 ? '' : 's'} · ${n} queued. Trash empties the ones you have reviewed.`
+        : `${groups} group${groups === 1 ? '' : 's'}. Select copies on a row after you review it.`;
+}
+
+function openDuplicatePreview(member) {
+    if (!member) return;
+    const name = member.filename || member.rel_path || '';
+    const src = isVideoFilename(name)
+        ? (member.thumb_url || member.url || '')
+        : (member.url || member.thumb_url || '');
+    if (!src) return;
+    openPhotoViewerFromUrl(src, member.rel_path || '');
+}
+
+function openPhotoViewerFromUrl(url, alt) {
+    if (!url || !elements.photoViewerOverlay) return;
+    if (state.videoInFullscreenShell) {
+        restoreLightboxVideoHome();
+    }
+    if (elements.photoViewerImg) {
+        elements.photoViewerImg.style.display = 'block';
+        elements.photoViewerImg.src = url;
+        elements.photoViewerImg.alt = alt || 'Full resolution view';
+    }
+    elements.photoViewerOverlay.classList.remove('is-video');
+    elements.photoViewerOverlay.style.display = 'flex';
+    state.viewerZoom = 1;
+    state.viewerPanX = 0;
+    state.viewerPanY = 0;
+    applyViewerTransform();
+    if (elements.photoViewerHint) {
+        elements.photoViewerHint.innerHTML =
+            '<i class="fa-solid fa-magnifying-glass-plus"></i> Scroll to zoom · Drag to pan';
+        elements.photoViewerHint.classList.remove('hidden');
+        setTimeout(() => {
+            elements.photoViewerHint.classList.add('hidden');
+        }, 3000);
+    }
 }
 
 function openDuplicatesModal() {
@@ -5310,6 +5496,12 @@ function openDuplicatesModal() {
 }
 
 function closeDuplicatesModal() {
+    if (elements.photoViewerOverlay
+        && isDisplayFlex(elements.photoViewerOverlay)
+        && elements.lightboxModal
+        && !isDisplayFlex(elements.lightboxModal)) {
+        closePhotoViewer();
+    }
     if (elements.duplicatesModal) elements.duplicatesModal.style.display = 'none';
 }
 
@@ -6126,6 +6318,10 @@ function setupEventListeners() {
         }
         if (e.key === 'Escape' && isDisplayFlex(elements.trashModal)) {
             closeTrashModal();
+            return;
+        }
+        if (e.key === 'Escape' && isDisplayFlex(elements.duplicatesModal)) {
+            closeDuplicatesModal();
             return;
         }
         // Transient gallery modes unwind before the persistent side panel.

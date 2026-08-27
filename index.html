@@ -830,15 +830,15 @@
         </div>
     </div>
 
-    <!-- F3 — near-duplicate review -->
-    <div class="modal-dialog-container" id="duplicatesModal" style="display:none;">
+    <!-- F3 — near-duplicate review. A comparison workspace, not an Insights dialog. -->
+    <div class="modal-dialog-container" id="duplicatesModal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="duplicatesTitle">
         <div class="modal-overlay" id="duplicatesModalOverlay"></div>
-        <div class="modal-card wide insights-modal-card">
+        <div class="modal-card duplicates-modal-card">
             <div class="sync-modal-header">
                 <div class="modal-icon orange"><i class="fa-solid fa-clone"></i></div>
                 <div class="sync-modal-titles">
-                    <h3>Duplicates</h3>
-                    <p class="sync-modal-sub">Near-duplicate groups. Favourites are never preselected for delete.</p>
+                    <h3 id="duplicatesTitle">Duplicates</h3>
+                    <p class="sync-modal-sub" id="duplicatesSummary">Review a group, then Select copies. Favourites stay.</p>
                 </div>
                 <button type="button" class="icon-btn" id="closeDuplicatesBtn" title="Close" aria-label="Close duplicates">
                     <i class="fa-solid fa-xmark"></i>
@@ -848,8 +848,9 @@
                 <div class="insights-loading">Loading…</div>
             </div>
             <div class="modal-actions trash-modal-actions">
-                <button type="button" class="btn btn-danger" id="duplicatesSweepBtn" title="Move preselected copies to Trash">
-                    <i class="fa-solid fa-trash-can"></i> Trash selected copies
+                <button type="button" class="btn btn-danger" id="duplicatesSweepBtn" title="Move selected copies to Trash">
+                    <i class="fa-solid fa-trash-can"></i>
+                    <span id="duplicatesSweepLabel">Trash selected copies</span>
                 </button>
                 <button type="button" class="btn btn-secondary" id="doneDuplicatesBtn">Close</button>
             </div>
