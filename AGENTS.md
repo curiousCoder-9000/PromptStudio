@@ -128,6 +128,7 @@ the whole `scripts/` tree for non-scrape work.
 | Server is HTTP/1.0, so a response need not be framed | `protocol_version = "HTTP/1.1"`. Every response **must** send `Content-Length` (or be a 304), or the client hangs |
 | Grid `verdict` carries `media_kind` / `verdict_source` / `classified_at` | Slimmed out. `GET /api/media/detail` has the full row |
 | A `:focus-visible` ring can be a `box-shadow` | Any component setting its own `box-shadow` later at the same specificity silently cancels it — this is what hid focus on every `.btn-secondary`. The ring is an `outline` |
+| A sticky bar can bleed over its scroller's padding with a negative margin | `top: 0` resolves against the **scroller's padding box**, so sticky clamps it back down. `.inspector-panel` carries no vertical padding; its sticky header/footer supply it. `.gallery-header` is fine — its scroller is the document |
 | Any `fa-*` class name works offline | Only names in the vendored **Free** set. A Pro name (`fa-sparkles`, `fa-image-slash`) renders at **width 0** — an invisible icon, not a fallback box. `tests/test_offline_assets.py` enforces |
 | One SQLite connection behind one `RLock` | Writer + N `mode=ro` readers. Reads go through `_read()`; a SELECT on `self._conn` re-introduces the contention |
 | The grid holds a card per loaded photo | It mounts a window (~21 at 1280×800). An absent card is normal — every `[data-rel-path]` patch site must stay `if (card)` |

@@ -250,6 +250,7 @@ const elements = {
     mediaDetailPills: document.getElementById('mediaDetailPills'),
     mediaDetailGrid: document.getElementById('mediaDetailGrid'),
     mediaDetailCaption: document.getElementById('mediaDetailCaption'),
+    mediaCaptionBlock: document.getElementById('mediaCaptionBlock'),
     mediaOpenIgBtn: document.getElementById('mediaOpenIgBtn'),
     mediaExpandFromPanelBtn: document.getElementById('mediaExpandFromPanelBtn'),
     mediaCopyPathBtn: document.getElementById('mediaCopyPathBtn'),
@@ -4266,9 +4267,14 @@ function updateFavoriteButton(photo) {
     if (!elements.favoritePhotoBtn || !photo) return;
     const on = Boolean(photo.favorite);
     elements.favoritePhotoBtn.classList.toggle('active', on);
+    // Icon-only in a sticky header, so the state has to live in the icon, the
+    // tooltip and the accessible name rather than in a word beside it.
     elements.favoritePhotoBtn.innerHTML = on
-        ? '<i class="fa-solid fa-star"></i> Favorited'
-        : '<i class="fa-regular fa-star"></i> Favorite';
+        ? '<i class="fa-solid fa-star"></i>'
+        : '<i class="fa-regular fa-star"></i>';
+    elements.favoritePhotoBtn.title = on ? 'Remove from favorites (F)' : 'Add to favorites (F)';
+    elements.favoritePhotoBtn.setAttribute('aria-label', on ? 'Remove from favorites' : 'Add to favorites');
+    elements.favoritePhotoBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
 }
 
 async function toggleFavoriteCurrent() {
@@ -4404,11 +4410,31 @@ function resetPromptPanel() {
     if (elements.paramAspect) elements.paramAspect.textContent = '4:5';
 }
 
+/**
+ * One fact, as a pill. Returns '' for a value the archive does not have —
+ * `Posted —` cost a full card to say nothing, three times per photo for media
+ * that came from a source without timestamps.
+ */
 function metaCard(label, value) {
+    const text = value === 0 ? '0' : String(value ?? '').trim();
+    if (!text || text === '—' || text === '-') return '';
     return `<div class="video-meta-card">
         <span class="vm-label">${escapeHtml(label)}</span>
-        <span class="vm-value">${escapeHtml(value)}</span>
+        <span class="vm-value">${escapeHtml(text)}</span>
     </div>`;
+}
+
+/**
+ * The caption block is present only when there is a caption (or an error worth
+ * reading). Its usual content was "No caption stored for this photo." in a 76px
+ * box above the prompt.
+ */
+function setCaptionBlock(text) {
+    const body = elements.mediaDetailCaption;
+    const block = elements.mediaCaptionBlock;
+    const caption = (text || '').trim();
+    if (body) body.textContent = caption;
+    if (block) block.style.display = caption ? 'flex' : 'none';
 }
 
 
@@ -4431,10 +4457,9 @@ async function loadMediaDetailPanel(photo) {
     if (badge) {
         badge.innerHTML = isVideo ? '<i class="fa-solid fa-clapperboard"></i> Reel' : '<i class="fa-solid fa-image"></i> Photo';
     }
-    if (elements.mediaDetailCaption) {
-        elements.mediaDetailCaption.textContent = 'Loading metadata…';
-        elements.mediaDetailCaption.classList.add('empty');
-    }
+    // No "Loading metadata…" placeholder: the field it loads into is usually
+    // empty, so the placeholder was the only thing most photos ever showed here.
+    setCaptionBlock('');
     if (elements.mediaDetailGrid) {
         elements.mediaDetailGrid.innerHTML = metaCard('Type', isVideo ? 'Reel / video' : 'Photo');
     }
@@ -4519,21 +4544,10 @@ async function loadMediaDetailPanel(photo) {
         }
         
         if (elements.mediaDetailGrid) {
-            elements.mediaDetailGrid.innerHTML = gridParts.join('');
+            elements.mediaDetailGrid.innerHTML = gridParts.filter(Boolean).join('');
         }
 
-        const caption = (data.caption || '').trim();
-        if (elements.mediaDetailCaption) {
-            if (caption) {
-                elements.mediaDetailCaption.textContent = caption;
-                elements.mediaDetailCaption.classList.remove('empty');
-            } else {
-                elements.mediaDetailCaption.textContent =
-                    isVideo ? 'No caption stored for this reel (metadata missing or empty).'
-                            : 'No caption stored for this photo.';
-                elements.mediaDetailCaption.classList.add('empty');
-            }
-        }
+        setCaptionBlock(data.caption);
 
         if (elements.mediaOpenIgBtn) {
             if (data.post_url) {
@@ -4546,11 +4560,9 @@ async function loadMediaDetailPanel(photo) {
 
     } catch (err) {
         console.error('Media detail load failed', err);
-        if (elements.mediaDetailCaption) {
-            elements.mediaDetailCaption.textContent =
-                'Could not load media metadata.';
-            elements.mediaDetailCaption.classList.add('empty');
-        }
+        // A failure *is* worth a line — unlike an absent caption.
+        setCaptionBlock('Could not load media metadata.');
+        if (elements.mediaDetailCaption) elements.mediaDetailCaption.classList.add('empty');
     }
 }
 

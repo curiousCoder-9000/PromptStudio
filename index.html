@@ -564,11 +564,17 @@
                         <h3 id="inspectorPanelTitle"><i class="fa-solid fa-wand-magic-sparkles text-gradient"></i> AI Image Prompt Generator</h3>
                         <div class="inspector-header-actions">
                             <span class="tag-model" id="inspectorModelTag">Ollama Vision</span>
-                            <button class="btn btn-secondary btn-sm" id="favoritePhotoBtn" title="Toggle favorite (F)">
-                                <i class="fa-regular fa-star"></i> Favorite
+                            <!-- Icon-only: this header is sticky now, and with
+                                 labels it wrapped to a second row (76px) that
+                                 stayed on screen for every photo. Both keep a
+                                 title and an aria-label. "Refresh" was also the
+                                 wrong word for a minute-long vision re-run, and
+                                 the same word as the navbar's gallery reload. -->
+                            <button class="btn btn-secondary btn-sm icon-only" id="favoritePhotoBtn" title="Toggle favorite (F)" aria-label="Toggle favorite">
+                                <i class="fa-regular fa-star"></i>
                             </button>
-                            <button class="btn btn-secondary btn-sm" id="regeneratePromptBtn" title="Re-Analyze photo with Ollama Vision Body & Beauty Engine">
-                                <i class="fa-solid fa-arrows-rotate"></i> Refresh
+                            <button class="btn btn-secondary btn-sm icon-only" id="regeneratePromptBtn" title="Re-Analyze photo with Ollama Vision Body & Beauty Engine" aria-label="Re-analyze with Ollama Vision">
+                                <i class="fa-solid fa-arrows-rotate"></i>
                             </button>
                         </div>
                     </div>
@@ -603,26 +609,27 @@
                     </div>
 
                     <!-- Media Detail inspector (shown for both photos and videos) -->
+                    <!-- U18. This block was 396px of a 763px panel: a 128px hero
+                         holding a thumbnail of the image already filling the left
+                         pane plus the creator and filename already badged there,
+                         three cards for Type (which the media shows), Size and
+                         Posted, and a 76px box whose usual content is "No caption
+                         stored". It also refused to shrink (`flex-shrink: 0`), so
+                         the prompt absorbed the loss into a nested 190px scroller
+                         and the footer fell below the viewport. One dense line
+                         now; the caption appears only when there is one. -->
                     <div class="media-detail-panel" id="mediaDetailPanel" style="display:none;">
-                        <div class="media-detail-hero">
-                            <div class="media-detail-thumb-wrap">
-                                <img id="mediaDetailThumb" src="" alt="Media frame" loading="lazy">
-                                <span class="media-detail-play-badge" id="mediaDetailTypeBadge"><i class="fa-solid fa-image"></i> Photo</span>
-                            </div>
-                            <div class="media-detail-hero-text">
-                                <div class="media-detail-handle" id="mediaDetailHandle">@creator</div>
-                                <div class="media-detail-file" id="mediaDetailFile">filename.mp4</div>
-                                <div class="media-detail-pills" id="mediaDetailPills"></div>
-                            </div>
+                        <div class="media-facts">
+                            <!-- Still filled by metaCard(): type, size, posted,
+                                 and duration for a reel. Empty values are
+                                 dropped rather than printed as an em dash. -->
+                            <div class="media-detail-grid" id="mediaDetailGrid"></div>
+                            <div class="media-detail-pills" id="mediaDetailPills"></div>
                         </div>
 
-                        <div class="media-detail-grid" id="mediaDetailGrid">
-                            <!-- filled by JS: duration, size, date -->
-                        </div>
-
-                        <div class="media-detail-block">
+                        <div class="media-detail-block" id="mediaCaptionBlock" style="display:none;">
                             <div class="sync-status-label">Caption</div>
-                            <div class="media-caption" id="mediaDetailCaption">No caption in archive metadata.</div>
+                            <div class="media-caption" id="mediaDetailCaption"></div>
                         </div>
 
                         <div class="media-detail-actions">

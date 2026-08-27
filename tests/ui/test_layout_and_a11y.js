@@ -369,6 +369,141 @@ async function tab(s) {
     (await s.eval("return document.getElementById('galleryTitle').textContent.trim();"))
       === 'All Photos');
 
+  // ── the inspector panel spends its space on the task ───────────────
+  r.section('inspector panel budget (U18)');
+
+  await s.eval("document.querySelector('.photo-card').click(); return true;");
+  await sleep(1800);
+  const panel = await s.eval(`
+    const R = (sel) => {
+      const el = document.querySelector(sel);
+      if (!el || getComputedStyle(el).display === 'none') return null;
+      const b = el.getBoundingClientRect();
+      return { h: Math.round(b.height), top: Math.round(b.top), bottom: Math.round(b.bottom) };
+    };
+    const scroller = (sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return null;
+      return { clientH: el.clientHeight, scrollH: el.scrollHeight,
+               overflowY: getComputedStyle(el).overflowY };
+    };
+    return {
+      viewport: window.innerHeight,
+      panel: scroller('.inspector-panel'),
+      promptContent: scroller('#promptContent'),
+      header: R('.panel-header'),
+      detail: R('#mediaDetailPanel'),
+      captionBlock: R('#mediaCaptionBlock'),
+      // Absent and hidden are different: before this change there was no such
+      // element, so "costs no space" would have passed for the wrong reason.
+      captionBlockExists: Boolean(document.getElementById('mediaCaptionBlock')),
+      footer: R('.inspector-footer'),
+      heroGone: !document.getElementById('mediaDetailThumb'),
+      facts: document.getElementById('mediaDetailGrid').textContent.replace(/\s+/g, ' ').trim(),
+    };
+  `);
+
+  r.check('the panel, not the prompt, is the scroller',
+    panel.panel && panel.panel.overflowY === 'auto'
+      && panel.promptContent && panel.promptContent.overflowY !== 'auto'
+      && panel.promptContent.scrollH <= panel.promptContent.clientH + 1,
+    JSON.stringify({ panel: panel.panel, promptContent: panel.promptContent }));
+  r.check('Delete / Copy bundle are on screen without scrolling',
+    panel.footer && panel.footer.bottom <= panel.viewport,
+    JSON.stringify({ footer: panel.footer, viewport: panel.viewport }));
+  r.check('the metadata block is a line, not half the panel',
+    panel.detail && panel.detail.h <= 120, JSON.stringify(panel.detail));
+  r.check('the panel no longer restates the image with a thumbnail',
+    panel.heroGone === true, String(panel.heroGone));
+  r.check('an absent caption costs no space',
+    panel.captionBlockExists === true && panel.captionBlock === null,
+    JSON.stringify({ exists: panel.captionBlockExists, box: panel.captionBlock }));
+  r.check('a value the archive does not have is omitted, not printed as a dash',
+    !/—/.test(panel.facts), panel.facts);
+  const headerRow = await s.eval(`
+    const h3 = document.querySelector('.panel-header h3').getBoundingClientRect();
+    const acts = document.querySelector('.inspector-header-actions').getBoundingClientRect();
+    const overlap = Math.min(h3.bottom, acts.bottom) - Math.max(h3.top, acts.top);
+    return { titleH: Math.round(h3.height), actionsH: Math.round(acts.height),
+             verticalOverlap: Math.round(overlap) };
+  `);
+  r.check('the sticky panel header is one row — title and actions share it',
+    headerRow.verticalOverlap > 0, JSON.stringify(headerRow));
+
+  // The header and footer have to survive a scroll of the panel, which is the
+  // whole point of moving the scroller up a level.
+  const stuck = await s.eval(`
+    const p = document.querySelector('.inspector-panel');
+    // Nothing here generates a prompt (Ollama is offline in the harness), so
+    // the panel does not overflow on its own. The question is whether the bars
+    // stay pinned when it does.
+    const spacer = document.createElement('div');
+    spacer.id = '__stickyProbe';
+    spacer.style.height = '1400px';
+    spacer.style.flex = '0 0 auto';
+    p.insertBefore(spacer, document.querySelector('.inspector-footer'));
+    p.scrollTop = p.scrollHeight;
+    const scrolledTo = p.scrollTop;
+    return new Promise((resolve) => setTimeout(() => {
+      const hb = document.querySelector('.panel-header').getBoundingClientRect();
+      const fb = document.querySelector('.inspector-footer').getBoundingClientRect();
+      const pb = p.getBoundingClientRect();
+      spacer.remove();
+      resolve({ scrolled: Math.round(scrolledTo),
+                headerOffset: Math.round(hb.top - pb.top),
+                footerOffset: Math.round(pb.bottom - fb.bottom) });
+    }, 260));
+  `);
+  r.check('the probe actually made the panel scroll',
+    stuck.scrolled > 200, JSON.stringify(stuck));
+  r.check('the panel header stays put while the panel scrolls',
+    Math.abs(stuck.headerOffset) <= 2, JSON.stringify(stuck));
+  r.check('the footer stays put while the panel scrolls',
+    Math.abs(stuck.footerOffset) <= 2, JSON.stringify(stuck));
+
+  // Icon-only buttons must still say what they are.
+  const named = await s.eval(`
+    return ['favoritePhotoBtn', 'regeneratePromptBtn'].map((id) => {
+      const el = document.getElementById(id);
+      return { id, text: el.textContent.trim(), label: el.getAttribute('aria-label'),
+               title: el.getAttribute('title') };
+    });
+  `);
+  named.forEach((b) => {
+    r.check(`${b.id} is icon-only but has an accessible name`,
+      b.text === '' && Boolean(b.label) && Boolean(b.title), JSON.stringify(b));
+  });
+
+  // Both directions. The seeded archive has no sidecars, so the absent case is
+  // all the DOM above can show; these drive the two helpers that decide.
+  const conditional = await s.eval(`
+    const out = {};
+    out.dashDropped = metaCard('Posted', '—') === '';
+    out.emptyDropped = metaCard('Posted', '') === '';
+    out.zeroKept = metaCard('Size', 0).includes('0');
+    out.valueKept = metaCard('Posted', '14 Jun 2026').includes('14 Jun 2026');
+    const block = document.getElementById('mediaCaptionBlock');
+    setCaptionBlock('golden hour on the balcony');
+    out.shownWhenPresent = getComputedStyle(block).display !== 'none';
+    out.textWhenPresent = document.getElementById('mediaDetailCaption').textContent;
+    setCaptionBlock('');
+    out.hiddenWhenAbsent = getComputedStyle(block).display === 'none';
+    return out;
+  `);
+  r.check('a dash or an empty value produces no pill at all',
+    conditional.dashDropped && conditional.emptyDropped, JSON.stringify(conditional));
+  r.check('a real value still gets a pill, and 0 is a real value',
+    conditional.valueKept && conditional.zeroKept, JSON.stringify(conditional));
+  r.check('the caption block appears when there is a caption',
+    conditional.shownWhenPresent
+      && conditional.textWhenPresent === 'golden hour on the balcony',
+    JSON.stringify(conditional));
+  r.check('and goes away again when there is not',
+    conditional.hiddenWhenAbsent, JSON.stringify(conditional));
+
+  await s.key('Escape');
+  await sleep(500);
+
   // ── the token every instruction is set in ──────────────────────────
   r.section('muted text contrast');
 

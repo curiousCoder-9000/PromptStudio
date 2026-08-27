@@ -6,7 +6,7 @@
 | **Scope** | Frontend (`index.html` · `app.js` · `style.css`), UX, and product gaps not covered elsewhere |
 | **Companions** | [`product_review.md`](product_review.md) — value chain, Themes A/B/C/E · [`review_backend_architecture.md`](review_backend_architecture.md) — durability, storage, observability |
 | **Why a third review** | Neither companion audits the UI, and both rest on one premise (§0) that turned out to be false |
-| **Status** | Stage 1 shipped (§5) · Stage 2 shipped (§6) · review-mode trap fixed (§8) · U13–U14 shipped (§9) · U17–U24 shipped (§11) · U15–U16, U18, U25–U35 open |
+| **Status** | Stage 1 shipped (§5) · Stage 2 shipped (§6) · review-mode trap fixed (§8) · U13–U14 shipped (§9) · U17, U19–U24 shipped (§11) · U18 shipped (§12) · U15–U16, U25–U35 open |
 
 ---
 
@@ -285,13 +285,42 @@ point worth keeping:
 | ID | Sev | Finding | Status |
 |----|-----|---------|--------|
 | **U17** | 🔴 | Two-thirds of the first screen was chrome: navbar 183px + stats 188px + header 132px put the first photo at **y=604 of 900**. At ≤1024px the stats went full-width-stacked (~400px) and the first screen held **no photos at all**. | ✅ §11 |
-| **U18** | 🔴 | Lightbox space is allocated inversely to the task: the media pane is 33% filled (400×400 image in 594×820), ~250px goes to TYPE/SIZE/POSTED/CAPTION mostly reading "—", and the generated prompt sits in a **nested** ~190px scroller with the ComfyUI controls at y=1134. | deferred — a redesign, not a fix |
+| **U18** | 🔴 | The inspector panel spends its space on restating what is already on screen. **Corrected after re-measuring — see below.** | ✅ §12 |
 | **U19** | 🔴 | `#lightboxClose` overlapped `#regeneratePromptBtn` by 34×30px (label clipped to "Refre…", right third unclickable); `#lightboxNext` sat **entirely** over `.inspector-panel`, and over the panel title at 390px. Both were positioned against the modal card, not the media pane. | ✅ §11 |
 | **U20** | 🔴 | Every empty-state icon was invisible — both class names are Font Awesome **Pro**. Includes the first screen a new archive shows. | ✅ §11 |
 | **U21** | 🟠 | Keyboard focus was invisible on every `.btn` — the ring is a `box-shadow` and `.btn-secondary` overwrites it. 10 of 11 navbar buttons. | ✅ §11 |
 | **U22** | 🟠 | `--text-muted` #64748b is **3.9:1** on `--bg-dark` at 10.9–12.8px — below AA — and it is the token every keyboard legend and helper line uses, including `.triage-keys`, the only on-screen documentation of K/R/X. | ✅ §11 |
 | **U23** | 🟠 | `.verdict-pill.quiet` is `opacity: 0`, hover-only: the verdict is hidden in the one view where it carries information and loud in the views where the active filter already implies it. Never visible on touch. | ✅ §11 |
 | **U24** | 🟠 | `#galleryTitle` is only ever `All Photos` or `@creator`, so a view filtered to 17 rejects still claimed the whole archive, and review mode stacked a contradicting second title under it. The count read `17 / 17 photos`, which scans as a score. | ✅ §11 |
+
+### U18, corrected
+
+The first write-up of U18 said the media pane was "33% filled, two-thirds empty
+black". **That was an artifact of the fixture, not a finding.** It was measured
+against a 400×400 synthetic JPEG; re-measured with a real 1080×1350 portrait the
+pane is **86% filled** (578×723 rendered in 639×763). The media pane needed no
+change and did not get one.
+
+What is real is the panel beside it, and it is worse than the original note
+said. Measured at 1440×900 with a realistic photo and **no prompt generated
+yet**:
+
+| Panel section | Height | Saying |
+|---|---:|---|
+| `.panel-header` | 76px | wrapped to two rows after the U19 padding |
+| `.media-detail-hero` | 128px | a thumbnail of the image already filling the left pane, plus `@creator` and the filename already badged there |
+| `.media-detail-grid` | 120px | `Type: Photo` (the media shows this), `Size`, `Posted: —` |
+| caption block | 76px | "No caption stored for this photo." |
+| detail actions | 30px | Open on Instagram · Fullscreen · Copy path |
+| **metadata total** | **396px** | **52% of a 763px panel** |
+| `.inspector-footer` | at **y=925** | Delete + Copy Full Prompt Bundle, **below a 900px viewport** |
+
+Two declarations caused the squeeze: `#mediaDetailPanel` was `flex-shrink: 0`
+and `#promptContent` was `flex: 1` with its own `overflow-y: auto`. So the panel
+never overflowed — the prompt absorbed the whole loss and showed its tags, both
+prompt boxes, the parameter grid, the export variants and every ComfyUI control
+through a ~190px porthole nested inside the panel. Panel `scrollHeight` was 931
+against a 763 `clientHeight` before a prompt existed at all.
 
 **Still open, in rough value order:** U25 navbar has 11 co-equal buttons and
 `Refresh` is the loudest element on screen · U26 per-card Delete is one click
@@ -366,3 +395,68 @@ scans every `fa-*` name in `index.html` and `app.js` against the vendored CSS.
 Comments are stripped first — this repo's own comments name the two Pro icons.
 `scripts/vendor_web_assets.py --check` verifies that the *files* are present; it
 cannot see a glyph that was never in them.
+
+## 12. Fix log — U18, the inspector panel
+
+The media pane was left alone (see the correction in §10). Everything here is
+the panel beside it.
+
+| Item | Status | What changed |
+|------|--------|--------------|
+| **U18a** one scroller | ✅ | `#promptContent` is `flex: 0 0 auto` with no `overflow`, so it sizes to its content and `.inspector-panel` is the only thing that scrolls. Three scrollbars (page, panel, prompt) became one. |
+| **U18b** header and footer stay | ✅ | `.panel-header` is sticky to the top of the panel and `.inspector-footer` to the bottom, both bleeding horizontally over the panel's padding. Delete and Copy Full Prompt Bundle are reachable at any scroll position instead of sitting at y=925. |
+| **U18c** metadata stops restating the screen | ✅ | The 128px hero is gone — it held a thumbnail of the image already filling the left pane plus the creator and filename already badged there. Type/Size/Posted/Duration are one wrapping line of pills. `metaCard()` returns `''` for a value the archive does not have, so `Posted —` is not printed; `0` is still a value. The caption block is present only when there is a caption (or a load error, which is worth a line). 396px → **68px** when the metadata is sparse. |
+| **U18d** one-row header | ✅ | Favorite and Re-analyze are icon-only with `title` + `aria-label`, and Favorite carries `aria-pressed`. The header is sticky now, so its second row would have cost 32px on every photo forever. Dropping the word "Refresh" also settles half of U32: it was the same label as the navbar's gallery reload for a minute-long vision re-run. |
+
+### Measurements
+
+1440×900, a real 1080×1350 photo, prompt present.
+
+| | before | after |
+|---|---:|---:|
+| `#promptContent` visible height | ~190px (nested scroller) | **662px** |
+| metadata block | 396px (52% of the panel) | **68px** |
+| `.panel-header` | 76px, two rows | **64px, one row** |
+| `.inspector-footer` bottom | y=925 (off screen) | **y=832** |
+| `#exportVariants` top | y=1050 | **y=649** |
+| `#comfyProControls` top | y=1134 | **y=733** |
+| scrollbars in the panel | 2 (panel + prompt) | **1** |
+| media pane fill (unchanged) | 86% | 86% |
+
+The ComfyUI block — workflow, denoise, steps, CFG, seed, Mode E and the four
+run buttons — moved from 234px below the fold to on screen.
+
+### A trap worth recording
+
+`position: sticky; top: 0` resolves against the **scroller's padding box**, so
+the negative margin that bleeds a sticky bar full-width gets clamped straight
+back down by the padding. `.inspector-panel` therefore carries no vertical
+padding any more; the sticky header and footer supply it in their own. The
+gallery header from §11 is unaffected, because its scroller is the document
+rather than a padded ancestor — the same CSS behaves differently depending on
+which ancestor scrolls, which is exactly the kind of thing only a measurement
+catches. Found by the test, not by reading: `headerOffset` came back as 22, the
+panel's padding, instead of 0.
+
+The same test net also caught a regression this change introduced in §11's U19
+fix: bleeding the header 22px past the panel's padding moved its actions back
+under `.lightbox-close`, re-creating a 123px² overlap. The clearance is 74px
+now (52 + the bleed).
+
+### Tests
+
+12 new checks in `tests/ui/test_layout_and_a11y.js` (45 total), all 12 confirmed
+failing against pre-fix `HEAD`. The pre-fix run reproduces §10's numbers exactly
+— `footer top=925`, `metadata h=396`, `promptContent overflowY: auto` — and adds
+two the write-up did not have: `verticalOverlap: -10` for the header's two rows,
+and `headerOffset: -1560`, the header scrolling entirely out of the panel.
+
+Two of them needed care:
+
+- The sticky check injects a 1400px spacer, because nothing in the harness
+  generates a prompt (Ollama is offline there) and the panel does not otherwise
+  overflow. The question being asked is whether the bars stay pinned *once it
+  does*.
+- "An absent caption costs no space" passes for the wrong reason if it only
+  checks that the box has no height — pre-fix the element did not exist at all.
+  It asserts the element is present **and** hidden.
