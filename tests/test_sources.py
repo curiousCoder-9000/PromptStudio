@@ -676,6 +676,17 @@ def _ig_argv(options=None, dest="/tmp/dest", handle="borabit1004"):
     return src._build_argv(target, options or ScrapeOptions.normalize("full", deep=True), dest), target
 
 
+def test_ig_gdl_argv_hard_caps_a_5000_post_request(monkeypatch):
+    monkeypatch.setenv("SCRAPE_COOKIES_FROM_BROWSER", "brave")
+    monkeypatch.setenv("IG_POSTS_HARD_CAP", "80")
+    argv, _ = _ig_argv(
+        ScrapeOptions.normalize("full", deep=True, max_posts=5000)
+    )
+    blob = " ".join(argv)
+    assert "extractor.instagram.max-posts=80" in blob
+    assert "max-posts=5000" not in blob
+
+
 def test_ig_gdl_argv_pins_search_web_and_never_web_profile_info(monkeypatch):
     monkeypatch.setenv("SCRAPE_COOKIES_FROM_BROWSER", "brave")
     monkeypatch.delenv("IG_GDL_SLEEP_REQUEST", raising=False)

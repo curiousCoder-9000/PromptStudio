@@ -14,6 +14,7 @@ from typing import Any, Optional, Sequence
 
 from promptstudio.config import (
     DEFAULT_MAX_POSTS_PER_CREATOR,
+    INCLUDE_VIDEOS_DEFAULT,
     SAVED_DIR,
     SESSION_USER,
     instagram_backend,
@@ -56,6 +57,11 @@ class InstagramSource:
         options: ScrapeOptions,
         ctx: SourceContext,
     ) -> SyncResult:
+        from promptstudio.scraping.ig_cooldown import refuse_instagram_scrape
+
+        blocked = refuse_instagram_scrape(ctx, job_type="creator")
+        if blocked:
+            return blocked
         if uses_gallery_dl():
             from promptstudio.scraping.sources.gallery_dl_source import (
                 InstagramGalleryDlSource,
@@ -90,6 +96,11 @@ class InstagramSource:
 
 def run_saved(ctx: SourceContext) -> SyncResult:
     """Saved-posts job. Instaloader or gallery-dl, same backend flag as feeds."""
+    from promptstudio.scraping.ig_cooldown import refuse_instagram_scrape
+
+    blocked = refuse_instagram_scrape(ctx, job_type="saved")
+    if blocked:
+        return blocked
     if uses_gallery_dl():
         from promptstudio.scraping.sources.gallery_dl_source import (
             InstagramGalleryDlSource,
@@ -125,11 +136,18 @@ def run_following(
     max_posts_per_account: int = 20,
     keywords: Optional[Sequence[str]] = None,
     min_media_count: int = 5,
-    include_videos: bool = True,
+    include_videos: bool = INCLUDE_VIDEOS_DEFAULT,
     public_only: bool = True,
 ) -> SyncResult:
     """Following bulk. gallery-dl still uses the Instaloader queue/pacing loop."""
+    from promptstudio.config import clamp_ig_posts
     from promptstudio.scraping.downloader import InstagramDownloader
+    from promptstudio.scraping.ig_cooldown import refuse_instagram_scrape
+
+    blocked = refuse_instagram_scrape(ctx, job_type="following")
+    if blocked:
+        return blocked
+    max_posts_per_account = clamp_ig_posts(max_posts_per_account)
 
     downloader = InstagramDownloader(
         save_dir=ctx.save_dir or SAVED_DIR,
@@ -141,7 +159,12 @@ def run_following(
     if uses_gallery_dl():
         gdl = InstagramSource()
 
-        def feed_fn(username, max_posts=DEFAULT_MAX_POSTS_PER_CREATOR, include_videos=True, **_kw):
+        def feed_fn(
+            username,
+            max_posts=DEFAULT_MAX_POSTS_PER_CREATOR,
+            include_videos=INCLUDE_VIDEOS_DEFAULT,
+            **_kw,
+        ):
             target = gdl.parse_target(username)
             opts = ScrapeOptions.normalize(
                 "bounded",

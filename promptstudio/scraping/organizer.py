@@ -7,7 +7,16 @@ import re
 import shutil
 from typing import Callable, Dict, List, Optional, Tuple
 
-from promptstudio.config import IMAGE_EXTENSIONS, METADATA_SUFFIX, SAVED_DIR
+from promptstudio.config import (
+    EXCLUDED_FOLDERS,
+    IMAGE_EXTENSIONS,
+    MEDIA_EXTENSIONS,
+    METADATA_SUFFIX,
+    SAVED_DIR,
+)
+from promptstudio.logging_setup import get_logger
+
+_log = get_logger(__name__)
 
 LogFn = Optional[Callable[[str], None]]
 
@@ -145,3 +154,78 @@ def deduplicate_archive(base_dir: str = SAVED_DIR, log: LogFn = None) -> int:
     if deleted:
         log(f"Deduplication removed {deleted} files")
     return deleted
+
+
+def _has_media(folder: str) -> bool:
+    """True if any photo or video lives under this folder (any depth)."""
+    try:
+        for _dirpath, _dirnames, filenames in os.walk(folder):
+            for name in filenames:
+                if name.lower().endswith(MEDIA_EXTENSIONS):
+                    return True
+    except OSError:
+        # Unreadable folder: refuse to prune rather than guess it is empty.
+        return True
+    return False
+
+
+def _is_creator_folder(name: str) -> bool:
+    if name.startswith((".", "_")):
+        return False
+    if name in EXCLUDED_FOLDERS:
+        return False
+    return True
+
+
+def prune_empty_creator_folders(
+    base_dir: str = SAVED_DIR,
+    *,
+    dry_run: bool = False,
+    log: LogFn = None,
+) -> List[str]:
+    """Remove creator folders that contain no photos or videos.
+
+    Leftover sidecars / instaloader json / txt without media count as empty.
+    System folders (`_thumbs`, `_trash`, …) and names starting with `_` or `.`
+    are never touched. Matching `_thumbs/<creator>/` trees go with the folder.
+    """
+    log = log or (lambda msg: _log.info(msg))
+    base_dir = os.path.expanduser(base_dir)
+    if not os.path.isdir(base_dir):
+        return []
+
+    try:
+        names = sorted(os.listdir(base_dir))
+    except OSError as e:
+        log(f"Failed to list archive: {e}")
+        return []
+
+    pruned: List[str] = []
+    for name in names:
+        folder = os.path.join(base_dir, name)
+        if not os.path.isdir(folder) or not _is_creator_folder(name):
+            continue
+        if _has_media(folder):
+            continue
+        pruned.append(name)
+        if dry_run:
+            log(f"Would prune empty creator folder: {name}")
+            continue
+        try:
+            shutil.rmtree(folder)
+        except OSError as e:
+            log(f"Failed to remove {name}: {e}")
+            pruned.pop()
+            continue
+        thumb_folder = os.path.join(base_dir, "_thumbs", name)
+        if os.path.isdir(thumb_folder):
+            try:
+                shutil.rmtree(thumb_folder)
+            except OSError as e:
+                log(f"Removed {name} but failed to clear thumbs: {e}")
+        log(f"Pruned empty creator folder: {name}")
+
+    if pruned:
+        verb = "Would prune" if dry_run else "Pruned"
+        log(f"{verb} {len(pruned)} empty creator folder(s)")
+    return pruned

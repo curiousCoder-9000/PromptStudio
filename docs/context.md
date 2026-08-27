@@ -178,8 +178,8 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
 | `OLLAMA_URL` | `…/api/generate` | Ollama generate |
 | `COMFYUI_URL` | `http://127.0.0.1:8188` | Comfy API |
 | `COMFYUI_CHECKPOINT` | `juggernautXL_ragnarok.safetensors` | Default ckpt |
-| `IG_*` | see config | Anti-ban delays, daily cap 20, catch-up streak 3 |
-| `IG_INCLUDE_VIDEOS` | `1` | Creator/following download reels |
+| `IG_*` | see config | Anti-ban delays, daily cap 8, catch-up streak 3, 72h cooldown after a bot warning |
+| `IG_INCLUDE_VIDEOS` | `0` | Creator/following download reels (off — videos trip Instagram) |
 | `IG_POST_RANK` | `1` | Rank feed posts by caption/reel signals |
 | `IG_POST_SCAN_FACTOR` | `3` | Scan window = max_posts × factor |
 | `CLASSIFY_REJECT_MAX_TIER` | `1` | Tiers `0..N` are rejects. Only the tier is stored, so changing this re-thresholds the archive with no re-classify |
@@ -252,7 +252,7 @@ CORS: `*`. Methods: GET, POST, PUT, DELETE, OPTIONS. Server is **threaded**.
 | Export following | `scripts/export_following_list.py` | — |
 | Prioritize queue | `scripts/prioritize_following_queue.py` | — |
 
-**Videos/reels:** default ON (`IG_INCLUDE_VIDEOS`, `include_videos` on API/UI). Use `--no-reels` to skip.  
+**Videos/reels:** default OFF (`IG_INCLUDE_VIDEOS`, `include_videos` on API/UI). Pass `--include-reels` to fetch them.  
 **Queue priority:** `following_queue.json` `priority` + `reason`; `next_pending` highest first.  
 **Post rank:** `IG_POST_RANK` + `IG_CAPTION_KEYWORDS` — prefer matching captions/reels inside a feed.
 

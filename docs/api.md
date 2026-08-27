@@ -884,7 +884,7 @@ Updates cache, sets `parameters.manual_edit: true`, rebuilds `exports`, returns 
 }
 ```
 
-`include_videos` defaults to config `INCLUDE_VIDEOS_DEFAULT` / `IG_INCLUDE_VIDEOS` (true unless set off).
+`include_videos` defaults to config `INCLUDE_VIDEOS_DEFAULT` / `IG_INCLUDE_VIDEOS` (false unless set on).
 
 `mode`: `bounded` (default, keyword rank/top-N) or `full` (stream entire feed).  
 `deep` (full only): `true` = catch-up off (true archive); `false` = catch-up on.

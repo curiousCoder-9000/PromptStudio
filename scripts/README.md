@@ -36,6 +36,10 @@ Queue + daily budget live in `~/Pictures/InstagramSaved/following_queue.json`. O
 ```powershell
 py scripts/organize_and_filter.py
 
+# Creator folders with no photos or videos (leftover sidecars count as empty)
+py scripts/prune_empty_creators.py
+py scripts/prune_empty_creators.py --dry-run
+
 # Byte-identical duplicates
 py scripts/deduplicate.py
 

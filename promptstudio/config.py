@@ -135,9 +135,13 @@ SYNC_STATE_FILE = os.path.join(SAVED_DIR, "sync_state.json")
 FOLLOWING_QUEUE_FILE = os.path.join(SAVED_DIR, "following_queue.json")
 CREATOR_SCRAPE_QUEUE_FILE = os.path.join(SAVED_DIR, "creator_scrape_queue.json")
 ARCHIVE_DB_FILE = os.path.join(SAVED_DIR, ARCHIVE_DB_NAME)
+# Written when Instagram flags automation; start_job / InstagramSource refuse
+# until `until`. Not secrets — just a timestamp.
+IG_COOLDOWN_FILE = os.path.join(SAVED_DIR, "ig_cooldown.json")
 
-# Full-scrape ceiling (downloaded media units). 0 = unlimited.
-FULL_SCRAPE_MAX_POSTS = int(os.environ.get("IG_FULL_SCRAPE_MAX_POSTS", "5000"))
+# Full-scrape ceiling (downloaded media units). Hard-capped separately so a
+# UI/API "full" request cannot walk thousands of posts in one sitting.
+FULL_SCRAPE_MAX_POSTS = int(_env_num("IG_FULL_SCRAPE_MAX_POSTS", 80, int))
 CREATOR_SCRAPE_HISTORY_MAX = int(os.environ.get("IG_SCRAPE_HISTORY_MAX", "50"))
 CREATOR_SCRAPE_MAX_PENDING = int(os.environ.get("IG_SCRAPE_MAX_PENDING", "50"))
 CREATOR_SCRAPE_QUEUE_ENABLED = _env_bool("IG_CREATOR_SCRAPE_QUEUE", "1")
@@ -166,12 +170,12 @@ BATCH_PAUSE_MIN_SEC = float(os.environ.get("IG_BATCH_PAUSE_MIN", str(5 * 60)))
 BATCH_PAUSE_MAX_SEC = float(os.environ.get("IG_BATCH_PAUSE_MAX", str(15 * 60)))
 ABORT_RATE_LIMIT_STREAK = int(os.environ.get("IG_ABORT_RATE_LIMIT_STREAK", "3"))
 CATCH_UP_STREAK = int(os.environ.get("IG_CATCH_UP_STREAK", "3"))
-DEFAULT_ACCOUNTS_PER_DAY = int(os.environ.get("IG_ACCOUNTS_PER_DAY", "20"))
+DEFAULT_ACCOUNTS_PER_DAY = int(_env_num("IG_ACCOUNTS_PER_DAY", 8, int))
 RATE_LIMIT_BACKOFF_SEC = int(os.environ.get("IG_RATE_LIMIT_BACKOFF", "60"))
 RATE_LIMIT_BACKOFF_MAX_SEC = int(os.environ.get("IG_RATE_LIMIT_BACKOFF_MAX", "300"))
-DEFAULT_MAX_POSTS_PER_CREATOR = int(os.environ.get("IG_MAX_POSTS", "50"))
+DEFAULT_MAX_POSTS_PER_CREATOR = int(_env_num("IG_MAX_POSTS", 24, int))
 DEFAULT_MIN_MEDIA_COUNT = int(os.environ.get("IG_MIN_MEDIA_COUNT", "5"))
-INCLUDE_VIDEOS_DEFAULT = _env_bool("IG_INCLUDE_VIDEOS", "1")
+INCLUDE_VIDEOS_DEFAULT = _env_bool("IG_INCLUDE_VIDEOS", "0")
 QUEUE_PRIORITY_DEFAULT = int(os.environ.get("IG_QUEUE_PRIORITY_DEFAULT", "10"))
 POST_RANK_ENABLED = _env_bool("IG_POST_RANK", "1")
 POST_SCAN_FACTOR = float(os.environ.get("IG_POST_SCAN_FACTOR", "3"))
@@ -218,15 +222,43 @@ def instagram_cookies_info() -> dict:
 # gallery-dl's own Instagram sleep-request default is 6–12s. The shared
 # SCRAPE_SLEEP_REQUEST=1.5 is for X/Reddit and is too fast for this account.
 def ig_gdl_sleep_sec() -> float:
-    return float(_env_num("IG_GDL_SLEEP", 2.0))
+    return float(_env_num("IG_GDL_SLEEP", 3.0))
 
 
 def ig_gdl_sleep_request_sec() -> float:
-    return float(_env_num("IG_GDL_SLEEP_REQUEST", 6.0))
+    return float(_env_num("IG_GDL_SLEEP_REQUEST", 8.0))
 
 
 def ig_gdl_sleep_429_sec() -> float:
-    return float(_env_num("IG_GDL_SLEEP_429", 90.0))
+    return float(_env_num("IG_GDL_SLEEP_429", 180.0))
+
+
+def ig_posts_hard_cap() -> int:
+    """Max Instagram posts one run may request. 0 disables the cap."""
+    return int(_env_num("IG_POSTS_HARD_CAP", 80, int))
+
+
+def clamp_ig_posts(n: int) -> int:
+    """Fold a requested ceiling onto the Instagram hard cap.
+
+    `<=0` means "caller did not set a limit" and becomes the cap (or 0 if the
+    cap itself is disabled). A positive request is min()'d against the cap.
+    """
+    try:
+        requested = int(n)
+    except (TypeError, ValueError):
+        requested = 0
+    cap = ig_posts_hard_cap()
+    if requested <= 0:
+        return cap
+    if cap > 0:
+        return min(requested, cap)
+    return requested
+
+
+def ig_cooldown_hours() -> float:
+    """How long to sit out after Instagram flags automation."""
+    return float(_env_num("IG_COOLDOWN_HOURS", 72.0))
 
 # ---------------------------------------------------------------------------
 # Multi-source scraping (X / Reddit via gallery-dl)

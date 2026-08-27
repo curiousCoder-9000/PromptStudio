@@ -256,6 +256,9 @@ class SyncManager:
 
         status["instagram_backend"] = instagram_backend()
         status["instagram_cookies"] = instagram_cookies_info()
+        from promptstudio.scraping.ig_cooldown import status as cooldown_status
+
+        status["instagram_cooldown"] = cooldown_status()
         return status
 
     @staticmethod
@@ -395,6 +398,14 @@ class SyncManager:
         # still scraping. Checking status first means the refusal never reaches
         # the lease at all, and holding `_job_lock` across both keeps two
         # simultaneous requests from each observing running=False.
+        if lane_name == "instagram":
+            from promptstudio.scraping.ig_cooldown import block_message
+
+            cooled = block_message()
+            if cooled:
+                self.last_refusal = cooled
+                return False
+
         with self._job_lock:
             lane = self._lane(lane_name)
             if lane.status.get("running"):
