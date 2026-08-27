@@ -30,6 +30,7 @@ const state = {
     // Instagram fetch tool. Server-side (IG_BACKEND); not a view pref.
     instagramBackend: 'instaloader',
     instagramCookies: { mode: 'none', ready: false },
+    instagramCooldown: null,
     comfyPollTimer: null,
     // A4 registry, from /api/workflows. Which graph runs is a user choice now,
     // not something inferred from which of three buttons was pressed.
@@ -6989,9 +6990,9 @@ async function pollScrapeStatus() {
 }
 
 /**
- * Sidebar “Sync new posts”: full-feed gap fill (mode=full, deep=true).
- * Avoids mode=latest + max_posts=50 which stops early and leaves older gaps
- * (Mikayla case: 50 newest filled, ~117 older posts never walked).
+ * Sidebar “Sync new posts”: catch-up only (newest until already-local).
+ * A full-feed walk of thousands of posts is what trips Instagram's
+ * automation detector; deep archive fills stay on the Sync modal.
  */
 async function syncLatestSelectedCreator() {
     const username = (state.selectedCreator || '').trim().replace(/^@/, '');
@@ -7005,10 +7006,11 @@ async function syncLatestSelectedCreator() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 username,
-                mode: 'full',
-                deep: true,
-                include_videos: true,
-                // omit max_posts → server uses FULL_SCRAPE_MAX_POSTS (default 5000)
+                mode: 'latest',
+                deep: false,
+                catch_up_only: true,
+                max_posts: 24,
+                include_videos: syncIncludeVideosValue(),
             }),
         });
         const data = await res.json().catch(() => ({}));
@@ -7056,7 +7058,7 @@ function scrapeModePayload() {
     if (mode === 'bounded') {
         return { mode: 'bounded', deep: false, max_posts: maxPosts };
     }
-    // Full archive: no ceiling, so the server applies FULL_SCRAPE_MAX_POSTS
+    // Full archive: server applies FULL_SCRAPE_MAX_POSTS, then IG_POSTS_HARD_CAP
     return { mode: 'full', deep: true };
 }
 
@@ -7103,10 +7105,20 @@ function applyInstagramBackendFrom(data) {
     if (data.instagram_cookies && typeof data.instagram_cookies === 'object') {
         state.instagramCookies = data.instagram_cookies;
     }
+    if (data.instagram_cooldown && typeof data.instagram_cooldown === 'object') {
+        state.instagramCooldown = data.instagram_cooldown;
+    } else if (data.sync && data.sync.instagram_cooldown) {
+        state.instagramCooldown = data.sync.instagram_cooldown;
+    }
     updateScrapeSourceUI();
 }
 
 function instagramBackendHint() {
+    const cool = state.instagramCooldown;
+    if (cool && cool.active) {
+        const left = cool.remaining_human ? ` (${cool.remaining_human} left)` : '';
+        return `Instagram scrape paused until ${cool.until || 'cooldown ends'}${left}. Do not scrape — Instagram flagged automation.`;
+    }
     const backend = state.instagramBackend || 'instaloader';
     if (backend !== 'gallery-dl') {
         return 'Jobs never run in parallel (Instagram rate limits). Backend: Instaloader.';
@@ -7522,8 +7534,8 @@ async function startSyncSaved() {
 }
 
 function syncIncludeVideosValue() {
-    // Default ON when checkbox missing (matches IG_INCLUDE_VIDEOS default)
-    if (!elements.syncIncludeVideos) return true;
+    // Default OFF when checkbox missing (matches IG_INCLUDE_VIDEOS default)
+    if (!elements.syncIncludeVideos) return false;
     return Boolean(elements.syncIncludeVideos.checked);
 }
 

@@ -1083,14 +1083,13 @@ class InstagramGalleryDlSource(GalleryDlSource):
         return super()._filename_format(target)
 
     def _ceiling_argv(self, options: ScrapeOptions) -> List[str]:
-        from promptstudio.config import FULL_SCRAPE_MAX_POSTS
+        from promptstudio.config import clamp_ig_posts
 
-        if options.mode == "full" and options.deep:
-            n = int(FULL_SCRAPE_MAX_POSTS)
-        elif options.max_posts is not None and int(options.max_posts) > 0:
+        if options.max_posts is not None and int(options.max_posts) > 0:
             n = int(options.max_posts)
         else:
             n = int(options.resolved_max_posts())
+        n = clamp_ig_posts(n)
         if n > 0:
             return ["-o", f"extractor.instagram.max-posts={n}"]
         return []

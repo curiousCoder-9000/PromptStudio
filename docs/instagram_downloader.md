@@ -19,6 +19,13 @@ gallery-dl + a real logged-in browser session is the **most reliable option in
 practice** right now (Instaloader issue #2726). It is not undetectable.
 Instagram can still challenge, rate-limit, or lock the account.
 
+**Automation warning:** sit out **72 hours** (`IG_COOLDOWN_HOURS`). The file
+`<archive>/ig_cooldown.json` makes every Instagram start path (API, queue drain,
+CLI) return 409 / abort until `until`. Switching to Instaloader will **not**
+clear the flag. One run is capped at `IG_POSTS_HARD_CAP` (default 80) posts;
+reels default **off**. Catch-up (`--abort` after already-local files) is the
+normal path — do not walk 5000 posts of one creator.
+
 ```ini
 IG_BACKEND=gallery-dl
 SCRAPE_COOKIES_FROM_BROWSER=brave
@@ -47,9 +54,9 @@ each account is a gallery-dl profile scrape (chronological, **no caption rank**)
 | Creator feed | `py scripts/download_creator_feed.py HANDLE --max-posts 50` | `POST /api/sync/creator` |
 | Following bulk | `py scripts/download_following.py` | `POST /api/sync/following` |
 
-**Videos / reels:** default **ON** (`IG_INCLUDE_VIDEOS=1`, config `INCLUDE_VIDEOS_DEFAULT`).  
-CLI: omit flag (default on), or `--no-reels` / `--include-reels`.  
-API/UI: `include_videos` body field + Sync modal checkbox.
+**Videos / reels:** default **OFF** (`IG_INCLUDE_VIDEOS=0`, config `INCLUDE_VIDEOS_DEFAULT`).  
+CLI: `--include-reels` to fetch them, `--no-reels` to skip.  
+API/UI: `include_videos` body field + Sync modal checkbox (unchecked by default).
 
 ### Acquisition playbook
 

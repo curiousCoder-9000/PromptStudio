@@ -123,6 +123,10 @@ Instaloader’s first call is `Profile.from_username()` →
 - Keep the logged-in Instagram tab closed during a scrape — same rate budget.
 - gallery-dl is the most reliable option in practice, not a guarantee.
   Auth/challenge/zero-download 429s still pause the Instagram lane.
+- An Instagram “automated process” warning is **not** fixed by switching to
+  Instaloader. Pause, wait out `ig_cooldown.json` (72h default), then resume
+  with catch-up + `IG_POSTS_HARD_CAP` (80). Do not scrape while the cooldown
+  is active.
 - See [instagram_downloader.md](instagram_downloader.md).
 
 ### Comfy generate fails

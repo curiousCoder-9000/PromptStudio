@@ -249,6 +249,20 @@ def _expand_post_groups(reps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return slides
 
 
+def _instagram_cooldown_block() -> Optional[Dict[str, Any]]:
+    """409 body when Instagram is sitting out an automation warning."""
+    from promptstudio.scraping.ig_cooldown import block_message, status
+
+    msg = block_message()
+    if not msg:
+        return None
+    return {
+        "status": "cooldown",
+        "message": msg,
+        "instagram_cooldown": status(),
+    }
+
+
 def _creator_queue_blocks_oneshot(source: str = "instagram") -> Optional[Dict[str, Any]]:
     """If this lane has pending jobs and is not paused, block one-shot sync.
 
@@ -976,6 +990,11 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 from promptstudio.scraping.sources import get_source
 
                 target = get_source(source_name).parse_target(username)
+                if target.source == "instagram":
+                    cooled = _instagram_cooldown_block()
+                    if cooled:
+                        self._send_json(cooled, 409)
+                        return
                 folder = ensure_creator_folder(target.folder)
                 q = CreatorScrapeQueue.get()
                 out = q.enqueue(
@@ -1130,6 +1149,10 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path == "/api/sync/saved":
+            cooled = _instagram_cooldown_block()
+            if cooled:
+                self._send_json(cooled, 409)
+                return
             blocked = _creator_queue_blocks_oneshot()
             if blocked:
                 self._send_json(blocked, 409)
@@ -1167,6 +1190,10 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 force_oneshot = data.get("oneshot", False)
                 if isinstance(force_oneshot, str):
                     force_oneshot = force_oneshot.lower() in ("1", "true", "yes")
+                cooled = _instagram_cooldown_block()
+                if cooled:
+                    self._send_json(cooled, 409)
+                    return
                 if CREATOR_SCRAPE_QUEUE_ENABLED and _scrape_queue and not force_oneshot:
                     if "include_videos" in data:
                         include_videos = bool(data.get("include_videos"))
@@ -1261,13 +1288,17 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         if path == "/api/sync/following":
             try:
-                from promptstudio.config import DEFAULT_ACCOUNTS_PER_DAY
+                from promptstudio.config import DEFAULT_ACCOUNTS_PER_DAY, clamp_ig_posts
 
+                cooled = _instagram_cooldown_block()
+                if cooled:
+                    self._send_json(cooled, 409)
+                    return
                 data = self._read_json_body()
                 max_accounts = int(
                     data.get("max_accounts", data.get("accounts_per_day", DEFAULT_ACCOUNTS_PER_DAY))
                 )
-                max_posts = int(data.get("max_posts", 20))
+                max_posts = clamp_ig_posts(int(data.get("max_posts", 20)))
                 min_media_count = int(data.get("min_media_count", 5))
                 if "include_videos" in data:
                     include_videos = bool(data.get("include_videos"))
@@ -2399,6 +2430,9 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
 
             snap["instagram_backend"] = instagram_backend()
             snap["instagram_cookies"] = instagram_cookies_info()
+            from promptstudio.scraping.ig_cooldown import status as cooldown_status
+
+            snap["instagram_cooldown"] = cooldown_status()
             self._send_json(snap)
             return
 

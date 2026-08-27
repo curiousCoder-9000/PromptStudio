@@ -631,10 +631,13 @@ class InstagramDownloader:
     ) -> SyncResult:
         """Stream entire feed; download every missing/incomplete post (no rank)."""
         ceiling: Optional[int]
+        from promptstudio.config import clamp_ig_posts
+
         try:
             mp = int(max_posts) if max_posts is not None else FULL_SCRAPE_MAX_POSTS
         except (TypeError, ValueError):
             mp = FULL_SCRAPE_MAX_POSTS
+        mp = clamp_ig_posts(mp)
         if mp <= 0:
             ceiling = None
         else:

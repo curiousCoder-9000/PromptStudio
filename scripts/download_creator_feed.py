@@ -49,7 +49,7 @@ def main():
         "--include-reels",
         action="store_true",
         default=None,
-        help="Download reels / video posts (default: on via IG_INCLUDE_VIDEOS)",
+        help="Download reels / video posts (default: IG_INCLUDE_VIDEOS)",
     )
     reels.add_argument(
         "--no-reels",
@@ -85,11 +85,13 @@ def main():
         include_videos=include_videos,
         catch_up_only=(mode == "latest"),
     )
-    src.run(
+    result = src.run(
         src.parse_target(args.username),
         opts,
         SourceContext(save_dir=SAVED_DIR, log=print),
     )
+    if result.aborted and result.stop_reason == "cooldown":
+        raise SystemExit(2)
 
 
 if __name__ == "__main__":
