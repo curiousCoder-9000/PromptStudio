@@ -1571,6 +1571,7 @@ function removePhotosFromView(relPaths) {
     }
 
     elements.galleryCount.textContent = galleryCountLabel();
+    updateGalleryTitle();
     updateEmptyState();
     updateBulkBar();
     return removed;
@@ -1960,7 +1961,7 @@ function setSourceFilter(source) {
         if (!has) {
             state.selectedCreator = null;
             state.creatorPanelOpen = false;
-            elements.galleryTitle.textContent = 'All Photos';
+            updateGalleryTitle();
             hideCreatorStylePanel();
         }
     }
@@ -2009,7 +2010,7 @@ function renderCreatorList() {
     allItem.addEventListener('click', () => {
         state.selectedCreator = null;
         state.creatorPanelOpen = false;
-        elements.galleryTitle.textContent = 'All Photos';
+        updateGalleryTitle();
         fetchPhotos();
         if (!setActiveCreatorRow()) renderCreatorList();
         updateCreatorStylePanel();
@@ -2042,7 +2043,7 @@ function renderCreatorList() {
             const creatorChanged = state.selectedCreator !== c.name;
             state.selectedCreator = c.name;
             state.creatorPanelOpen = true;
-            elements.galleryTitle.textContent = `@${c.name}`;
+            updateGalleryTitle();
             if (creatorChanged) fetchPhotos();
             // Only the highlight moved. Falls back to a full render if the
             // rows are not there to patch.
@@ -2382,9 +2383,65 @@ function rebuildGalleryTiles() {
 /** Label under the grid — posts and files are different units, so say which. */
 function galleryCountLabel() {
     const shown = state.galleryTiles.length;
-    const total = state.photoTotal ? ` / ${state.photoTotal}` : '';
-    if (!state.groupPosts) return `${shown}${total} photos`;
-    return `${shown}${total} posts · ${state.photos.length} photos`;
+    const total = Number(state.photoTotal) || 0;
+    // "12 / 12 photos" reads as a score. Only mention the total when there is
+    // genuinely more of it than is loaded.
+    const scope = total > shown ? `${shown} of ${total}` : `${shown}`;
+    if (!state.groupPosts) return `${scope} photos`;
+    return `${scope} posts · ${state.photos.length} photos`;
+}
+
+// Option labels from #verdictFilterSelect. Not read off the <select>, because
+// renderVerdictSelectPassRates() rewrites those to carry scoped counts.
+const VERDICT_FILTER_TITLES = {
+    keep: 'Keeps',
+    t2: 'Fashion (T2)',
+    t3: 'Revealing (T3)',
+    t4: 'Swim / lingerie (T4)',
+    reject: 'Rejects',
+    unusable: 'Unusable (T0)',
+    modest: 'Modest (T1)',
+    unclassified: 'Not classified',
+    error: 'Classify errors',
+};
+
+/**
+ * The heading is where you check what you are looking at, and it only ever
+ * read 'All Photos' or '@creator' — so a view filtered down to 17 rejects
+ * still claimed to be the whole archive, and review mode stacked a second,
+ * contradicting title underneath it. Scope first, then what is narrowing it.
+ */
+function updateGalleryTitle() {
+    if (!elements.galleryTitle) return;
+    // Review mode drives the grid from state.verdictFilter, not browseVerdict,
+    // so without this branch the heading read 'All Photos' directly above a
+    // strip announcing a reject pile. Same words as #reviewBarTitle on purpose:
+    // agreeing twice is a smaller problem than contradicting once.
+    const scope = state.reviewMode
+        ? (state.selectedCreator ? `Reviewing @${state.selectedCreator}` : 'Reviewing all creators')
+        : (state.selectedCreator ? `@${state.selectedCreator}` : 'All Photos');
+    const parts = [];
+    if (state.collectionId) {
+        const board = (state.collections || []).find(
+            (c) => Number(c.id) === Number(state.collectionId));
+        parts.push(board && board.name ? board.name : 'Board');
+    }
+    const verdict = state.reviewMode ? state.verdictFilter : state.browseVerdict;
+    if (verdict) {
+        parts.push(VERDICT_FILTER_TITLES[verdict] || verdict);
+    }
+    if (state.mediaType === 'photo') parts.push('Photos');
+    if (state.mediaType === 'video') parts.push('Reels');
+    if (state.favoritesOnly) parts.push('Favorites');
+    if (state.unanalyzedOnly) parts.push('Unanalyzed');
+    if (state.sourceFilter) parts.push(state.sourceFilter);
+    if (state.searchQuery) parts.push(`\u201c${state.searchQuery}\u201d`);
+    // Two qualifiers orient you; the controls directly below carry the rest,
+    // and a heading that wraps to three lines orients nobody.
+    const shown = parts.slice(0, 2);
+    const rest = parts.length - shown.length;
+    if (rest > 0) shown.push(`+${rest} more`);
+    elements.galleryTitle.textContent = [scope, ...shown].join(' · ');
 }
 
 function galleryHasActiveFilters() {
@@ -2423,9 +2480,18 @@ function updateEmptyState() {
 
     el.classList.toggle('is-first-run', firstRun);
     if (elements.emptyStateIcon) {
-        elements.emptyStateIcon.className = firstRun
-            ? 'fa-solid fa-sparkles empty-icon'
-            : 'fa-solid fa-image-slash empty-icon';
+        // `fa-sparkles` and `fa-image-slash` are Font Awesome *Pro* names and
+        // the vendored set is Free, so both rendered at width 0 -- every empty
+        // state, including the first screen a new archive shows, had a blank
+        // hole where its icon goes. The class name looks correct in the source;
+        // only the computed glyph shows it. Free names, one per state, since
+        // the copy already branches four ways.
+        const glyph = firstRun
+            ? 'fa-wand-magic-sparkles'
+            : filtered
+                ? 'fa-filter-circle-xmark'
+                : 'fa-folder-open';
+        elements.emptyStateIcon.className = `fa-solid ${glyph} empty-icon`;
     }
     if (elements.emptyStateTitle) {
         elements.emptyStateTitle.textContent = firstRun
@@ -2874,6 +2940,7 @@ function renderGallery({ append = false, fromIndex = 0 } = {}) {
     // Always derived, never maintained.
     rebuildGalleryTiles();
     elements.galleryCount.textContent = galleryCountLabel();
+    updateGalleryTitle();
 
     if (state.photos.length === 0) {
         unmountAllGalleryCards();
@@ -8542,7 +8609,7 @@ function reviewAfterClassify(creator) {
     if (!creator && state.selectedCreator) {
         state.selectedCreator = null;
         hideCreatorStylePanel();
-        if (elements.galleryTitle) elements.galleryTitle.textContent = 'All Photos';
+        updateGalleryTitle();
         renderCreatorList();
     }
     enterReviewMode(creator);
@@ -8800,7 +8867,7 @@ function enterReviewMode(creator, verdict = 'reject') {
     if (creator && creator !== state.selectedCreator) {
         state.selectedCreator = creator;
         state.creatorPanelOpen = true;
-        if (elements.galleryTitle) elements.galleryTitle.textContent = `@${creator}`;
+        updateGalleryTitle();
         renderCreatorList();
         updateCreatorStylePanel();
     }
@@ -9183,6 +9250,7 @@ function removePhotosFromFilter(relPaths) {
         reconcileLightboxAfterRemoval(state.lightboxIndex);
     }
     elements.galleryCount.textContent = galleryCountLabel();
+    updateGalleryTitle();
     updateEmptyState();
     updateReviewBar();
     return removed;

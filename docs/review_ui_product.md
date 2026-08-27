@@ -6,7 +6,7 @@
 | **Scope** | Frontend (`index.html` · `app.js` · `style.css`), UX, and product gaps not covered elsewhere |
 | **Companions** | [`product_review.md`](product_review.md) — value chain, Themes A/B/C/E · [`review_backend_architecture.md`](review_backend_architecture.md) — durability, storage, observability |
 | **Why a third review** | Neither companion audits the UI, and both rest on one premise (§0) that turned out to be false |
-| **Status** | Stage 1 shipped (§5) · Stage 2 shipped (§6) · review-mode trap fixed (§8) · U13–U14 shipped (§9) · U15–U16 deferred |
+| **Status** | Stage 1 shipped (§5) · Stage 2 shipped (§6) · review-mode trap fixed (§8) · U13–U14 shipped (§9) · U17–U24 shipped (§11) · U15–U16, U18, U25–U35 open |
 
 ---
 
@@ -258,3 +258,111 @@ already 65–120 ms, which is the scale at which S5's FTS5 decision deserves rev
 | **U13** bulk keep | ✅ | `POST /api/classify/verdict` accepts `rel_paths[]`; `ArchiveIndex.set_manual_verdicts()` writes one transaction. Review strip gained **Keep selected** beside Delete. Kept items leave the current filter (they are rescued, not still sitting in the reject pile). Unclassified paths are reported in `missing`, never invented. Single-path clients are unchanged. |
 | **U14** select-all honesty | ✅ | Count reads `N selected of 400 · 60 loaded` when the pile is larger than the page. **Select loaded (N)** is the page sweep; **Select all 400** fetches `GET /api/photos?ids=1` (same filters, `{rel_path, favorite}` only) and still skips favourites. |
 | **U10** empty states | ✅ | First-run, a filter miss, an empty review pile, and an empty creator each have their own copy. First-run shows a scrape field (handle or profile URL → Instagram / X / Reddit) rather than "try a different creator." Not the onboarding wizard §7 cut. |
+
+---
+
+## 10. Second review — driven, not read (2026-08-27)
+
+The first review read the frontend. This one drove it: a throwaway 49-photo /
+3-creator archive with seeded verdicts and prompts, headless Chrome over the
+existing CDP harness, 32 screenshots at 1440×900, 1280×800, 1024×768, 834×1112
+and 390×844, plus measured geometry, computed contrast and an ARIA sweep.
+
+Four of the eight findings below were invisible to reading, and that is the
+point worth keeping:
+
+- `:focus-visible` **matched** and drew **nothing**. The rule is present and
+  correct; `.btn-secondary` sets its own `box-shadow` 288 lines later at the
+  same specificity, so source order won. Only the computed style shows it.
+- `fa-image-slash` and `fa-sparkles` are spelled correctly and do not exist in
+  the vendored Free set. A missing glyph has no `content`, so it renders at
+  width 0 — an invisible icon, not a fallback box.
+- The stats band's cost was structural, not a number in the CSS: four cards in
+  a 3-column grid orphan the fourth onto its own row.
+- The lightbox close and next buttons overlapped their neighbours by 780 and
+  1936 px² — geometry, so nothing in the markup hints at it.
+
+| ID | Sev | Finding | Status |
+|----|-----|---------|--------|
+| **U17** | 🔴 | Two-thirds of the first screen was chrome: navbar 183px + stats 188px + header 132px put the first photo at **y=604 of 900**. At ≤1024px the stats went full-width-stacked (~400px) and the first screen held **no photos at all**. | ✅ §11 |
+| **U18** | 🔴 | Lightbox space is allocated inversely to the task: the media pane is 33% filled (400×400 image in 594×820), ~250px goes to TYPE/SIZE/POSTED/CAPTION mostly reading "—", and the generated prompt sits in a **nested** ~190px scroller with the ComfyUI controls at y=1134. | deferred — a redesign, not a fix |
+| **U19** | 🔴 | `#lightboxClose` overlapped `#regeneratePromptBtn` by 34×30px (label clipped to "Refre…", right third unclickable); `#lightboxNext` sat **entirely** over `.inspector-panel`, and over the panel title at 390px. Both were positioned against the modal card, not the media pane. | ✅ §11 |
+| **U20** | 🔴 | Every empty-state icon was invisible — both class names are Font Awesome **Pro**. Includes the first screen a new archive shows. | ✅ §11 |
+| **U21** | 🟠 | Keyboard focus was invisible on every `.btn` — the ring is a `box-shadow` and `.btn-secondary` overwrites it. 10 of 11 navbar buttons. | ✅ §11 |
+| **U22** | 🟠 | `--text-muted` #64748b is **3.9:1** on `--bg-dark` at 10.9–12.8px — below AA — and it is the token every keyboard legend and helper line uses, including `.triage-keys`, the only on-screen documentation of K/R/X. | ✅ §11 |
+| **U23** | 🟠 | `.verdict-pill.quiet` is `opacity: 0`, hover-only: the verdict is hidden in the one view where it carries information and loud in the views where the active filter already implies it. Never visible on touch. | ✅ §11 |
+| **U24** | 🟠 | `#galleryTitle` is only ever `All Photos` or `@creator`, so a view filtered to 17 rejects still claimed the whole archive, and review mode stacked a contradicting second title under it. The count read `17 / 17 photos`, which scans as a score. | ✅ §11 |
+
+**Still open, in rough value order:** U25 navbar has 11 co-equal buttons and
+`Refresh` is the loudest element on screen · U26 per-card Delete is one click
+while Favorite requires opening the lightbox · U28 9 of 10 modals lack
+`role="dialog"`, none move focus on open, and 5 have no visible close (`#syncModal`'s
+sits 55px below the fold) · U29 175 buttons / 13 aria-labels, `aria-pressed` on
+0 of 14 toggle chips, no `<h1>`, no `<nav>`, and `card-trash-btn` is an unnamed
+destructive control on every card · U30 native file and date inputs break the
+surface · U31 empty views keep every control, and the Outputs view keeps the
+photo gallery's sidebar · U32 two different actions both called "Refresh", and
+system-side voice in user copy · U33 Ollama-offline is a quiet pill with no next
+step while the UI still invites "Click for AI Prompt" · U34 sidebar order and
+the creator panel below the fold · U35 29–31px controls in the stacked layout.
+
+U27 (no thumbnail placeholder — an unencoded thumb rendered as a flat empty
+rectangle) is substantially covered by the skeletons that shipped with the
+windowed grid in `6d43253`.
+
+## 11. Fix log — U17, U19–U24
+
+| Item | Status | What changed |
+|------|--------|--------------|
+| **U17** chrome budget | ✅ | `.stats-bar` is a wrapping flex strip of compact chips instead of a 3-column card grid, and `position: sticky` moved off `.navbar` onto `.gallery-header`. The dead `@media (max-width:1024px) .stats-bar { grid-template-columns: 1fr }` is gone — that rule is what built the 400px wall on tablet and phone. The 768px block gets a matching bleed override, or the sticky header overhangs the glass edge. **Trade-off taken deliberately:** the navbar (search, job buttons) now scrolls away; the row that changes the view stays. |
+| **U19** lightbox chrome | ✅ | `#lightboxPrev` / `#lightboxNext` moved inside `.inspector-media` in the markup, so they centre on the image at every breakpoint rather than on the dialog — one move fixes desktop and the 390px stacked case, and no JS changed. `.panel-header` reserves 52px on the right for the close button; the header's own actions now wrap to a second row rather than sitting half-covered. |
+| **U20** empty-state icons | ✅ | Free-set names, one per state, since the copy already branches four ways: `fa-wand-magic-sparkles` (first run), `fa-filter-circle-xmark` (filter miss), `fa-folder-open` (empty creator / empty pile). |
+| **U21** focus ring | ✅ | `:focus-visible` draws `outline: 2px solid` + `outline-offset`, keeping the box-shadow. An outline cannot be cancelled by a component's own `box-shadow`. `.source-pill:focus-visible` stopped repeating `outline: none`, which would now mean opting out of the ring. |
+| **U22** muted text | ✅ | `--text-muted` #64748b → **#7b8ba5**. Text-only token; the `rgba(100, 116, 139, …)` background literals are untouched. |
+| **U23** verdict pill | ✅ | `.quiet` is `opacity: 0.62` (0.95 on hover) and drops the reveal transform. Quiet, not hidden. |
+| **U24** title + count | ✅ | New `updateGalleryTitle()` derives the heading from state — scope, then up to two active qualifiers and `+N more` — and is called wherever the count is set, so no filter change can leave it stale. Review mode reads `state.verdictFilter` rather than `browseVerdict`, so it names its pile in the same words as `#reviewBarTitle` instead of contradicting it. `galleryCountLabel()` says `12 photos` when everything is loaded and `60 of 400` only when it isn't. |
+
+### Measurements
+
+Required by AGENTS.md rule 13. Same browser session, 1440×900 unless stated.
+
+| | before | after |
+|---|---:|---:|
+| first photo card, top of viewport | 604px | **460px** |
+| stats band height | 188px | **46px** |
+| stats band height @1024 (4 stacked cards) | ~400px | **62px** |
+| pinned while scrolling | navbar, 183px | **gallery header** |
+| `#lightboxClose` ∩ `#regeneratePromptBtn` | 780px² | **0** |
+| `#lightboxNext` ∩ `.inspector-panel` | 1,936px² | **0** |
+| nav ∩ `.panel-header` @390px | 797 / 1,087px² | **0** |
+| `.btn-secondary` focus, computed | `outline: none`, box-shadow identical to resting | **`outline: solid 2px`** |
+| `--text-muted` on `--bg-dark` | 3.93:1 | **5.42:1** |
+| empty-state icon, rendered width | 0px | **63px** |
+| `.verdict-pill.quiet` opacity | 0 | **0.62** |
+
+First paint gains 144px of photos, roughly one more grid row; the larger win is
+mid-scroll, where the pinned row went from 183px of buttons you weren't using to
+the title, count, sort, verdict and filter chips you were.
+
+### Tests
+
+`tests/ui/test_layout_and_a11y.js` — 27 checks, registered in `run.sh` before
+`seed_many.py` inflates the row count. **21 of the 27 were confirmed failing
+against pre-fix `HEAD`** (source reverted, test file kept). The other six are
+deliberate controls over behaviour that was already correct — the `.filter-chip`
+focus ring, close-vs-Favorite, the plain unfiltered heading, the presence of a
+verdict pill, and exiting review mode — and they guard against a fix that
+over-applies. Two checks are worth calling out:
+
+- The focus check asserts the **outcome** — either an outline is drawn or the
+  box-shadow differs from an unfocused clone of the same element — not the
+  mechanism. Asserting `outline !== none` would have failed `.filter-chip`,
+  which was never broken.
+- The glyph check probes computed `::before` content and width, because the
+  class name is not the bug.
+
+`tests/test_offline_assets.py::test_every_icon_name_exists_in_the_vendored_set`
+scans every `fa-*` name in `index.html` and `app.js` against the vendored CSS.
+Comments are stripped first — this repo's own comments name the two Pro icons.
+`scripts/vendor_web_assets.py --check` verifies that the *files* are present; it
+cannot see a glyph that was never in them.

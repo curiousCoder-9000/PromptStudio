@@ -155,7 +155,7 @@ if [ ${#SUITES[@]} -eq 0 ]; then
           test_browse_and_paging.js test_source_filter.js test_post_grouping.js
           test_scrape_lanes.js test_generation_rating.js
           test_outputs_gallery.js test_batch_generate.js test_workflow_registry.js
-          test_label_mode.js test_phase15.js
+          test_label_mode.js test_phase15.js test_layout_and_a11y.js
           # Last on purpose: seed_many.py adds a few hundred rows so the
           # windowing suite has more photos than one window holds, and those
           # rows would change the card counts every suite above asserts on.
@@ -171,7 +171,8 @@ for suite in "${SUITES[@]}"; do
   # Classify verdicts live in SQLite and there is no API to write one without
   # running the vision model, so this suite gets its fixture seeded directly.
   if [ "$suite" = "test_classify_review.js" ] || [ "$suite" = "test_insights_and_pollers.js" ] \
-     || [ "$suite" = "test_distribution_guard.js" ]; then
+     || [ "$suite" = "test_distribution_guard.js" ] \
+     || [ "$suite" = "test_layout_and_a11y.js" ]; then
     PROMPTSTUDIO_ARCHIVE="$ARCHIVE" "$PYTHON" "$REPO_ROOT/tests/ui/seed_verdicts.py" "$ARCHIVE" \
       || { echo "FATAL: verdict seeding failed" >&2; STATUS=1; continue; }
   fi

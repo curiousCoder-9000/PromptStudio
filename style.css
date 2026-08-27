@@ -12,7 +12,9 @@
     --accent-orange: #f97316;
     --text-primary: #f8fafc;
     --text-secondary: #94a3b8;
-    --text-muted: #64748b;
+    /* 5.4:1 on --bg-dark. #64748b was 3.9:1 at 11px, and this token is
+       what every keyboard legend and helper line is set in. */
+    --text-muted: #7b8ba5;
     --border-glass: rgba(255, 255, 255, 0.09);
     --border-hover: rgba(139, 92, 246, 0.45);
     --focus-ring: 0 0 0 3px rgba(139, 92, 246, 0.28);
@@ -64,7 +66,12 @@ body {
 }
 
 :focus-visible {
-    outline: none;
+    /* An outline, not only a box-shadow. `.btn-secondary` and `.filter-chip`
+       set their own box-shadow later in this file at the same specificity
+       (0,1,0), so source order won and the ring silently vanished on every
+       button in the navbar. An outline cannot be overwritten that way. */
+    outline: 2px solid rgba(139, 92, 246, 0.9);
+    outline-offset: 2px;
     box-shadow: var(--focus-ring);
 }
 
@@ -126,8 +133,11 @@ body {
     padding: 14px 22px;
     border-radius: var(--radius-lg);
     box-shadow: var(--surface-inset), var(--shadow-md);
-    position: sticky;
-    top: 12px;
+    /* Deliberately not sticky. Eleven buttons wrap to two rows here, so this
+       pinned 183px of chrome to the top of every scroll while the row that
+       actually changes the view -- sort, verdict, filter chips -- scrolled
+       away. `.gallery-header` is sticky instead. */
+    position: relative;
     z-index: 100;
 }
 
@@ -397,11 +407,15 @@ body {
     width: 100%;
 }
 
-/* Stats Bar */
+/* Stats Bar
+   A strip, not a card grid. As `repeat(3, 1fr)` the fourth card orphaned onto
+   its own row and the band cost 188px of the first screen -- with the navbar
+   and gallery header that put the first photo at y=604 of 900, and at
+   <=1024px, where the cards went full-width, the first screen held none. */
 .stats-bar {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
 }
 
 .stat-card {
@@ -409,11 +423,12 @@ body {
     border: 1px solid var(--border-glass);
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
-    padding: 18px 22px;
-    border-radius: var(--radius-lg);
+    flex: 1 1 190px;
+    padding: 8px 14px;
+    border-radius: var(--radius-md);
     display: flex;
     align-items: center;
-    gap: 18px;
+    gap: 10px;
     transition: var(--transition-fast);
     box-shadow: var(--surface-inset), var(--shadow-sm);
     position: relative;
@@ -424,9 +439,9 @@ body {
     content: '';
     position: absolute;
     left: 0;
-    top: 12px;
-    bottom: 12px;
-    width: 3px;
+    top: 7px;
+    bottom: 7px;
+    width: 2px;
     border-radius: 0 4px 4px 0;
     background: linear-gradient(180deg, var(--accent-purple), var(--accent-pink));
     opacity: 0.7;
@@ -447,13 +462,13 @@ body {
 }
 
 .stat-icon {
-    width: 48px;
-    height: 48px;
-    border-radius: var(--radius-md);
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-sm);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 1.25rem;
+    font-size: 0.8rem;
     flex-shrink: 0;
 }
 
@@ -465,12 +480,14 @@ body {
 
 .stat-info {
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
+    align-items: baseline;
+    gap: 7px;
     min-width: 0;
 }
 
 .stat-value {
-    font-size: 1.55rem;
+    font-size: 1.1rem;
     font-weight: 700;
     line-height: 1.2;
     letter-spacing: -0.02em;
@@ -692,6 +709,11 @@ body {
     min-width: 0;
 }
 
+/* Sticky, because this is the row you reach for mid-scroll: the title saying
+   what you are looking at, the count, sort, verdict and the filter chips. The
+   negative margins bleed it over `.gallery-container`'s 22px padding so cards
+   scroll under the full width of the bar rather than beside it, and the
+   matching padding puts the content back where it was. */
 .gallery-header {
     display: flex;
     align-items: center;
@@ -699,7 +721,15 @@ body {
     gap: 14px;
     flex-wrap: wrap;
     border-bottom: 1px solid var(--border-glass);
-    padding-bottom: 14px;
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    margin: -22px -22px 0;
+    padding: 20px 22px 14px;
+    background: rgba(17, 25, 40, 0.94);
+    backdrop-filter: blur(14px) saturate(1.15);
+    -webkit-backdrop-filter: blur(14px) saturate(1.15);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
 }
 
 .gallery-title-group {
@@ -1949,6 +1979,9 @@ body {
     flex-wrap: wrap;
     border-bottom: 1px solid var(--border-glass);
     padding-bottom: 12px;
+    /* `.lightbox-close` is absolute to the modal card and lands here, where it
+       covered the right third of #regeneratePromptBtn. */
+    padding-right: 52px;
 }
 
 .panel-header h3 {
@@ -4119,10 +4152,6 @@ button.tag-pill.tag-clickable:hover {
         overflow-y: auto;
     }
 
-    .stats-bar {
-        grid-template-columns: 1fr;
-    }
-
     .workspace {
         grid-template-columns: 1fr;
     }
@@ -4165,6 +4194,13 @@ button.tag-pill.tag-clickable:hover {
 
     .gallery-container {
         padding: 14px;
+    }
+
+    /* Match the container's smaller padding, or the sticky header's bleed
+       overhangs the glass edge. */
+    .gallery-header {
+        margin: -14px -14px 0;
+        padding: 14px 14px 12px;
     }
 
     .gallery-grid {
@@ -4669,7 +4705,6 @@ button.tag-pill.tag-clickable:hover {
 }
 
 .source-pill:focus-visible {
-    outline: none;
     box-shadow: var(--focus-ring);
 }
 
@@ -4729,15 +4764,17 @@ button.tag-pill.tag-clickable:hover {
 .verdict-pill.error { background: rgba(249, 115, 22, 0.92); color: #fff; }
 
 /* Outside review mode the verdict is context, not the task. */
+/* Quiet, not hidden. At `opacity: 0` the model's call was legible only on the
+   card under the cursor -- so the badge disappeared in the one view where it
+   carries information (unfiltered browse) and went loud in the views where the
+   active filter already implies it. On a touch device, never visible at all. */
 .verdict-pill.quiet {
-    opacity: 0;
-    transform: translateY(4px);
-    transition: opacity var(--transition-fast), transform var(--transition-fast);
+    opacity: 0.62;
+    transition: opacity var(--transition-fast);
 }
 
 .photo-card:hover .verdict-pill.quiet {
-    opacity: 0.92;
-    transform: translateY(0);
+    opacity: 0.95;
 }
 
 .verdict-pill-manual { font-size: 0.6rem; opacity: 0.85; }

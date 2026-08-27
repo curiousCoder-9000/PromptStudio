@@ -330,7 +330,10 @@
                      first-run, a filter miss, and an empty review pile are
                      different situations and used to share one lie. -->
                 <div class="empty-state" id="emptyState" style="display:none;">
-                    <i class="fa-solid fa-image-slash empty-icon" id="emptyStateIcon"></i>
+                    <!-- Set per state by updateEmptyState(). Keep to Font
+                         Awesome *Free* names: a Pro name renders width 0, i.e.
+                         a blank hole. tests/test_offline_assets.py enforces. -->
+                    <i class="fa-solid fa-folder-open empty-icon" id="emptyStateIcon"></i>
                     <h3 id="emptyStateTitle">No photos found</h3>
                     <p id="emptyStateCopy">Try selecting a different creator or clearing your search query.</p>
                     <form class="empty-scrape" id="emptyScrapeForm" style="display:none;" autocomplete="off">
@@ -506,13 +509,17 @@
     <div class="lightbox" id="lightboxModal" style="display:none;">
         <div class="lightbox-overlay" id="lightboxOverlay"></div>
         <div class="lightbox-modal-card">
-            <button class="lightbox-close" id="lightboxClose"><i class="fa-solid fa-xmark"></i></button>
-            <button class="lightbox-nav prev" id="lightboxPrev"><i class="fa-solid fa-chevron-left"></i></button>
-            <button class="lightbox-nav next" id="lightboxNext"><i class="fa-solid fa-chevron-right"></i></button>
-            
+            <button class="lightbox-close" id="lightboxClose" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
+
             <div class="prompt-inspector-layout">
                 <!-- Left: Media Viewer -->
                 <div class="inspector-media">
+                    <!-- Inside the media pane, not the modal card. Positioned
+                         against the card they were centred on the whole dialog,
+                         so `next` sat on top of the inspector panel's caption
+                         field on desktop and on the panel title at 390px. -->
+                    <button class="lightbox-nav prev" id="lightboxPrev" aria-label="Previous"><i class="fa-solid fa-chevron-left"></i></button>
+                    <button class="lightbox-nav next" id="lightboxNext" aria-label="Next"><i class="fa-solid fa-chevron-right"></i></button>
                     <div class="media-compare" id="mediaCompare">
                         <div class="media-pane original" id="lightboxMediaPane">
                             <span class="media-pane-label">Original</span>
