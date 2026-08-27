@@ -33,6 +33,12 @@ const { Session, Report, sleep } = require('./cdp');
   r.check('verdict filter exists in the normal view controls',
     Array.isArray(hasControl) && hasControl.includes('reject'),
     JSON.stringify(hasControl));
+  r.check('keep is split into t2/t3/t4 — reject already is t0+t1',
+    Array.isArray(hasControl)
+      && hasControl.includes('t2')
+      && hasControl.includes('t3')
+      && hasControl.includes('t4'),
+    JSON.stringify(hasControl));
   r.check('default is "any verdict"', hasControl && hasControl[0] === '',
     String(hasControl && hasControl[0]));
 
@@ -40,8 +46,13 @@ const { Session, Report, sleep } = require('./cdp');
     const sel = document.getElementById('verdictFilterSelect');
     return [...sel.options].map((o) => ({ value: o.value, label: o.textContent }));
   `);
-  r.check('options show how many photos they select, not a blanket %',
-    countLabels.filter((o) => o.value).every((o) => /· \d/.test(o.label) && !/· \d+%$/.test(o.label)),
+  r.check('every valued option carries a count',
+    countLabels.filter((o) => o.value).every((o) => /· \d/.test(o.label)),
+    JSON.stringify(countLabels.map((o) => o.label)));
+  const withPct = countLabels.filter((o) => /· \d+%$/.test(o.label));
+  r.check('% is only on a bucket that dominates this view, not a blanket',
+    withPct.length < countLabels.filter((o) => o.value).length
+      && withPct.every((o) => /· (6[1-9]|[7-9]\d|100)%$/.test(o.label)),
     JSON.stringify(countLabels.map((o) => o.label)));
 
   const tierOption = await s.eval(`
@@ -83,6 +94,73 @@ const { Session, Report, sleep } = require('./cdp');
     return pill ? !pill.classList.contains('quiet') : 'no-pill';
   `);
   r.check('pills are loud while filtering by verdict', loudPills === true, String(loudPills));
+
+  await s.resetFetchLog();
+  await s.eval(`
+    const sel = document.getElementById('verdictFilterSelect');
+    sel.value = 't4';
+    sel.dispatchEvent(new Event('change'));
+    return true;
+  `);
+  await sleep(700);
+  calls = (await s.fetchLog()).calls.filter((u) => u.includes('/api/photos'));
+  r.check('t4 browse filter reaches the server',
+    calls.some((u) => u.includes('verdict=t4')), calls[0] || '(none)');
+
+  // Native <select> on Windows composites a translucent background against
+  // white, so lavender/yellow text on 18% purple vanished. Both active and
+  // saturated states have to stay opaque with readable text.
+  const contrast = await s.eval(`
+    function parseRgba(s) {
+      const m = String(s).match(/rgba?\\((\\d+)[, ]+(\\d+)[, ]+(\\d+)(?:[, /]+([\\d.]+))?/);
+      if (!m) return null;
+      return { r: +m[1], g: +m[2], b: +m[3], a: m[4] === undefined ? 1 : +m[4] };
+    }
+    function lum(c) {
+      const lin = [c.r, c.g, c.b].map((v) => {
+        v /= 255;
+        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      });
+      return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+    }
+    function ratio(fg, bg) {
+      if (!fg || !bg) return 0;
+      const hi = Math.max(lum(fg), lum(bg));
+      const lo = Math.min(lum(fg), lum(bg));
+      return (hi + 0.05) / (lo + 0.05);
+    }
+    const sel = document.getElementById('verdictFilterSelect');
+    const active = getComputedStyle(sel);
+    const activeBgStr = active.backgroundColor;
+    const activeFgStr = active.color;
+    const activeBg = parseRgba(activeBgStr);
+    const activeFg = parseRgba(activeFgStr);
+    sel.classList.add('is-saturated');
+    const sat = getComputedStyle(sel);
+    const satBgStr = sat.backgroundColor;
+    const satFgStr = sat.color;
+    const satBg = parseRgba(satBgStr);
+    const satFg = parseRgba(satFgStr);
+    sel.classList.remove('is-saturated');
+    return {
+      activeAlpha: activeBg && activeBg.a,
+      satAlpha: satBg && satBg.a,
+      activeRatio: ratio(activeFg, activeBg),
+      satRatio: ratio(satFg, satBg),
+      activeColor: activeFgStr,
+      activeBg: activeBgStr,
+      satColor: satFgStr,
+      satBg: satBgStr
+    };
+  `);
+  r.check('active select background is opaque (Windows native compositing)',
+    contrast.activeAlpha === 1, JSON.stringify(contrast));
+  r.check('saturated select background is opaque',
+    contrast.satAlpha === 1, JSON.stringify(contrast));
+  r.check('active label contrast is at least 4.5:1 against its own background',
+    contrast.activeRatio >= 4.5, JSON.stringify(contrast));
+  r.check('saturated label contrast is at least 4.5:1 against its own background',
+    contrast.satRatio >= 4.5, JSON.stringify(contrast));
 
   await s.eval(`
     const sel = document.getElementById('verdictFilterSelect');

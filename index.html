@@ -209,7 +209,8 @@
                             <option value="photo">Photos</option>
                             <option value="video">Reels</option>
                         </select>
-                        <!-- Verdict as a browse axis. Labels show how many photos
+                        <!-- Verdict as a browse axis. Reject already is T0+T1;
+                             T2/T3/T4 split keep. Labels show how many photos
                              the filter currently selects in this view. A percent
                              is appended only when that share of *this view* is
                              past DISTRIBUTION_MAX_SHARE — never an archive-wide
@@ -218,6 +219,9 @@
                         <select id="verdictFilterSelect" class="sort-select" title="How many photos each verdict currently selects in this view">
                             <option value="">Any verdict</option>
                             <option value="keep">Keeps</option>
+                            <option value="t2">Fashion (T2)</option>
+                            <option value="t3">Revealing (T3)</option>
+                            <option value="t4">Swim / lingerie (T4)</option>
                             <option value="reject">Rejects</option>
                             <option value="unusable">Unusable (T0)</option>
                             <option value="modest">Modest (T1)</option>

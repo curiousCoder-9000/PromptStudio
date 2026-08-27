@@ -77,3 +77,20 @@ def test_photos_ids_returns_the_whole_filtered_pile(api, make_photo):
     assert by_path[rels["b.jpg"]] is True
     assert "photos" not in payload
     assert rels["keep.jpg"] not in by_path
+
+
+def test_photos_accepts_keep_tier_filters(api, make_photo):
+    """Reject already is T0+T1. t2/t3/t4 have to be first-class query values
+    or the browse dropdown cannot split the keep pile."""
+    index = ArchiveIndex.get()
+    rels = _seed(index, make_photo, [("fashion.jpg", 2), ("swim.jpg", 4)])
+
+    status, payload = api("GET", "/api/photos?verdict=t4")
+    assert status == 200
+    assert payload["total"] == 1
+    assert payload["photos"][0]["rel_path"] == rels["swim.jpg"]
+
+    status, payload = api("GET", "/api/photos?verdict=t2")
+    assert status == 200
+    assert payload["total"] == 1
+    assert payload["photos"][0]["rel_path"] == rels["fashion.jpg"]

@@ -42,6 +42,10 @@
     color: #fff;
 }
 
+html {
+    color-scheme: dark;
+}
+
 body {
     background-color: var(--bg-dark);
     background-image:
@@ -757,7 +761,10 @@ body {
 }
 
 .sort-select {
-    background: rgba(30, 41, 59, 0.8);
+    /* Opaque on purpose: Windows native <select> composites a translucent
+       background against white, not the page, so alpha + light text vanishes. */
+    background-color: #1e293b;
+    background: #1e293b;
     border: 1px solid var(--border-glass);
     color: var(--text-primary);
     font-family: var(--font-sub);
@@ -766,6 +773,12 @@ body {
     border-radius: var(--radius-sm);
     outline: none;
     cursor: pointer;
+    color-scheme: dark;
+}
+
+.sort-select option {
+    background-color: #1e293b;
+    color: #f8fafc;
 }
 
 .sort-select:focus {
@@ -774,11 +787,13 @@ body {
 }
 
 /* A select that is silently filtering the grid looks identical to one that is
-   not. The filter chips beside it get an .active state; this is its twin. */
+   not. The filter chips beside it get an .active state; this is its twin.
+   Background stays opaque so the closed-state label cannot wash out. */
 .sort-select.is-active {
-    background: rgba(139, 92, 246, 0.18);
-    border-color: rgba(139, 92, 246, 0.45);
-    color: #ddd6fe;
+    background-color: #2a2150;
+    background: #2a2150;
+    border-color: rgba(167, 139, 250, 0.7);
+    color: #f8fafc;
 }
 
 .control-label {
@@ -4711,10 +4726,14 @@ body.label-mode .view-controls {
 }
 
 /* Same signal on the browse dropdown — review mode is opt-in, and the guard
-   has to be visible without going looking for it. */
+   has to be visible without going looking for it. Warn with chrome, not by
+   recolouring the label: yellow-on-translucent was the other washout path. */
 .sort-select.is-saturated {
-    border-color: rgba(251, 191, 36, 0.5);
-    color: #fcd34d;
+    background-color: #2a2410;
+    background: #2a2410;
+    border-color: rgba(251, 191, 36, 0.75);
+    color: #f8fafc;
+    box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.4);
 }
 
 .review-bar-actions {

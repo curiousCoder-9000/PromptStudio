@@ -156,7 +156,28 @@ _VERDICT_CASE = (
     "ELSE 'keep' END"
 )
 
-VERDICT_FILTERS = ("keep", "reject", "unclassified", "error", "unusable", "modest")
+# Raw-tier browse filters. Parallel to `unusable`/`modest` (T0/T1) — those
+# split reject; these split keep. Query values stay `t2`/`t3`/`t4` so a
+# moved reject-cut cannot rename them.
+_TIER_FILTERS = {
+    "unusable": 0,
+    "modest": 1,
+    "t2": 2,
+    "t3": 3,
+    "t4": 4,
+}
+
+VERDICT_FILTERS = (
+    "keep",
+    "t2",
+    "t3",
+    "t4",
+    "reject",
+    "unusable",
+    "modest",
+    "unclassified",
+    "error",
+)
 LABEL_FILTERS = ("unlabeled", "keep", "discard")
 SEARCH_MODES = ("text", "semantic")
 
@@ -227,19 +248,18 @@ def _verdict_predicate(name: str, cut: int) -> Tuple[str, List[Any]]:
     Shared by `query_photos` and `verdict_facet_counts` so a chip's pass-rate
     badge cannot end up describing a different filter than the chip runs.
 
-    `unusable` (tier 0) and `modest` (tier 1) are the two halves of `reject`,
-    split because the 0 boundary is a quality gate anyone would accept while
-    the 1 boundary is a taste call that has never been measured. Both ignore
-    rows the user has overridden by hand — a manual verdict is not the
-    classifier's output and must not be counted as evidence about it.
+    Raw-tier names (`unusable`/`modest`/`t2`/`t3`/`t4`) ignore rows the user
+    has overridden by hand — a manual verdict is not the classifier's output
+    and must not be counted as evidence about it. T0/T1 split `reject` (quality
+    gate vs taste call); T2/T3/T4 split `keep`, because `reject` already
+    captures the first two and "Keeps" otherwise collapses three distinct
+    outfits into one chip.
     """
     case = _VERDICT_CASE.format(cut=cut)
     if name in ("keep", "reject", "unclassified", "error"):
         return f"{case} = ?", [name]
-    if name == "unusable":
-        return "v.manual IS NULL AND v.tier = 0", []
-    if name == "modest":
-        return "v.manual IS NULL AND v.tier = 1", []
+    if name in _TIER_FILTERS:
+        return "v.manual IS NULL AND v.tier = ?", [_TIER_FILTERS[name]]
     return "", []
 
 # Creators with no verdict row at all still need every key present, or the
@@ -251,6 +271,9 @@ _EMPTY_VERDICT_COUNTS: Dict[str, int] = {
     "error_count": 0,
     "unusable_count": 0,
     "modest_count": 0,
+    "t2_count": 0,
+    "t3_count": 0,
+    "t4_count": 0,
     "stale_count": 0,
 }
 
@@ -1969,10 +1992,10 @@ class ArchiveIndex:
     ) -> Dict[str, Dict[str, int]]:
         """Per-creator keep/reject/unclassified counters for the sidebar.
 
-        `unusable` (tier 0) and `modest` (tier 1) are broken out of `reject` on
-        purpose: the 0 boundary is a quality gate anyone would accept, while the
-        1 boundary is a taste call that has never been measured. The review UI
-        lets you act on them separately, so the counts have to arrive separately.
+        `unusable` (tier 0) and `modest` (tier 1) are broken out of `reject`,
+        and `t2`/`t3`/`t4` out of `keep`, so the browse dropdown can act on a
+        single exposure tier. The review UI and the gallery labels both read
+        these counters, so they have to arrive separately.
 
         `source` scopes the counters to one platform. Without it a merged folder
         would show its Instagram rejects while the user is filtered to X — a
@@ -2027,6 +2050,12 @@ class ArchiveIndex:
             "AS unusable_count",
             "SUM(CASE WHEN v.tier = 1 AND v.manual IS NULL THEN 1 ELSE 0 END) "
             "AS modest_count",
+            "SUM(CASE WHEN v.tier = 2 AND v.manual IS NULL THEN 1 ELSE 0 END) "
+            "AS t2_count",
+            "SUM(CASE WHEN v.tier = 3 AND v.manual IS NULL THEN 1 ELSE 0 END) "
+            "AS t3_count",
+            "SUM(CASE WHEN v.tier = 4 AND v.manual IS NULL THEN 1 ELSE 0 END) "
+            "AS t4_count",
             f"SUM({stale_expr}) AS stale_count",
         )
         sql = (
@@ -2040,7 +2069,7 @@ class ArchiveIndex:
         """Share of the archive each verdict filter selects — the B4 pass rate.
 
         One grouped pass over `photos` for every filter, not one COUNT per
-        chip: the review strip has five and the browse dropdown seven, and a
+        chip: the review strip has five and the browse dropdown ten, and a
         round trip each is how a badge meant to be glanced at turns into a
         reason not to render it. The predicates come from
         `_verdict_predicate`, the same source `query_photos` filters with.
@@ -2055,8 +2084,9 @@ class ArchiveIndex:
         same answer as measured at zero.
 
         Measured (rule 13) at 20k photos / 16k verdicts: **12.6 ms**, taking
-        `stats()` from ~15 ms to ~28 ms. Six `SUM(CASE …)` over one join scan —
-        a COUNT per chip would pay that scan six times over.
+        `stats()` from ~15 ms to ~28 ms. One `SUM(CASE …)` per filter over a
+        single join scan — a COUNT per chip would pay that scan once per
+        option.
         """
         cut_v = self._reject_cut(cut)
         selects = ["COUNT(*) AS total"]
@@ -3146,10 +3176,9 @@ class ArchiveIndex:
         verdict_case = _VERDICT_CASE.format(cut=cut)
         if verdict:
             # Same predicate the pass-rate badge counts with — see
-            # `_verdict_predicate`. Tier 0 alone is "no woman / man in frame /
-            # poster / unusable quality", split from `reject` so a cautious
-            # cleanup pass can act on the boundary that is a quality gate
-            # rather than a taste call.
+            # `_verdict_predicate`. Raw-tier names (T0–T4) split reject and
+            # keep so a browse pass can act on one exposure bucket rather
+            # than the collapsed policy view.
             clause, clause_params = _verdict_predicate(verdict, cut)
             if clause:
                 where.append(clause)

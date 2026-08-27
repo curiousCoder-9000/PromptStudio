@@ -2108,7 +2108,8 @@ function selectedCreatorMeta() {
 
 const VERDICT_COUNT_FIELDS = [
     'photo_count', 'keep_count', 'reject_count', 'unusable_count',
-    'modest_count', 'unclassified_count', 'stale_count', 'error_count',
+    'modest_count', 't2_count', 't3_count', 't4_count',
+    'unclassified_count', 'stale_count', 'error_count',
 ];
 
 /**
@@ -8310,6 +8311,9 @@ function renderVerdictPassRates() {
 
 const VERDICT_SELECT_COUNT = {
     keep: 'keep_count',
+    t2: 't2_count',
+    t3: 't3_count',
+    t4: 't4_count',
     reject: 'reject_count',
     unusable: 'unusable_count',
     modest: 'modest_count',

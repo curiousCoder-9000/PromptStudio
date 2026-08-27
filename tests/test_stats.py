@@ -155,8 +155,8 @@ def test_an_errored_verdict_still_counts_as_classified(store, make_photo):
 # Every verdict filter advertises the share of the archive it selects, so a
 # filter that has quietly become a no-op says so where the user is standing
 # rather than in a panel they stopped opening. One grouped pass serves all of
-# them: five chips in the review strip plus seven options in the browse
-# dropdown is twelve round trips otherwise, on a route that runs at app init.
+# them: five chips in the review strip plus ten options in the browse
+# dropdown is fifteen round trips otherwise, on a route that runs at app init.
 
 
 def _seed_tiers(make_photo, tiers, creator="tester"):
@@ -191,6 +191,9 @@ def test_verdict_facet_shares_are_that_count_over_the_whole_archive(make_photo):
     assert facets["counts"]["reject"] == 3  # tiers 0, 0, 1 against cut=1
     assert facets["shares"]["reject"] == 0.75
     assert facets["shares"]["keep"] == 0.25
+    assert facets["counts"]["t2"] == 1
+    assert facets["counts"]["t3"] == 0
+    assert facets["counts"]["t4"] == 0
     assert facets["shares"]["unclassified"] == 0.0
     assert facets["warn_above"] == DISTRIBUTION_MAX_SHARE
 

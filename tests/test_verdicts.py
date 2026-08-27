@@ -131,6 +131,23 @@ def test_unusable_and_modest_split_the_reject_pile(index, make_photo):
     assert all(p["verdict"]["tier"] == 1 for p in modest)
 
 
+def test_t2_t3_t4_split_the_keep_pile(index, make_photo):
+    """Reject already is T0+T1. Keep without these is T2+T3+T4 in one bucket."""
+    _seed(index, make_photo, [(f"t{t}.jpg", t) for t in range(5)])
+    by_tier = {}
+    for name in ("t2", "t3", "t4"):
+        photos, total = index.query_photos(verdict=name)
+        by_tier[name] = total
+        assert total == 1
+        assert photos[0]["verdict"]["tier"] == int(name[1])
+    assert index.query_photos(verdict="keep")[1] == sum(by_tier.values())
+    # A hand-kept T0 is a keep, but not evidence about the T2 pile.
+    rels = _seed(index, make_photo, [("hand.jpg", 0)])
+    index.set_manual_verdict(rels["hand.jpg"], "keep")
+    assert index.query_photos(verdict="keep")[1] == sum(by_tier.values()) + 1
+    assert index.query_photos(verdict="t2")[1] == 1
+
+
 def test_unclassified_excludes_anything_with_a_row(index, make_photo):
     _seed(index, make_photo, [("scored.jpg", 2), ("failed.jpg", -1)])
     make_photo(name="never.jpg")
@@ -247,6 +264,9 @@ def test_creator_counts_add_up_to_photo_count(index, make_photo):
     assert counts["unclassified_count"] == 1
     assert counts["unusable_count"] == 1
     assert counts["modest_count"] == 1
+    assert counts["t2_count"] == 0
+    assert counts["t3_count"] == 0
+    assert counts["t4_count"] == 1
     total = (
         counts["keep_count"]
         + counts["reject_count"]
@@ -279,7 +299,15 @@ def test_list_creators_carries_the_counters(index, make_photo):
 def test_creators_with_no_verdicts_still_have_every_key(index, make_photo):
     make_photo(name="a.jpg")
     row = next(c for c in index.list_creators() if c["name"] == "test_creator")
-    for key in ("keep_count", "reject_count", "unclassified_count", "stale_count"):
+    for key in (
+        "keep_count",
+        "reject_count",
+        "unclassified_count",
+        "stale_count",
+        "t2_count",
+        "t3_count",
+        "t4_count",
+    ):
         assert key in row
 
 

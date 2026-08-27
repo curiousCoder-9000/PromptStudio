@@ -86,9 +86,11 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
     "total": 1216,
     "reject_max_tier": 1,
     "warn_above": 0.6,
-    "counts": { "keep": 481, "reject": 331, "unclassified": 400,
+    "counts": { "keep": 481, "t2": 180, "t3": 201, "t4": 100,
+                "reject": 331, "unclassified": 400,
                 "error": 4, "unusable": 91, "modest": 240 },
-    "shares": { "keep": 0.3956, "reject": 0.2722, "unclassified": 0.3289,
+    "shares": { "keep": 0.3956, "t2": 0.1480, "t3": 0.1653, "t4": 0.0822,
+                "reject": 0.2722, "unclassified": 0.3289,
                 "error": 0.0033, "unusable": 0.0748, "modest": 0.1974 }
   } }
 ```
@@ -100,7 +102,7 @@ source filter. Reading the sidebar's per-creator `unclassified_count` instead (w
 was classified while another platform's backlog was untouched.
 
 `verdict_facets` is the **B4 pass rate** of every verdict filter: one grouped query for
-all six buckets, from the same predicates `/api/photos?verdict=` filters with, so a
+all nine buckets, from the same predicates `/api/photos?verdict=` filters with, so a
 chip's badge can never describe a filter nobody is running. Rides on this route rather
 than getting its own because the refresh points already match — app init, and the end of
 a classify run. Archive-wide and never scoped for the same reason `unclassified_total`
@@ -750,14 +752,17 @@ Query: `creator`, `search`, `mode` (`text` | `semantic` — C1 cosine over taste
 |-------|---------------|
 | `reject` | effective verdict is reject (`tier ≤ CLASSIFY_REJECT_MAX_TIER`, or `manual='reject'`) |
 | `keep` | effective verdict is keep |
+| `t2` | raw tier 2 only, no manual override — normal fashion |
+| `t3` | raw tier 3 only, no manual override — revealing daywear |
+| `t4` | raw tier 4 only, no manual override — swim / lingerie |
 | `unusable` | raw tier 0 only, no manual override — the quality gate |
 | `modest` | raw tier 1 only, no manual override — the taste call |
 | `error` | classify was attempted and failed; retryable |
 | `unclassified` | no verdict row at all |
 
-`unusable` and `modest` are raw-tier views on purpose: they let a cautious cleanup
-pass act on the boundary nobody argues about without touching the one that has
-never been measured. A hand-kept file drops out of both.
+Raw-tier views (`unusable`/`modest`/`t2`/`t3`/`t4`) ignore a hand override on
+purpose: T0/T1 split `reject`, T2/T3/T4 split `keep`, and a manual keep/reject is
+not evidence about the classifier's bucket. A hand-kept file drops out of all five.
 
 #### Post grouping
 

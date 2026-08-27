@@ -411,3 +411,24 @@ def test_archive_p_keep_distribution_is_not_saturated():
         what=f"p_keep ({GUARD_DB})",
         min_n=DISTRIBUTION_MIN_RATED,
     )
+
+
+def test_keep_tier_filters_are_judged_over_classified_keep_tiers(make_photo):
+    """t2/t3/t4 split the keep pile. Rejects and unclassified are not in their
+    denominator — counting either would fire on a mostly-T0 archive, or on one
+    that has not been classified yet, which is how a guard gets switched off.
+    """
+    index = ArchiveIndex.get()
+    for i, tier in enumerate([2] * 12 + [0] * 8):
+        rel, _ = make_photo(name=f"kt_{i:03d}.jpg")
+        index.set_verdict(rel, creator="tester", tier=tier)
+    for i in range(5):
+        make_photo(name=f"unseen_{i}.jpg")
+
+    counts = {
+        name: index.query_photos(verdict=name)[1] for name in ("t2", "t3", "t4")
+    }
+    assert counts == {"t2": 12, "t3": 0, "t4": 0}, counts
+    with pytest.raises(AssertionError) as caught:
+        assert_not_saturated(counts, what="keep-tier filter", min_n=10)
+    assert "t2" in str(caught.value)

@@ -23,8 +23,8 @@ const { Session, Report, sleep } = require('./cdp');
 const SATURATED = {
   total: 100,
   warn_above: 0.6,
-  counts: { keep: 5, reject: 95, unusable: 90, modest: 5, unclassified: 0, error: 0 },
-  shares: { keep: 0.05, reject: 0.95, unusable: 0.9, modest: 0.05, unclassified: 0, error: 0 }
+  counts: { keep: 5, t2: 2, t3: 2, t4: 1, reject: 95, unusable: 90, modest: 5, unclassified: 0, error: 0 },
+  shares: { keep: 0.05, t2: 0.02, t3: 0.02, t4: 0.01, reject: 0.95, unusable: 0.9, modest: 0.05, unclassified: 0, error: 0 }
 };
 
 (async () => {
@@ -49,7 +49,7 @@ const SATURATED = {
   `);
   r.check('stats carries verdict facets', facets !== null, JSON.stringify(facets));
   r.check('every filter has a share', facets
-    && facets.keys.join(',') === 'error,keep,modest,reject,unclassified,unusable',
+    && facets.keys.join(',') === 'error,keep,modest,reject,t2,t3,t4,unclassified,unusable',
     facets && facets.keys.join(','));
   r.check('the guard limit is served, not hardcoded in the page',
     facets && facets.warn === 0.6, String(facets && facets.warn));
@@ -65,7 +65,7 @@ const SATURATED = {
 
   const agree = await s.eval(`
     const out = [];
-    for (const key of ['reject', 'keep', 'unusable', 'modest', 'unclassified']) {
+    for (const key of ['reject', 'keep', 't2', 't3', 't4', 'unusable', 'modest', 'unclassified']) {
       const res = await fetch('/api/photos?limit=1&verdict=' + key);
       const data = await res.json();
       out.push({ key, page: data.total, facet: state.verdictFacets.counts[key] });
@@ -182,6 +182,9 @@ const SATURATED = {
       name: 'fully_done',
       photo_count: 40,
       keep_count: 40,
+      t2_count: 10,
+      t3_count: 20,
+      t4_count: 10,
       reject_count: 0,
       unusable_count: 0,
       modest_count: 0,
@@ -212,6 +215,9 @@ const SATURATED = {
       name: 'sat',
       photo_count: 100,
       keep_count: 5,
+      t2_count: 2,
+      t3_count: 2,
+      t4_count: 1,
       reject_count: 95,
       unusable_count: 90,
       modest_count: 5,
