@@ -833,6 +833,17 @@ body {
     grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
 }
 
+/* Windowed gallery: the two spacers stand in for the scroll height of the rows
+   that are not mounted, so the scrollbar and the load-more sentinel stay where
+   an un-windowed grid would have put them. Full-width, because a spacer that
+   occupied a single track would push the next card off its column. Height is
+   set inline by `setGallerySpacer`; a zero-height one is `display: none`, since
+   an empty grid item still generates a row and a gap. */
+.gallery-spacer {
+    grid-column: 1 / -1;
+    pointer-events: none;
+}
+
 .photo-card {
     position: relative;
     aspect-ratio: 4/5;

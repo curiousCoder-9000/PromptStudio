@@ -1393,7 +1393,15 @@ async function fetchPhotos({ append = false } = {}) {
             setGalleryLoading(false);
             // renderGallery replaces them on success; on error they'd linger
             clearGallerySkeletons();
-            if (!state.photos.length) updateEmptyState();
+            if (!state.photos.length) {
+                updateEmptyState();
+            } else if (!elements.galleryGrid.querySelector('.photo-card')) {
+                // The failure path: skeletons had already replaced the real
+                // cards, and clearing them leaves an empty grid sitting over a
+                // populated `state.photos` — plus, now, no windowing scaffold.
+                // Redraw from the model rather than showing nothing.
+                renderGallery();
+            }
             // photoTotal is only known once the page lands, and the review
             // strip prints it.
             if (state.reviewMode) updateReviewBar();
@@ -1419,17 +1427,48 @@ const SKELETON_COUNT = 12;
  * Only for a fresh query — an infinite-scroll append keeps the real cards on
  * screen, and replacing them with skeletons would look like a reset.
  */
+// Replacing a populated grid with 12 skeletons is honest under a 1.7 s newest
+// fetch and a flash under a 10 ms one — and after P0.1 it is the second. So the
+// skeletons wait: if the request lands first, the user never sees the grid blink.
+// An empty grid still gets them immediately, because there is nothing to flash.
+const GALLERY_SKELETON_DELAY_MS = 120;
+let gallerySkeletonTimer = 0;
+
 function showGallerySkeletons() {
     if (!elements.galleryGrid) return;
     elements.emptyState.style.display = 'none';
+    const populated = elements.galleryGrid.querySelector('.photo-card:not(.skeleton)');
+    if (!populated) {
+        paintGallerySkeletons();
+        return;
+    }
+    if (gallerySkeletonTimer) return;
+    gallerySkeletonTimer = window.setTimeout(() => {
+        gallerySkeletonTimer = 0;
+        // Still loading when the timer fired, or the response already landed
+        // and cleared it — check rather than assume.
+        if (state.photosLoading) paintGallerySkeletons();
+    }, GALLERY_SKELETON_DELAY_MS);
+}
+
+function paintGallerySkeletons() {
     const cards = Array.from({ length: SKELETON_COUNT })
         .map(() => '<div class="photo-card skeleton" aria-hidden="true"></div>')
         .join('');
+    // Wipes the windowed scaffold too, so `renderGallery` rebuilds it. That is
+    // why `ensureGalleryScaffold` checks for the spacers rather than a flag
+    // alone.
+    unmountAllGalleryCards();
     elements.galleryGrid.innerHTML = cards;
+    delete elements.galleryGrid.dataset.windowed;
 }
 
 function clearGallerySkeletons() {
     if (!elements.galleryGrid) return;
+    if (gallerySkeletonTimer) {
+        window.clearTimeout(gallerySkeletonTimer);
+        gallerySkeletonTimer = 0;
+    }
     elements.galleryGrid.querySelectorAll('.photo-card.skeleton').forEach((el) => el.remove());
 }
 
@@ -1493,19 +1532,17 @@ function removePhotosFromView(relPaths) {
     });
     if (!removed) return 0;
 
-    targets.forEach((rel) => {
-        state.selectedPaths.delete(rel);
-        const card = elements.galleryGrid.querySelector(
-            `.photo-card[data-rel-path="${CSS.escape(rel)}"]`
-        );
-        if (card) card.remove();
-    });
+    targets.forEach((rel) => state.selectedPaths.delete(rel));
 
-    // Grouped, a card is a post: deleting slide 3 of 11 leaves the tile there
-    // with a stale badge, and deleting slide 1 removes a card whose other ten
-    // slides are still loaded. Cheaper to redraw the grid than to patch it.
+    // Was: pull each card out by `[data-rel-path]`, and redraw only when
+    // grouped. Under the window that is not enough — a splice shifts every
+    // tile index above the deletion, so the mounted cards no longer describe
+    // the tiles they are keyed to. `renderGallery` remounts the window from
+    // the model, which is ~100 cards rather than the whole loaded pile, and it
+    // fixes the grouped case (a deleted slide changing a post's badge) for
+    // free. Scroll position is untouched, so the window recomputes in place.
     rebuildGalleryTiles();
-    if (state.groupPosts) renderGallery();
+    renderGallery();
 
     // Paging counters are in the same unit the server pages in — tiles, which
     // is posts when grouping and photos when not. Deleting one slide of a
@@ -1933,6 +1970,32 @@ function setSourceFilter(source) {
 }
 
 // Render Functions
+/**
+ * Move the `.active` marker without rebuilding the sidebar.
+ *
+ * `renderCreatorList` re-`innerHTML`s every row — 150 of them on the live
+ * archive — and it was called on every creator click, including the click that
+ * then goes on to `fetchPhotos()`. The only thing that changed is which row is
+ * highlighted. The rest (`updateCreatorStylePanel`, the verdict pass rates)
+ * still runs, because those genuinely depend on the selection.
+ */
+function setActiveCreatorRow() {
+    const list = elements.creatorList;
+    if (!list) return false;
+    const rows = list.querySelectorAll('.creator-item');
+    if (!rows.length) return false;
+    rows.forEach((row) => {
+        const isAll = row.classList.contains('all-creators');
+        const mine = isAll
+            ? !state.selectedCreator
+            : row.dataset.creator === state.selectedCreator;
+        row.classList.toggle('active', mine);
+    });
+    updateCreatorStylePanel();
+    renderVerdictSelectPassRates();
+    return true;
+}
+
 function renderCreatorList() {
     elements.creatorList.innerHTML = '';
     const q = (state.creatorSearchQuery || '').toLowerCase();
@@ -1948,7 +2011,7 @@ function renderCreatorList() {
         state.creatorPanelOpen = false;
         elements.galleryTitle.textContent = 'All Photos';
         fetchPhotos();
-        renderCreatorList();
+        if (!setActiveCreatorRow()) renderCreatorList();
         updateCreatorStylePanel();
     });
     elements.creatorList.appendChild(allItem);
@@ -1981,7 +2044,9 @@ function renderCreatorList() {
             state.creatorPanelOpen = true;
             elements.galleryTitle.textContent = `@${c.name}`;
             if (creatorChanged) fetchPhotos();
-            renderCreatorList();
+            // Only the highlight moved. Falls back to a full render if the
+            // rows are not there to patch.
+            if (!setActiveCreatorRow()) renderCreatorList();
             updateCreatorStylePanel();
         });
         elements.creatorList.appendChild(item);
@@ -2460,123 +2525,389 @@ function clearGalleryFilters() {
     fetchPhotos();
 }
 
-function renderGallery({ append = false, fromIndex = 0 } = {}) {
-    if (!append) {
-        elements.galleryGrid.innerHTML = '';
+// A tile whose thumbnail did not exist yet gets a 1x1 placeholder GIF from
+// `/media/thumb/` while a background worker encodes the real one (P0.3 in
+// docs/review_gallery_performance.md). Nothing would ever ask again, so an
+// archive that predates thumbnail-at-ingest would sit on grey tiles until a
+// manual reload — which is a worse tile than the slow one this replaced.
+//
+// `naturalWidth === 1` is the signal, and it needs no response header an
+// <img> cannot read. The server sends the placeholder `no-store`, so the
+// re-request actually reaches the server; the cache-buster is belt and braces
+// against an intermediate that ignores that.
+const THUMB_RETRY_MAX = 3;
+const THUMB_RETRY_BASE_MS = 1200;
+
+function installThumbPlaceholderRetry() {
+    const grid = elements.galleryGrid;
+    if (!grid || grid.dataset.thumbRetry === '1') return;
+    grid.dataset.thumbRetry = '1';
+    // Capture phase: `load` does not bubble, so delegation has to intercept it
+    // on the way down. One listener for the whole grid rather than one per
+    // tile — a long session is already 600-1,200 cards.
+    grid.addEventListener('load', (event) => {
+        const img = event.target;
+        if (!(img instanceof HTMLImageElement)) return;
+        if (img.naturalWidth > 1) return;
+        const tries = Number(img.dataset.thumbTries || 0);
+        if (tries >= THUMB_RETRY_MAX) return;
+        img.dataset.thumbTries = String(tries + 1);
+        const base = img.src.split('?')[0];
+        // Backing off: a reel's thumbnail is a frame-ranking pass, not a resize.
+        window.setTimeout(() => {
+            if (img.isConnected) img.src = `${base}?retry=${Date.now()}`;
+        }, THUMB_RETRY_BASE_MS * (tries + 1));
+    }, true);
+}
+
+/*
+ * Windowed gallery (P1 in docs/review_gallery_performance.md §7).
+ *
+ * The grid used to be append-only: `renderGallery({append})` never unmounted a
+ * card, so a long session was 10-20 pages of 60 = 600-1,200 cards, each with
+ * overlay markup and 2-3 listeners. `content-visibility: auto` (U2) skips
+ * *paint* for the off-screen ones, which is why 4.4k was survivable, but it
+ * does not skip node creation, listener attachment or memory.
+ *
+ * `state.photos` and `state.galleryTiles` stay exactly as they were — the model
+ * is untouched, so the lightbox, `selectedPaths`, keyboard nav and every
+ * `[data-rel-path]` patch site keep indexing it the same way. Only which tiles
+ * currently have DOM changes.
+ *
+ * Geometry is measured, not assumed. `.photo-card` is `aspect-ratio: 4/5` in a
+ * `repeat(auto-fill, minmax(...))` grid, so one row height and one column count
+ * describe the whole thing — but the minmax value moves at media-query
+ * breakpoints and with `.large`, so the numbers come from
+ * `getComputedStyle().gridTemplateColumns` rather than a copy of the CSS.
+ *
+ * The two spacers hold the scroll height that the unrendered rows would have
+ * occupied. They are `grid-column: 1 / -1`, and `display: none` at zero height
+ * — a zero-height grid item still generates a row *and* a gap, which would
+ * shift every offset by 18px and drift the scroll math.
+ *
+ * Known trade, called out in the review: Ctrl-F no longer finds off-screen
+ * cards. The search box goes to the server, which is the better answer at 61k
+ * anyway.
+ */
+
+// Rows of cards kept mounted above and below the viewport. Four rows at ~5
+// columns is ~40 spare cards either side — enough that a flick-scroll lands on
+// mounted content, few enough that the whole window stays near the ~80-120
+// cards the review asked for.
+const GALLERY_BUFFER_ROWS = 4;
+
+let galleryGeom = null;
+let galleryWindow = { start: 0, end: 0 };
+// tile index -> mounted card element. The map is the recycler: a scroll only
+// mounts what entered the window and unmounts what left, rather than rebuilding.
+const galleryCards = new Map();
+let galleryScrollFrame = 0;
+let galleryWindowBound = false;
+
+function measureGalleryGeometry() {
+    const grid = elements.galleryGrid;
+    const cs = window.getComputedStyle(grid);
+    const gap = parseFloat(cs.rowGap) || 0;
+    // Computed `grid-template-columns` is the resolved pixel track list, so its
+    // length is the live column count at this width — including whatever the
+    // media queries and `.large` did to the minmax.
+    const tracks = (cs.gridTemplateColumns || '')
+        .split(' ')
+        .map((t) => parseFloat(t))
+        .filter((n) => !Number.isNaN(n) && n > 0);
+    let cols = tracks.length;
+    let colWidth = tracks[0] || 0;
+    if (!cols || !colWidth) {
+        // `none` (no tracks resolved yet). Fall back to auto-fill's own maths so
+        // a first paint before layout settles still gets a usable window.
+        const min = grid.classList.contains('large') ? 320 : 220;
+        const width = grid.clientWidth || window.innerWidth;
+        cols = Math.max(1, Math.floor((width + gap) / (min + gap)));
+        colWidth = (width - gap * (cols - 1)) / cols;
     }
-    // Always derived, never maintained. The scan is left to right, so the
-    // leading tiles are stable and an append can still slice from fromIndex.
+    // The card's own aspect-ratio, so this does not need to know the CSS value.
+    const mounted = galleryCards.values().next().value;
+    const cardH = (mounted && mounted.offsetHeight) || (colWidth * 5) / 4;
+    return { cols, gap, cardH, rowH: cardH + gap };
+}
+
+function galleryWindowRange(geom, tileCount) {
+    const grid = elements.galleryGrid;
+    const totalRows = Math.ceil(tileCount / geom.cols);
+    const gridTop = grid.getBoundingClientRect().top + window.scrollY;
+    const firstVisibleRow = Math.floor(
+        Math.max(0, window.scrollY - gridTop) / geom.rowH
+    );
+    const visibleRows = Math.ceil(window.innerHeight / geom.rowH);
+    const startRow = Math.max(0, firstVisibleRow - GALLERY_BUFFER_ROWS);
+    const endRow = Math.min(
+        totalRows,
+        firstVisibleRow + visibleRows + GALLERY_BUFFER_ROWS
+    );
+    return {
+        start: startRow * geom.cols,
+        end: Math.min(tileCount, Math.max(startRow * geom.cols, endRow * geom.cols)),
+        startRow,
+        endRow,
+        totalRows,
+    };
+}
+
+function ensureGalleryScaffold() {
+    const grid = elements.galleryGrid;
+    if (grid.dataset.windowed === '1' && grid.querySelector('[data-gallery-spacer="top"]')) {
+        return;
+    }
+    grid.innerHTML = '';
+    galleryCards.clear();
+    grid.dataset.windowed = '1';
+    ['top', 'bottom'].forEach((which) => {
+        const spacer = document.createElement('div');
+        spacer.className = 'gallery-spacer';
+        spacer.dataset.gallerySpacer = which;
+        spacer.setAttribute('aria-hidden', 'true');
+        spacer.style.display = 'none';
+        grid.appendChild(spacer);
+    });
+}
+
+function unmountAllGalleryCards() {
+    galleryCards.forEach((el) => el.remove());
+    galleryCards.clear();
+}
+
+function setGallerySpacer(which, rows, geom) {
+    const spacer = elements.galleryGrid.querySelector(
+        `[data-gallery-spacer="${which}"]`
+    );
+    if (!spacer) return;
+    if (rows <= 0) {
+        // Not height 0: a zero-height grid item still takes a row and a gap.
+        spacer.style.display = 'none';
+        spacer.style.height = '0px';
+        return;
+    }
+    spacer.style.display = '';
+    // The grid contributes one gap between the spacer and the adjacent card
+    // row, so the spacer itself is one gap short of the space it stands in for.
+    spacer.style.height = `${Math.max(0, rows * geom.rowH - geom.gap)}px`;
+}
+
+/**
+ * Bring the mounted cards in line with the scroll position.
+ *
+ * `force` remounts everything, for when the model changed underneath the
+ * indices (a delete splices `state.photos`, so tile 40 is a different photo
+ * than it was). A scroll takes the incremental path.
+ */
+function syncGalleryWindow({ force = false } = {}) {
+    const grid = elements.galleryGrid;
+    if (!grid || grid.dataset.windowed !== '1') return;
+    const tiles = state.galleryTiles;
+    if (!tiles.length) {
+        unmountAllGalleryCards();
+        setGallerySpacer('top', 0, { rowH: 0, gap: 0 });
+        setGallerySpacer('bottom', 0, { rowH: 0, gap: 0 });
+        return;
+    }
+
+    const geom = measureGalleryGeometry();
+    const range = galleryWindowRange(geom, tiles.length);
+    const sameWindow =
+        !force
+        && range.start === galleryWindow.start
+        && range.end === galleryWindow.end
+        && galleryGeom
+        && galleryGeom.cols === geom.cols;
+    if (sameWindow) return;
+
+    galleryGeom = geom;
+    galleryWindow = { start: range.start, end: range.end };
+
+    if (force) unmountAllGalleryCards();
+
+    galleryCards.forEach((el, index) => {
+        if (index < range.start || index >= range.end) {
+            el.remove();
+            galleryCards.delete(index);
+        }
+    });
+
+    const bottomSpacer = grid.querySelector('[data-gallery-spacer="bottom"]');
+    for (let i = range.start; i < range.end; i += 1) {
+        if (galleryCards.has(i)) continue;
+        const card = buildPhotoCard(tiles[i]);
+        if (!card) continue;
+        // Visual order in a grid is DOM order, so a card mounted mid-scroll has
+        // to land before the next higher index that is already mounted.
+        let before = bottomSpacer;
+        for (let j = i + 1; j < range.end; j += 1) {
+            const later = galleryCards.get(j);
+            if (later) {
+                before = later;
+                break;
+            }
+        }
+        grid.insertBefore(card, before);
+        galleryCards.set(i, card);
+    }
+
+    setGallerySpacer('top', range.startRow, geom);
+    setGallerySpacer('bottom', range.totalRows - range.endRow, geom);
+}
+
+function onGalleryViewportChange() {
+    if (galleryScrollFrame) return;
+    galleryScrollFrame = window.requestAnimationFrame(() => {
+        galleryScrollFrame = 0;
+        syncGalleryWindow();
+    });
+}
+
+function bindGalleryWindow() {
+    if (galleryWindowBound) return;
+    galleryWindowBound = true;
+    // Passive: this only reads layout and mutates the card set, it never
+    // preventDefault()s, and the scroll must not wait on it.
+    window.addEventListener('scroll', onGalleryViewportChange, { passive: true });
+    window.addEventListener('resize', () => syncGalleryWindow({ force: true }));
+}
+
+/** One gallery tile as a detached element. Pure function of the model. */
+function buildPhotoCard(tile) {
+    const index = tile.index;
+    const p = state.photos[index];
+    if (!p) return null;
+    const card = document.createElement('div');
+    const selected = state.selectedPaths.has(p.rel_path);
+    // Reject cards are tinted and desaturated so the grid scans without
+    // reading a single badge — only in review mode, where that is the job.
+    const verdictCls = verdictCardClass(p);
+    card.className = `photo-card${state.selectMode ? ' select-mode' : ''}${selected ? ' selected' : ''}${p.favorite ? ' is-favorite' : ''}${verdictCls}`;
+    card.dataset.relPath = p.rel_path;
+    const imgSrc = p.thumb_url || p.url;
+    const status = promptStatusMeta(p);
+    const favMark = p.favorite
+        ? '<span class="card-fav-mark" title="Favorite"><i class="fa-solid fa-star"></i></span>'
+        : '';
+    // Single source of truth for video detection (was a divergent inline list)
+    const isVideo = isVideoFilename(p.filename);
+    const videoBadge = isVideo ? '<div class="video-badge"><i class="fa-solid fa-play"></i></div>' : '';
+    const bottomHint = isVideo
+        ? `<div class="photo-card-prompt-hint"><i class="fa-solid fa-clapperboard"></i> Click for reel details</div>`
+        : `<div class="photo-card-prompt-hint"><i class="fa-solid fa-wand-magic-sparkles"></i> Click for AI Prompt</div>`;
+    const topBadge = isVideo
+        ? `<span class="prompt-status-badge ready" title="Reel"><i class="fa-solid fa-film"></i> Reel</span>`
+        : `<span class="prompt-status-badge ${status.cls}"><i class="fa-solid ${status.icon}"></i> ${status.label}</span>`;
+    // Count comes from the tile (what is on screen), not p.group_count
+    // (what the server found) — a deleted slide has to change the badge.
+    const groupBadge = tile.count > 1
+        ? `<span class="group-count-badge" title="${Number(tile.count)} slides in this post"><i class="fa-solid fa-layer-group"></i> ${Number(tile.count)}</span>`
+        : '';
+    const tasteBadge = tasteBadgeHtml(p);
+    card.innerHTML = `
+        <img src="${escapeHtml(imgSrc)}" alt="${escapeHtml(p.filename)}" loading="lazy" decoding="async" data-full="${escapeHtml(p.url)}">
+        ${videoBadge}
+        ${groupBadge}
+        ${tasteBadge}
+        <div class="photo-card-overlay">
+            <div class="overlay-top-actions">
+                ${state.selectMode
+                    ? `<label class="card-select-wrap" title="Select"><input type="checkbox" class="card-select-cb" ${selected ? 'checked' : ''}></label>`
+                    : topBadge}
+                ${favMark}
+                <button class="card-trash-btn" title="Delete Photo"><i class="fa-solid fa-trash-can"></i></button>
+            </div>
+            <div class="overlay-bottom-info">
+                <div class="photo-card-creator">@${escapeHtml(p.creator)}</div>
+                ${state.selectMode
+                    ? topBadge
+                    : bottomHint}
+            </div>
+        </div>
+        ${verdictBadgeHtml(p)}
+    `;
+
+    card.querySelector('.card-trash-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        promptDeletePhoto(p);
+    });
+
+    const checkbox = card.querySelector('.card-select-cb');
+    if (checkbox) {
+        checkbox.addEventListener('click', (e) => e.stopPropagation());
+        checkbox.addEventListener('change', (e) => {
+            togglePhotoSelection(p.rel_path, e.target.checked);
+            card.classList.toggle('selected', e.target.checked);
+        });
+    }
+
+    card.addEventListener('click', () => {
+        if (state.selectMode) {
+            const next = !state.selectedPaths.has(p.rel_path);
+            togglePhotoSelection(p.rel_path, next);
+            card.classList.toggle('selected', next);
+            const cb = card.querySelector('.card-select-cb');
+            if (cb) cb.checked = next;
+        } else {
+            // Resolved at click time, not captured: removePhotosFromView()
+            // shifts state.photos under cards it does not re-render, so a
+            // closed-over index opens the wrong photo after a delete.
+            const at = state.photos.findIndex((x) => x.rel_path === p.rel_path);
+            openLightbox(at >= 0 ? at : index);
+        }
+    });
+    return card;
+}
+
+/**
+ * `append`/`fromIndex` are kept for the ~dozen existing call sites but no
+ * longer decide what is drawn: the window does. A fetch that added a page
+ * changes the tile count, which moves the bottom spacer and nothing else.
+ */
+function renderGallery({ append = false, fromIndex = 0 } = {}) {
+    void append;
+    void fromIndex;
+    installThumbPlaceholderRetry();
+    ensureGalleryScaffold();
+    bindGalleryWindow();
+    // Always derived, never maintained.
     rebuildGalleryTiles();
     elements.galleryCount.textContent = galleryCountLabel();
 
     if (state.photos.length === 0) {
+        unmountAllGalleryCards();
+        syncGalleryWindow({ force: true });
+        removeLoadMoreSentinel();
         updateEmptyState();
         updateBulkBar();
         return;
     }
 
     updateEmptyState();
-
-    const sliceStart = append ? fromIndex : 0;
-    const toRender = state.galleryTiles.slice(sliceStart);
-
-    toRender.forEach((tile) => {
-        const index = tile.index;
-        const p = state.photos[index];
-        if (!p) return;
-        const card = document.createElement('div');
-        const selected = state.selectedPaths.has(p.rel_path);
-        // Reject cards are tinted and desaturated so the grid scans without
-        // reading a single badge — only in review mode, where that is the job.
-        const verdictCls = verdictCardClass(p);
-        card.className = `photo-card${state.selectMode ? ' select-mode' : ''}${selected ? ' selected' : ''}${p.favorite ? ' is-favorite' : ''}${verdictCls}`;
-        card.dataset.relPath = p.rel_path;
-        const imgSrc = p.thumb_url || p.url;
-        const status = promptStatusMeta(p);
-        const favMark = p.favorite
-            ? '<span class="card-fav-mark" title="Favorite"><i class="fa-solid fa-star"></i></span>'
-            : '';
-        // Single source of truth for video detection (was a divergent inline list)
-        const isVideo = isVideoFilename(p.filename);
-        const videoBadge = isVideo ? '<div class="video-badge"><i class="fa-solid fa-play"></i></div>' : '';
-        const bottomHint = isVideo
-            ? `<div class="photo-card-prompt-hint"><i class="fa-solid fa-clapperboard"></i> Click for reel details</div>`
-            : `<div class="photo-card-prompt-hint"><i class="fa-solid fa-wand-magic-sparkles"></i> Click for AI Prompt</div>`;
-        const topBadge = isVideo
-            ? `<span class="prompt-status-badge ready" title="Reel"><i class="fa-solid fa-film"></i> Reel</span>`
-            : `<span class="prompt-status-badge ${status.cls}"><i class="fa-solid ${status.icon}"></i> ${status.label}</span>`;
-        // Count comes from the tile (what is on screen), not p.group_count
-        // (what the server found) — a deleted slide has to change the badge.
-        const groupBadge = tile.count > 1
-            ? `<span class="group-count-badge" title="${Number(tile.count)} slides in this post"><i class="fa-solid fa-layer-group"></i> ${Number(tile.count)}</span>`
-            : '';
-        const tasteBadge = tasteBadgeHtml(p);
-        card.innerHTML = `
-            <img src="${escapeHtml(imgSrc)}" alt="${escapeHtml(p.filename)}" loading="lazy" data-full="${escapeHtml(p.url)}">
-            ${videoBadge}
-            ${groupBadge}
-            ${tasteBadge}
-            <div class="photo-card-overlay">
-                <div class="overlay-top-actions">
-                    ${state.selectMode
-                        ? `<label class="card-select-wrap" title="Select"><input type="checkbox" class="card-select-cb" ${selected ? 'checked' : ''}></label>`
-                        : topBadge}
-                    ${favMark}
-                    <button class="card-trash-btn" title="Delete Photo"><i class="fa-solid fa-trash-can"></i></button>
-                </div>
-                <div class="overlay-bottom-info">
-                    <div class="photo-card-creator">@${escapeHtml(p.creator)}</div>
-                    ${state.selectMode
-                        ? topBadge
-                        : bottomHint}
-                </div>
-            </div>
-            ${verdictBadgeHtml(p)}
-        `;
-
-        card.querySelector('.card-trash-btn').addEventListener('click', (e) => {
-            e.stopPropagation();
-            promptDeletePhoto(p);
-        });
-
-        const checkbox = card.querySelector('.card-select-cb');
-        if (checkbox) {
-            checkbox.addEventListener('click', (e) => e.stopPropagation());
-            checkbox.addEventListener('change', (e) => {
-                togglePhotoSelection(p.rel_path, e.target.checked);
-                card.classList.toggle('selected', e.target.checked);
-            });
-        }
-
-        card.addEventListener('click', () => {
-            if (state.selectMode) {
-                const next = !state.selectedPaths.has(p.rel_path);
-                togglePhotoSelection(p.rel_path, next);
-                card.classList.toggle('selected', next);
-                const cb = card.querySelector('.card-select-cb');
-                if (cb) cb.checked = next;
-            } else {
-                // Resolved at click time, not captured: removePhotosFromView()
-                // shifts state.photos under cards it does not re-render, so a
-                // closed-over index opens the wrong photo after a delete.
-                const at = state.photos.findIndex((x) => x.rel_path === p.rel_path);
-                openLightbox(at >= 0 ? at : index);
-            }
-        });
-        elements.galleryGrid.appendChild(card);
-    });
-
-    let sentinel = document.getElementById('galleryLoadMore');
-    if (sentinel) sentinel.remove();
-    if (state.photoHasMore) {
-        sentinel = document.createElement('div');
-        sentinel.id = 'galleryLoadMore';
-        sentinel.className = 'gallery-load-more';
-        sentinel.textContent = state.photosLoading ? 'Loading…' : 'Scroll for more';
-        elements.galleryGrid.appendChild(sentinel);
-        observeLoadMoreSentinel(sentinel);
-    }
+    // force: tile indices may now point at different photos (a delete splices
+    // the model), so nothing mounted can be assumed still correct.
+    syncGalleryWindow({ force: true });
+    renderLoadMoreSentinel();
     updateBulkBar();
+}
+
+function removeLoadMoreSentinel() {
+    const existing = document.getElementById('galleryLoadMore');
+    if (existing) existing.remove();
+}
+
+function renderLoadMoreSentinel() {
+    removeLoadMoreSentinel();
+    if (!state.photoHasMore) return;
+    const sentinel = document.createElement('div');
+    sentinel.id = 'galleryLoadMore';
+    sentinel.className = 'gallery-load-more';
+    sentinel.textContent = state.photosLoading ? 'Loading…' : 'Scroll for more';
+    // After the bottom spacer, so it sits at the true end of the list rather
+    // than at the end of the mounted window.
+    elements.galleryGrid.appendChild(sentinel);
+    observeLoadMoreSentinel(sentinel);
 }
 
 function populateUploadCreators() {
@@ -2870,6 +3201,65 @@ function renderSlideCounter(photo) {
     el.style.display = '';
 }
 
+// Bare Image() objects holding ±1 warm. Declared before its reader rather than
+// after: `let` is hoisted into the temporal dead zone, so the ordering only
+// happened to work because nothing calls the preloader at module scope.
+let lightboxPreloads = [];
+
+/**
+ * Paint the tile's thumbnail first, then swap in the original.
+ *
+ * The lightbox used to set `src` straight to `/media/…`, which on this archive
+ * is 0.4–3.5 MB (§4). Until that decoded there was nothing on screen at all,
+ * even though the thumbnail the user just clicked was already in the browser
+ * cache. This shows that immediately and replaces it when the full image is
+ * decoded — never the other way round, and never a downgrade if the full image
+ * is already loaded.
+ */
+function paintLightboxImage(photo) {
+    const img = elements.lightboxImg;
+    if (!img) return;
+    const full = photo.url;
+    if (img.dataset.fullSrc === full && img.complete && img.naturalWidth > 1) {
+        return;
+    }
+    img.dataset.fullSrc = full;
+    if (photo.thumb_url) img.src = photo.thumb_url;
+    const loader = new Image();
+    loader.decoding = 'async';
+    loader.onload = () => {
+        // Guard against a fast ←/→: by the time this lands the lightbox may be
+        // showing something else entirely.
+        if (img.dataset.fullSrc === full) img.src = full;
+    };
+    loader.onerror = () => {
+        if (img.dataset.fullSrc === full) img.src = full;
+    };
+    loader.src = full;
+}
+
+/**
+ * Warm ±1 so ←/→ paints from cache.
+ *
+ * Bare `Image()` objects, deliberately not added to the DOM — the browser
+ * caches the bytes and nothing lays out. Kept on `state` only so a burst of
+ * arrow presses does not start a new fetch per keypress for the same neighbour.
+ */
+function preloadLightboxNeighbours(index) {
+    const wanted = [index - 1, index + 1]
+        .map((i) => state.photos[i])
+        .filter((p) => p && !isVideoPhoto(p))
+        .map((p) => p.url);
+    lightboxPreloads = lightboxPreloads.filter((img) => wanted.includes(img.src));
+    wanted.forEach((url) => {
+        if (lightboxPreloads.some((img) => img.src === url)) return;
+        const img = new Image();
+        img.decoding = 'async';
+        img.src = url;
+        lightboxPreloads.push(img);
+    });
+}
+
 function openLightbox(index, { skipPromptLoad = false } = {}) {
     if (index < 0 || index >= state.photos.length) return;
 
@@ -2897,9 +3287,10 @@ function openLightbox(index, { skipPromptLoad = false } = {}) {
     } else {
         stopAndClearLightboxVideo();
         elements.lightboxImg.style.display = 'block';
-        elements.lightboxImg.src = photo.url;
+        paintLightboxImage(photo);
     }
 
+    preloadLightboxNeighbours(index);
     elements.lightboxCreator.textContent = `@${photo.creator}`;
     elements.lightboxFilename.textContent = photo.filename;
     renderSlideCounter(photo);
@@ -8775,14 +9166,11 @@ function removePhotosFromFilter(relPaths) {
     const tilesBefore = state.galleryTiles.length;
     state.photos = state.photos.filter((p) => !targets.has(p.rel_path));
     const removed = before - state.photos.length;
-    targets.forEach((rel) => {
-        state.selectedPaths.delete(rel);
-        const card = elements.galleryGrid.querySelector(
-            `.photo-card[data-rel-path="${cssEscape(rel)}"]`
-        );
-        if (card) card.remove();
-    });
+    targets.forEach((rel) => state.selectedPaths.delete(rel));
+    // Same reason as removePhotosFromView: tile indices shift under the
+    // mounted window, so remount it instead of unmounting cards by hand.
     rebuildGalleryTiles();
+    renderGallery();
     const tilesRemoved = Math.max(0, tilesBefore - state.galleryTiles.length);
     state.photoOffset = Math.max(0, state.photoOffset - tilesRemoved);
     state.photoTotal = Math.max(0, (state.photoTotal || 0) - tilesRemoved);

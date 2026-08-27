@@ -25,6 +25,7 @@ from promptstudio.config import (
     PORT,
     PROMPT_PIPELINE_VERSION,
     SAVED_DIR,
+    THUMB_WAIT_SEC,
     TRASH_ENABLED,
 )
 from promptstudio.jobs import LEASES
@@ -375,11 +376,79 @@ def _error_boundary(fn):
 
 
 class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
+    # A first page of the gallery is 1 JSON request and 60 `/media/thumb/`
+    # GETs. `BaseHTTPRequestHandler` defaults to HTTP/1.0, which has no
+    # keep-alive, so those 60 tiles were 60 TCP handshakes against a browser
+    # that would happily have reused ~6 connections.
+    #
+    # This is not the one-line change it looks like. HTTP/1.1 keep-alive means
+    # the client stops using "connection closed" as the end of the body, so
+    # **every** response now has to frame itself. `_send_json` sent no
+    # Content-Length at all, and neither did `do_OPTIONS`, the `do_HEAD`
+    # fallback or the 416 branch — each one would have left the client blocked
+    # waiting for an EOF on a socket the server was keeping open. They all send
+    # one now, and `parse_request` below closes the connection rather than risk
+    # the other half of the trade: an unread request body being parsed as the
+    # next request line.
+    protocol_version = "HTTP/1.1"
+
+    # Keep-alive holds a thread per idle connection, so idle ones have to be
+    # reaped. `StreamRequestHandler.setup` turns this into
+    # `socket.settimeout`, and `handle_one_request` already treats a read
+    # timeout as "close the connection" — the browser silently reconnects.
+    # Per socket operation, not cumulative, so a slow `/api/prompt` behind
+    # Ollama is unaffected.
+    timeout = 60
+
     def handle_one_request(self):
-        # Handler instances are reused across keep-alive requests, so this must
+        # Handler instances are reused across keep-alive requests, so these must
         # reset per request, not per connection.
         self._response_started = False
-        return super().handle_one_request()
+        self._connection_header_sent = False
+        try:
+            return super().handle_one_request()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            # A browser reaping an idle keep-alive connection is *normal* — it
+            # just closes, and the blocking `readline` waiting for the next
+            # request line raises. Under HTTP/1.0 this never happened, because
+            # the server closed first after every response.
+            #
+            # Left unhandled it escapes to `socketserver.handle_error`, which
+            # prints a full traceback per closed tab. The access log is where
+            # real faults are meant to be visible, so filling it with routine
+            # disconnects is how the next real one gets missed.
+            # ConnectionAbortedError is the Windows cousin (WinError 10053).
+            self.close_connection = True
+            log.debug("client closed the connection (%s)", self.client_address)
+            return None
+
+    def parse_request(self):
+        """Refuse to keep a connection alive past a request that carried a body.
+
+        Several routes answer 400/404 before reading the body — an unknown
+        `POST /api/nope`, a missing `id`, a bad `rel_path`. Under HTTP/1.0 the
+        close swallowed whatever was left in the socket. Under keep-alive those
+        bytes become the next request line, and the connection desynchronises
+        into an unexplainable 400 on whatever the browser asked for next.
+
+        Closing is the cheap side of the trade: only POST/PUT carry bodies, and
+        they were paying for a fresh connection already. The 60 thumbnail GETs
+        that this whole change exists for are unaffected.
+        """
+        ok = super().parse_request()
+        if ok and (
+            self.headers.get("Content-Length")
+            or self.headers.get("Transfer-Encoding")
+        ):
+            self.close_connection = True
+        return ok
+
+    def send_header(self, keyword, value):
+        # Tracked so `end_headers` does not append a second `Connection: close`
+        # behind `send_error`, which sends its own.
+        if keyword.lower() == "connection":
+            self._connection_header_sent = True
+        return super().send_header(keyword, value)
 
     def send_response(self, code, message=None):
         self._response_started = True
@@ -424,10 +493,20 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             "Access-Control-Expose-Headers",
             "Accept-Ranges, Content-Range, Content-Length",
         )
+        # Under HTTP/1.1 a client assumes the connection is reusable unless
+        # told otherwise, so a server that decides to close has to say so —
+        # otherwise the browser pipelines its next request into a socket that
+        # is already going away. `close_connection` is set by `parse_request`
+        # (bodies), by a client `Connection: close`, and by `send_error`.
+        if self.close_connection and not getattr(
+            self, "_connection_header_sent", False
+        ):
+            self.send_header("Connection", "close")
         super().end_headers()
 
     def do_OPTIONS(self):
         self.send_response(200)
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     @_error_boundary
@@ -438,13 +517,21 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             # do_GET uses self.command == "HEAD" to skip the body
             return self.do_GET()
         self.send_response(200)
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def _send_json(self, data, status=200):
+        # Encoded before the status line goes out, for two reasons: the body
+        # length is a required header under HTTP/1.1 keep-alive, and a
+        # `json.dumps` failure now happens while `_response_started` is still
+        # False, so the error boundary can still send a clean 500 instead of
+        # having to abandon a half-written response.
+        body = json.dumps(data).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(json.dumps(data).encode("utf-8"))
+        self.wfile.write(body)
 
     def _read_json_body(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -491,6 +578,59 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             end = min(end, file_size - 1)
         return start, end
 
+    def _serve_thumb(self, rel_path: str, full_path: str) -> None:
+        """One gallery tile. Serves a file; does not create one.
+
+        The old body of this route was `ensure_thumbnail(...) or full_path`, so
+        a page of "newest" after a scrape meant sixty Pillow decodes inside
+        sixty HTTP requests (449 ms each on the live archive), a whole-timeline
+        frame-ranking pass for every reel, and — when that failed — a 3.5 MB
+        original squeezed into a 220 px box.
+
+        Now: hit, or hand it to the worker pool and wait a bounded moment, or
+        placeholder. `no-store` on the placeholder is the part that keeps this
+        honest — the grey tile must not be what the browser cache remembers
+        this path by, or the file would look thumbless until a hard reload.
+        """
+        from promptstudio.storage import thumb_queue
+        from promptstudio.storage.thumbs import (
+            PLACEHOLDER_CONTENT_TYPE,
+            PLACEHOLDER_GIF,
+            ensure_thumbnail,
+            resolve_thumb_file,
+        )
+
+        thumb = resolve_thumb_file(rel_path)
+        if not thumb:
+            queue = thumb_queue.get()
+            if queue.workers:
+                event = queue.submit(rel_path, full_path)
+                if event is not None:
+                    event.wait(THUMB_WAIT_SEC)
+                thumb = resolve_thumb_file(rel_path)
+            else:
+                # THUMB_WORKERS=0 — the pre-P0.3 behaviour, on the request
+                # thread, for an environment that will not have a background
+                # thread. Documented in config.py as an escape hatch.
+                thumb = ensure_thumbnail(full_path, rel_path)
+
+        if not thumb:
+            self.send_response(200)
+            self.send_header("Content-Type", PLACEHOLDER_CONTENT_TYPE)
+            self.send_header("Content-Length", str(len(PLACEHOLDER_GIF)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(PLACEHOLDER_GIF)
+            return
+
+        # Thumbs are small; still advertise ranges for consistency
+        self._serve_local_file(
+            thumb,
+            "image/jpeg",
+            cache_control="public, max-age=86400",
+        )
+
     def _serve_local_file(
         self,
         full_path: str,
@@ -517,6 +657,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.send_response(416)
             self.send_header("Content-Range", f"bytes */{file_size}")
             self.send_header("Accept-Ranges", "bytes")
+            self.send_header("Content-Length", "0")
             self.end_headers()
             return
 
@@ -1921,16 +2062,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             if not full_path:
                 self.send_error(404, "File not found")
                 return
-            from promptstudio.storage.thumbs import ensure_thumbnail, resolve_thumb_file
-
-            thumb = ensure_thumbnail(full_path, rel_path) or resolve_thumb_file(rel_path)
-            serve_path = thumb or full_path
-            # Thumbs are small; still advertise ranges for consistency
-            self._serve_local_file(
-                serve_path,
-                "image/jpeg",
-                cache_control="public, max-age=86400",
-            )
+            self._serve_thumb(rel_path, full_path)
             return
 
         if path.startswith("/media/"):

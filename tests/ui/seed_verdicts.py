@@ -39,6 +39,20 @@ _PATTERN = [
 def main() -> int:
     index = ArchiveIndex.get()
     index.ensure_ready()
+
+    # Reset, don't merge. `run.sh` wipes `_thumbs/` and `_trash/` between
+    # suites but `media_verdicts` lives in SQLite and survives — and
+    # `set_verdict` deliberately does not clear a `manual` override (AGENTS.md
+    # rule 12: a hand-set verdict is not the classifier's output and must not
+    # be erased by a re-classify). So the two manual keeps that
+    # `test_classify_review.js` pins onto its T0 rows were still there when
+    # `test_distribution_guard.js` ran next, moving the fixture from 6 keeps
+    # to 8 and tripping its own saturation guard at 67%. Three failures in a
+    # suite that passes on its own, entirely from the suite before it.
+    with index._lock:
+        index._conn.execute("DELETE FROM media_verdicts")
+        index._conn.commit()
+
     photos, _total = index.query_photos(sort="name")
     if not photos:
         print("seed_verdicts: no photos indexed", file=sys.stderr)

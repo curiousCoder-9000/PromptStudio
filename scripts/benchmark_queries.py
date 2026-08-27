@@ -57,6 +57,23 @@ REPEATS = 7
 SOURCES = ("instagram", "x", "reddit")
 
 
+# Roughly the live archive's 13% video share. Shared by seed() and
+# assign_post_ids() so both agree on what row i is called — and so the
+# media_type before/after pair compares two statements that match the same
+# rows, rather than a LIKE that matches nothing against a column that matches
+# 7,668.
+VIDEO_EVERY = 8
+
+
+def _filename(i: int) -> str:
+    ext = ".mp4" if i % VIDEO_EVERY == 0 else ".jpg"
+    return f"photo_{i:06d}{ext}"
+
+
+def _media_kind(i: int) -> str:
+    return "video" if i % VIDEO_EVERY == 0 else "photo"
+
+
 def _vocab(rng: random.Random) -> list[str]:
     return [f"w{i:04d}" for i in range(VOCAB_SIZE)]
 
@@ -95,14 +112,15 @@ def seed(index: ArchiveIndex, rows: int, *, with_caption: bool, seed_value: int 
 
     for i in range(rows):
         creator = f"creator_{i % CREATORS:02d}"
-        rel = f"{creator}/photo_{i:06d}.jpg"
+        filename = _filename(i)
+        rel = f"{creator}/{filename}"
         blob = _prompt_blob(rng, words)
         caption = _caption_blob(rng, words) if with_caption else ""
         total_blob += len(blob) + len(caption)
         photos.append(
-            (rel, creator, f"photo_{i:06d}.jpg", None, now - i, now - i,
+            (rel, creator, filename, None, now - i, now - i,
              1 if i % 20 == 0 else 0, 1, 0, blob, caption, None, None,
-             SOURCES[i % len(SOURCES)])
+             SOURCES[i % len(SOURCES)], _media_kind(i))
         )
         if i % 3 == 0:
             verdicts.append((rel, creator, i % 5, None, "seeded", "photo",
@@ -112,8 +130,8 @@ def seed(index: ArchiveIndex, rows: int, *, with_caption: bool, seed_value: int 
         index._conn.executemany(
             "INSERT OR REPLACE INTO photos(rel_path, creator, filename, taken_at, "
             "mtime, added_at, favorite, has_prompt, prompt_stale, prompt_search, "
-            "caption_search, post_id, shortcode, source) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "caption_search, post_id, shortcode, source, media_kind) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             photos,
         )
         index._conn.executemany(
@@ -145,7 +163,7 @@ def assign_post_ids(
     by_creator: dict[str, list[str]] = {}
     for i in range(rows):
         creator = f"creator_{i % CREATORS:02d}"
-        by_creator.setdefault(creator, []).append(f"{creator}/photo_{i:06d}.jpg")
+        by_creator.setdefault(creator, []).append(f"{creator}/{_filename(i)}")
 
     updates, posts = [], 0
     for rels in by_creator.values():
@@ -257,28 +275,152 @@ def group_scenarios(index: ArchiveIndex):
     ]
 
 
+def sort_scenarios(index: ArchiveIndex):
+    """P0.1, as before/after pairs on identical rows.
+
+    Same pattern as `legacy()` in creator_scenarios: the shape being replaced
+    is run as raw SQL alongside the shape replacing it, so the claim in
+    docs/review_gallery_performance.md §7 is a measured delta on this machine
+    rather than a number copied from another one. Both statements of a gallery
+    page are here — a fast page behind a slow COUNT is still a slow page.
+    """
+    from promptstudio.storage.db import _PHOTO_COLUMNS, _VERDICT_COLUMNS
+
+    both = (
+        " FROM photos p LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path"
+        " LEFT JOIN labels lb ON lb.rel_path = p.rel_path"
+    )
+    verdict_only = (
+        " FROM photos p LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path"
+    )
+    slim = f"{_PHOTO_COLUMNS}, {_VERDICT_COLUMNS}"
+    video_likes = " OR ".join(["LOWER(p.filename) LIKE '%.mp4'",
+                               "LOWER(p.filename) LIKE '%.webm'"])
+
+    def sql(statement):
+        def run():
+            with index._lock:
+                rows = index._conn.execute(statement).fetchall()
+            return rows, len(rows)
+
+        return run
+
+    return [
+        ("count — two LEFT JOINs (before)",
+         sql(f"SELECT COUNT(*) AS c{both}")),
+        ("count — no joins (after)",
+         sql("SELECT COUNT(*) AS c FROM photos p")),
+        ("newest page — SELECT p.* + joins + IFNULL order (before)",
+         sql(f"SELECT p.*, v.tier{both} "
+             "ORDER BY IFNULL(p.added_at, p.mtime) DESC, p.filename ASC "
+             "LIMIT 60 OFFSET 0")),
+        ("newest page — slim + verdict join + indexed order (after)",
+         sql(f"SELECT {slim}{verdict_only} "
+             "ORDER BY p.added_at DESC, p.filename ASC LIMIT 60 OFFSET 0")),
+        ("newest page, offset 1200 (before)",
+         sql(f"SELECT p.*, v.tier{both} "
+             "ORDER BY IFNULL(p.added_at, p.mtime) DESC, p.filename ASC "
+             "LIMIT 60 OFFSET 1200")),
+        ("newest page, offset 1200 (after)",
+         sql(f"SELECT {slim}{verdict_only} "
+             "ORDER BY p.added_at DESC, p.filename ASC LIMIT 60 OFFSET 1200")),
+        ("posted page — CASE order, no mtime index (before)",
+         sql(f"SELECT {slim}{verdict_only} ORDER BY CASE WHEN p.mtime IS NOT NULL "
+             "AND p.mtime > 0 THEN p.mtime ELSE IFNULL(p.added_at, 0) END DESC, "
+             "p.filename ASC LIMIT 60")),
+        ("posted page — indexed mtime order (after)",
+         sql(f"SELECT {slim}{verdict_only} "
+             "ORDER BY p.mtime DESC, p.filename ASC LIMIT 60")),
+        ("media_type=video — LOWER(filename) LIKE (before)",
+         sql(f"SELECT {slim}{verdict_only} WHERE ({video_likes}) "
+             "ORDER BY p.added_at DESC, p.filename ASC LIMIT 60")),
+        ("media_type=video — stored media_kind (after)",
+         sql(f"SELECT {slim}{verdict_only} WHERE p.media_kind = 'video' "
+             "ORDER BY p.added_at DESC, p.filename ASC LIMIT 60")),
+        ("stats video count — LIKE scan (before)",
+         sql("SELECT COUNT(*) AS total, COUNT(DISTINCT creator) AS creators, "
+             "SUM(CASE WHEN LOWER(filename) LIKE '%.mp4' "
+             "OR LOWER(filename) LIKE '%.webm' THEN 1 ELSE 0 END) AS videos "
+             "FROM photos")),
+        ("stats video count — media_kind (after)",
+         sql("SELECT COUNT(*) AS total, COUNT(DISTINCT creator) AS creators, "
+             "SUM(CASE WHEN media_kind = 'video' THEN 1 ELSE 0 END) AS videos "
+             "FROM photos")),
+    ]
+
+
+def print_sort_plans(index: ArchiveIndex) -> None:
+    """The plan change is the durable claim; the milliseconds are this machine.
+
+    Pass criterion from docs/review_gallery_performance.md §10: newest must
+    show an idx_photos_added* index and no temp B-tree.
+    """
+    both = (
+        " FROM photos p LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path"
+        " LEFT JOIN labels lb ON lb.rel_path = p.rel_path"
+    )
+    statements = {
+        "count, before": f"SELECT COUNT(*) AS c{both}",
+        "count, after": "SELECT COUNT(*) AS c FROM photos p",
+        "newest order, before":
+            "SELECT p.rel_path FROM photos p "
+            "ORDER BY IFNULL(p.added_at, p.mtime) DESC, p.filename ASC LIMIT 60",
+        "newest order, after":
+            "SELECT p.rel_path FROM photos p "
+            "ORDER BY p.added_at DESC, p.filename ASC LIMIT 60",
+        "posted order, after":
+            "SELECT p.rel_path FROM photos p "
+            "ORDER BY p.mtime DESC, p.filename ASC LIMIT 60",
+        "media_type=video, after":
+            "SELECT p.rel_path FROM photos p WHERE p.media_kind = 'video' "
+            "ORDER BY p.added_at DESC, p.filename ASC LIMIT 60",
+    }
+    print("\n```")
+    for label, statement in statements.items():
+        print(f"-- {label}")
+        with index._lock:
+            for row in index._conn.execute(
+                "EXPLAIN QUERY PLAN " + statement
+            ).fetchall():
+                print("   ", row["detail"])
+    print("```")
+
+
 def print_group_plan(index: ArchiveIndex) -> None:
     """EXPLAIN QUERY PLAN for both statements a grouped page issues.
 
     `query_photos` runs a total *and* a page, and once the page can ride the
     index the total is what dominates — which is only visible if both are here.
     """
-    from promptstudio.storage.db import _GROUP_BY_SQL, _GROUP_KEY_SQL
+    from promptstudio.storage.db import (
+        _GROUP_BY_SQL,
+        _GROUP_KEY_SQL,
+        _PHOTO_COLUMNS,
+        _VERDICT_COLUMNS,
+    )
 
+    # Mirrors what query_photos now issues: the total carries no joins when
+    # nothing filters on a verdict or a label, and the page projects named
+    # columns rather than p.*.
     join = " FROM photos p LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path"
+    slim = f"{_PHOTO_COLUMNS}, {_VERDICT_COLUMNS}"
     statements = {
         "total (grouped)":
-            f"SELECT COUNT(*) AS c FROM (SELECT 1{join} GROUP BY {_GROUP_BY_SQL})",
+            "SELECT COUNT(*) AS c FROM (SELECT 1 FROM photos p "
+            f"GROUP BY {_GROUP_BY_SQL})",
         "page, sort=name (grouped)":
-            f"SELECT p.*, {_GROUP_KEY_SQL} AS group_key, COUNT(*) AS group_count, "
-            "MIN(p.rel_path) AS group_rep, "
+            f"SELECT {slim}, {_GROUP_KEY_SQL} AS group_key, "
+            "COUNT(*) AS group_count, MIN(p.rel_path) AS group_rep, "
             f"GROUP_CONCAT(p.rel_path, char(10)) AS group_members{join} "
             f"GROUP BY {_GROUP_BY_SQL} ORDER BY {_GROUP_BY_SQL} LIMIT 60 OFFSET 0",
+        # Still a temp B-tree, and knowingly so: the GROUP BY rides
+        # idx_photos_group_key while the ORDER BY wants added_at, and no single
+        # index satisfies both. Measured below — it is the one gallery shape
+        # P0.1 does not fix.
         "page, sort=newest (grouped)":
-            f"SELECT p.*, COUNT(*) AS group_count, MIN(p.rel_path) AS group_rep"
+            f"SELECT {slim}, COUNT(*) AS group_count, MIN(p.rel_path) AS group_rep"
             f"{join} GROUP BY {_GROUP_BY_SQL} "
-            "ORDER BY IFNULL(p.added_at, p.mtime) DESC, p.filename ASC "
-            "LIMIT 60 OFFSET 0",
+            "ORDER BY p.added_at DESC, p.filename ASC LIMIT 60 OFFSET 0",
     }
     print("\n```")
     for label, sql in statements.items():
@@ -306,6 +448,13 @@ def run(rows: int, *, with_caption: bool) -> None:
     for name, fn in scenarios(index):
         ms, matches = time_call(fn)
         print(f"| {name} | {matches:,} | {ms:.1f} |")
+
+    print("\n| P0.1 — gallery page SQL, before vs after | rows | median ms |")
+    print("|------------------------------------------|-----:|----------:|")
+    for name, fn in sort_scenarios(index):
+        ms, matches = time_call(fn)
+        print(f"| {name} | {matches:,} | {ms:.1f} |")
+    print_sort_plans(index)
 
     print("\n| creator rollup | creators | median ms |")
     print("|----------------|---------:|----------:|")

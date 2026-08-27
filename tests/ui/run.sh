@@ -155,7 +155,11 @@ if [ ${#SUITES[@]} -eq 0 ]; then
           test_browse_and_paging.js test_source_filter.js test_post_grouping.js
           test_scrape_lanes.js test_generation_rating.js
           test_outputs_gallery.js test_batch_generate.js test_workflow_registry.js
-          test_label_mode.js test_phase15.js)
+          test_label_mode.js test_phase15.js
+          # Last on purpose: seed_many.py adds a few hundred rows so the
+          # windowing suite has more photos than one window holds, and those
+          # rows would change the card counts every suite above asserts on.
+          test_gallery_windowing.js)
 fi
 
 STATUS=0
@@ -176,6 +180,11 @@ for suite in "${SUITES[@]}"; do
   if [ "$suite" = "test_source_filter.js" ]; then
     PROMPTSTUDIO_ARCHIVE="$ARCHIVE" "$PYTHON" "$REPO_ROOT/tests/ui/seed_sources.py" "$ARCHIVE" \
       || { echo "FATAL: source seeding failed" >&2; STATUS=1; continue; }
+  fi
+  # Windowing is invisible at 12 photos -- the window covers the whole pile.
+  if [ "$suite" = "test_gallery_windowing.js" ]; then
+    PROMPTSTUDIO_ARCHIVE="$ARCHIVE" "$PYTHON" "$REPO_ROOT/tests/ui/seed_many.py" "$ARCHIVE" 240 \
+      || { echo "FATAL: bulk seeding failed" >&2; STATUS=1; continue; }
   fi
   # Carousels need a shared post_id, which only a real Instagram scrape sets.
   if [ "$suite" = "test_post_grouping.js" ]; then

@@ -61,8 +61,11 @@ These are the single source of truth — other docs point here rather than resta
 | Vision / prompts | `promptstudio/prompts/engine.py` |
 | Keep/reject classify | `promptstudio/scraping/media_classifier.py` · job in `classify_job.py` |
 | Gallery index | `promptstudio/storage/db.py` |
-| Gallery feels slow | [`docs/review_gallery_performance.md`](docs/review_gallery_performance.md) — measure first; do not flip FTS5 |
+| Gallery feels slow | [`docs/review_gallery_performance.md`](docs/review_gallery_performance.md) — §11 for what already shipped; measure first; do not flip FTS5 |
+| Thumbnails | `promptstudio/storage/thumb_queue.py` (ingest + workers) · `thumbs.py` (encode) · `scripts/backfill_thumbnails.py`. **Never** encode on the `/media/thumb/` request thread |
 | Background job contention | `promptstudio/jobs.py` |
+| A read that must not queue behind a write | `promptstudio/storage/db.py` `_read()` — **never** `self._lock` for a SELECT |
+| Gallery DOM / windowing | `app.js` `syncGalleryWindow` + `buildPhotoCard`. `state.photos` is the model; do not derive truth from mounted cards |
 | Why a job did that | `<archive>/_journal/`, `GET /api/journal` |
 | Duplicate detection | `promptstudio/storage/dedupe.py` |
 | Instagram sync | `promptstudio/scraping/downloader.py` (Instaloader) · `instagram_source.py` (`IG_BACKEND=gallery-dl`) |
@@ -119,3 +122,9 @@ the whole `scripts/` tree for non-scrape work.
 | `opencv-python` only | `opencv-python-headless` (+ optional Pillow) |
 | Prompts in `prompts_cache.json` | `prompts` table in `archive.db`; JSON is a stale rollback snapshot |
 | Gallery is fine at 4.4k with `content-visibility` | Live archive is **61k**; SQL+thumbs dominate first paint. [`docs/review_gallery_performance.md`](docs/review_gallery_performance.md) |
+| `query_photos` selects `p.*` and orders by `IFNULL(added_at, mtime)` | Named columns + bare indexed ORDER BY. Both sort fallbacks are paid at **write** time (`upsert_photo`) |
+| `GET /media/thumb/` creates the thumbnail | It serves one. `thumb_queue` workers create them at ingest; a miss gets a placeholder, never the original |
+| Server is HTTP/1.0, so a response need not be framed | `protocol_version = "HTTP/1.1"`. Every response **must** send `Content-Length` (or be a 304), or the client hangs |
+| Grid `verdict` carries `media_kind` / `verdict_source` / `classified_at` | Slimmed out. `GET /api/media/detail` has the full row |
+| One SQLite connection behind one `RLock` | Writer + N `mode=ro` readers. Reads go through `_read()`; a SELECT on `self._conn` re-introduces the contention |
+| The grid holds a card per loaded photo | It mounts a window (~21 at 1280×800). An absent card is normal — every `[data-rel-path]` patch site must stay `if (card)` |

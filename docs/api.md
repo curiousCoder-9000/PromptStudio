@@ -687,7 +687,7 @@ Query: `creator`, `search`, `mode` (`text` | `semantic` — C1 cosine over taste
   The gallery page cap does **not** apply.
 
 - `newest` / `oldest` — archive ingest time (`added_at`; when the file was downloaded/indexed).
-- `posted` / `posted_oldest` — remote post time (`mtime`, which downloaders stamp to the post date); falls back to `added_at` when `mtime` is missing or zero.
+- `posted` / `posted_oldest` — remote post time (`mtime`, which downloaders stamp to the post date). The fallback to `added_at` is still there, but it happens at **write** time now: `upsert_photo` stores `added_at` in `mtime` when the filesystem has no usable one, so the ORDER BY is a bare indexed column instead of a `CASE` the planner cannot see through.
 - `tier` — classify tier ascending (harshest first), then errors, then never-classified. The review-mode order.
 - `foryou` — B2 `p_keep` descending; unscored rows sink. Train via `POST /api/taste/train`.
 
@@ -708,13 +708,10 @@ Query: `creator`, `search`, `mode` (`text` | `semantic` — C1 cosine over taste
         "tier": 1,
         "manual": null,
         "reason": "crewneck sweater",
-        "media_kind": "photo",
-        "verdict_source": "image",
         "confidence": 0.82,
         "prompt_version": "v4-ordinal-frame-v7a",
         "sheet_path": null,
-        "error": null,
-        "classified_at": "2026-08-09T16:33:57+00:00"
+        "error": null
       }
     }
   ],
@@ -728,6 +725,13 @@ Query: `creator`, `search`, `mode` (`text` | `semantic` — C1 cosine over taste
   "group": ""
 }
 ```
+
+The grid's `verdict` object carries what a card badge and the review-mode
+triage panel read, and nothing else. `media_kind`, `verdict_source` and
+`classified_at` are **not** on this row — `GET /api/media/detail` returns the
+full verdict for the inspector. A 60-row page was 52.8 KB of JSON, most of it
+this object ([`review_gallery_performance.md`](review_gallery_performance.md)
+§3.1).
 
 - `rows` is **the paging unit** — what to add to `offset` for the next page. Ungrouped it
   equals `photos.length`; grouped it is the number of *posts* on the page while `photos`

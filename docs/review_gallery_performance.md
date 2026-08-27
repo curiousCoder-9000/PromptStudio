@@ -8,6 +8,7 @@
 | **Companions** | [`review_backend_architecture.md`](review_backend_architecture.md) S5/S8/S9/S10 — query measurements at 4.4k / 40k *synthetic* rows · [`review_ui_product.md`](review_ui_product.md) U2 — DOM cost, `content-visibility` shipped Stage 2 · [`architecture.md`](architecture.md) gallery request flow |
 | **Rule 13** | Two previous "obvious" wins (FTS5 search, incremental rebuild) were measured and declined. This review does not reopen them. The new numbers are why the Stage 2 gallery work is no longer enough. |
 | **Verdict** | The gallery is slow because the archive outgrew the query shape, and because thumbnails are generated on the HTTP GET path. SQL was tuned for 4.4k files; this archive is **61k**. `content-visibility` skips paint, not work. |
+| **Status** | **Everything ranked in §7 is implemented** — P0.1, P0.2, P0.3 and both P1s. See [§11](#11-stage-1--what-shipped-and-where-this-review-was-wrong), which also corrects the claims below that did not survive contact with the code. Only the grouped-newest sort (§11.5) is still open. |
 
 ---
 
@@ -401,7 +402,238 @@ Pass criteria for the SQL PR, on this archive or a seed of similar width:
 
 ---
 
-## 11. Code index (so the next session does not rescan)
+## 11. Stage 1 — what shipped, and where this review was wrong
+
+P0.1, P0.2 and P0.3 are implemented. Reviewed against the code first, and four
+claims above did not survive that; they are corrected here rather than edited
+out, because the wrong version is the one a later session would otherwise
+re-derive.
+
+### 11.1 Corrections to this review
+
+| § | Claim | What the code / a measurement says |
+|---|-------|------------------------------------|
+| 7 / P0.2 | "`_serve_local_file` and `_send_json` already send `Content-Length`", so HTTP/1.1 is one line | `_send_json` sent **none**, and neither did `do_OPTIONS`, the `do_HEAD` fallback or the 416 branch. Under HTTP/1.0 the close *was* the end of the body; under keep-alive each of those is a client blocked on an EOF that never comes. Every response frames itself now |
+| 7 / P0.2 | *(not mentioned)* | Keep-alive plus an **unread request body** desynchronises the connection: several routes answer 400/404 before `_read_json_body`, and those leftover bytes become the next request line. `parse_request` now closes any connection whose request carried a body |
+| 7 / P0.3 | "`optimize=True` is an extra Huffman pass for bytes that do not matter" | Worth ~10%, not the story. Measured on a 1.85 MB JPEG: **28.6 ms** with `optimize`, **25.7 ms** without, for 2.8 KB more output. Pillow's `thumbnail()` already applies `draft()` DCT scaling, so no decode trick remains. Dropped anyway; the fix was never the encoder flags |
+| 7 / P0.1 | Add a `media_kind` column **and** index it | Column yes, index **no**. `EXPLAIN`: with an index, `media_type=photo` + `sort=newest` becomes `SEARCH (media_kind=?)` + `USE TEMP B-TREE FOR ORDER BY`; without one it rides `idx_photos_added_name` and stops after 60 rows |
+| 7 / P0.1 | Join `media_verdicts` on the COUNT when `verdict=` **or `sort=tier`** | The COUNT has no ORDER BY. The rule implemented is "join a table iff a predicate names it" |
+| 7 / P0.1 | Replace the COUNT with `LIMIT n+1` | **Not done.** Once the joins are gone the bare COUNT is a covering-index scan at 0.0 ms / 61k. Changing `total` and `has_more` alters the paging contract of `/api/photos` for no measured gain |
+| 7 / P0.1 | "composite `(added_at DESC, filename)`" | Direction is load-bearing. `(added_at DESC, filename ASC)` satisfies newest outright; a plain-ASC composite still sorts the tie-break. The single-column `idx_photos_added` is **kept** — the planner picks it for `oldest`, which the DESC composite cannot serve |
+| 1 | videos = `filename LIKE %.mp4/.webm/.mov` | `VIDEO_EXTENSIONS` is `(".mp4", ".webm")`; `.mov` is not in `MEDIA_EXTENSIONS` and is never indexed, so that clause matched nothing |
+
+### 11.2 Measured after (synthetic, 61,344 rows, `--with-captions`)
+
+`py scripts/benchmark_queries.py --rows 61344 --with-captions`, which now
+carries the before/after pairs as raw SQL on identical rows (the same
+`legacy()`-alongside-new pattern the creator rollup already used). macOS,
+SQLite 3.49. **Not** the live archive: that DB is 59 MB with leftover `glam_*`
+columns this seed does not have, so treat these as the floor and the §3 numbers
+as the ceiling.
+
+| Statement | Before | After |
+|-----------|-------:|------:|
+| COUNT, unfiltered | 15.8 ms | **0.0 ms** |
+| newest page, LIMIT 60 | 42.7 ms | **0.2 ms** |
+| newest page, OFFSET 1200 | 34.1 ms | **0.5 ms** |
+| posted page, LIMIT 60 | 32.4 ms | **0.1 ms** |
+| `stats()` video count | 39.9 ms | **21.4 ms** |
+| `media_type=video` page | 0.3 ms | 0.2 ms |
+| `query_photos(sort="newest", limit=60)` | — | **0.4 ms** |
+
+Plans, which are the durable claim:
+
+```
+newest, before:  SCAN p · USE TEMP B-TREE FOR ORDER BY
+newest, after:   SCAN p USING INDEX idx_photos_added_name
+posted, after:   SCAN p USING INDEX idx_photos_mtime
+count,  before:  SCAN p USING COVERING INDEX sqlite_autoindex_photos_1
+                 SEARCH v … LEFT-JOIN · SEARCH lb … LEFT-JOIN
+count,  after:   SCAN photos USING COVERING INDEX idx_photos_p_keep
+```
+
+Two honest notes on that table. The `media_type` pair is a **non-result**: with
+the ORDER BY held indexed, a `LOWER(filename) LIKE` filter is already 0.3 ms,
+because it walks the index and stops once it has 60 videos. `media_kind` earns
+its place in `stats()` — on the app init path — and by making the filter one
+comparison instead of four; it does not earn it in the filter's latency, and §7
+implied otherwise. And the `stats()` 21.4 ms is a floor: `COUNT(DISTINCT
+creator)` scans the table regardless, so removing the LIKEs halves the per-row
+work and nothing more.
+
+### 11.3 End to end, against a running server
+
+`server.py` on a 160-file archive, one `http.client` connection, after
+`scripts/backfill_thumbnails.py`. This is §9's "Done when", checked rather than
+asserted:
+
+| Probe | Result |
+|-------|--------|
+| Status line | `HTTP/1.1 200 OK` |
+| `GET /api/photos?sort=newest&limit=60` | **8.5 ms**, `Content-Length: 21.1 KB`, 60 rows |
+| 60 tiles, same socket | **35.1 ms total (0.59 ms each)**, 60 JPEG / **0 placeholder** |
+| Connection reuse | one socket for the JSON page and all 60 tiles |
+| `curl` three API calls | `num_connects` 1, then 0, then 0 |
+| Thumb cache hit | 1.5 ms · first miss 78 ms (worker spawn) · later misses 15–17 ms |
+| Backfill, 117 missing | 2.5% → **100%** in 1.8 s; re-run generates 0 |
+| Simulated scrape of 40 via `upsert_photo` | ingest 287 ms (does **not** block on encoding); queue depth 1 at the end; **40/40** thumbed |
+
+That last row is the one §4 was actually about: a scrape now leaves its
+thumbnails behind it, so "newest" is a page of cache hits instead of the
+91%-unthumbed view it was.
+
+### 11.4 A harness bug this uncovered
+
+`tests/ui/run.sh` passed suite-by-suite and failed in the full run.
+`media_verdicts` lives in SQLite, so it survives the `_thumbs`/`_trash` wipe
+between suites, and `set_verdict` deliberately does **not** clear a `manual`
+override (rule 12). The two manual keeps `test_classify_review.js` pins onto
+its T0 rows were therefore still there when `test_distribution_guard.js` ran
+next — moving that fixture from 6 keeps to 8 and tripping its own saturation
+guard at 67%. Three failures, entirely from the suite before it.
+
+Reproduced identically on a pristine `HEAD`, so it predates this work. Fixed in
+`tests/ui/seed_verdicts.py`, which now resets the table before seeding: a
+fixture should be a fixture, not a merge. All 16 suites / 619 checks pass.
+
+### 11.5 The one gallery shape P0.1 does not fix
+
+| Shape | 61k median |
+|-------|-----------:|
+| `sort=newest`, flat | 1.0 ms |
+| `sort=newest`, **grouped** | **155.7 ms** |
+| `sort=name`, grouped | 11.0 ms |
+
+`GROUP BY` rides `idx_photos_group_key` while the ORDER BY wants `added_at`, and
+no single index satisfies both — `USE TEMP B-TREE FOR ORDER BY` over 21k groups.
+`sort=name` grouped is fine because it orders on the group key itself. This is
+the next thing to measure if grouped browse feels slow; it is not what §0 was
+about.
+
+### 11.6 P1 — reader pool
+
+Verified before building it: a `mode=ro` handle on this WAL database reads
+fine, refuses writes, sees commits made after it opened, picks up DDL, and does
+not block while the writer holds an open transaction.
+
+One writer plus `PROMPTSTUDIO_DB_READERS` (default 4) read-only handles, checked
+out per read and reentrant per thread — `query_photos`' semantic branch calls
+`all_embeddings` and `photos_for_rel_paths`, and `list_creators` calls two more,
+so a non-reentrant pool of N would deadlock at N nested reads. `0` sends
+everything back through the writer, which is the pre-P1 behaviour and the escape
+hatch if a platform refuses the handle.
+
+Measured at 40k rows, gallery page against a classify-shaped writer (many small
+verdict commits):
+
+| | idle | during writes | worst |
+|---|---:|---:|---:|
+| `DB_READERS=0` (shared connection) | 0.43 ms | **14.54 ms** | **63.19 ms** |
+| `DB_READERS=4` (pool) | 0.37 ms | **0.63 ms** | **1.14 ms** |
+
+23× on the median, 55× on the tail. This is the "hitching while a job runs"
+that P0.1's indexes could not touch — §6 named it and the same probe that
+produced the SQL numbers showed it as `list_creators` at a 122 ms median
+against a 1,601 ms max.
+
+**A bug this turned up, worth knowing about.** Python's `sqlite3` puts an
+implicit `BEGIN` in front of a DML statement. On a read-only handle the DML is
+then refused — but the transaction stays open (`in_transaction` is True
+afterwards, verified). The next SELECT pins a WAL snapshot for the life of that
+transaction, which is now forever; the handle returns to the pool and serves
+that frozen snapshot to every later read that draws it. Four readers would mean
+roughly a quarter of gallery requests answering from a stale archive, with
+nothing logged and no error, and the held snapshot also blocks WAL
+checkpointing so `-wal` grows without bound. `_recycle_reader` ends any
+transaction before a handle goes back, and discards it if that fails.
+`tests/test_reader_pool.py` pins both.
+
+**Not done: caching `/api/stats`.** §7 suggests it, but `/api/stats` is called
+on app init and after a job finishes — it is not polled — so the pool already
+removes the contention that made it slow, and a cached pass-rate badge is
+exactly the kind of stale number rule 17 exists to prevent.
+
+### 11.7 P1 — frontend windowing
+
+The grid mounts a window, not the whole loaded pile. `state.photos` and
+`state.galleryTiles` are untouched, so the lightbox, `selectedPaths`, keyboard
+nav and every `[data-rel-path]` patch site keep indexing the model exactly as
+before — only which tiles currently have DOM changed. Geometry is *measured*
+from `getComputedStyle().gridTemplateColumns` and the card's own
+`offsetHeight`, not copied from the CSS, because the `minmax` moves at media-query
+breakpoints and with `.large`.
+
+Measured in `tests/ui/test_gallery_windowing.js` at 1280×800, 200 photos loaded:
+
+| Probe | Result |
+|-------|--------|
+| Mounted cards | **21** of 200 |
+| Grid scroll height | 23,914 px vs 23,834 px for an un-windowed grid |
+| After scrolling to the middle | 33 mounted, **0** of the original 21 still there |
+| At the bottom | 33 mounted |
+| Back at the top | first card is the same one |
+| Select mode | rebuilds **21** cards, not 200 |
+
+Two details that cost real debugging:
+
+* **A zero-height spacer is not free.** An empty grid item still generates a
+  row *and* a gap, so a 0 px spacer shifted every offset by 18 px and drifted
+  the scroll math. They are `display: none` at zero, and one gap short of their
+  nominal height otherwise, because the grid supplies that gap itself.
+* **A delete has to remount, not unmount.** Splicing `state.photos` shifts
+  every tile index above the deletion, so the old "pull the card out by
+  `[data-rel-path]`" no longer describes the tiles the mounted cards are keyed
+  to. Both delete paths now call `renderGallery()`, which is ~21 cards rather
+  than the whole pile — and it fixes the grouped case (a deleted slide changing
+  a post's badge) for free.
+
+Also in this pass, from the same §7 list: the lightbox paints `thumb_url` first
+and swaps to the original once decoded (it used to show nothing until 0.4–3.5 MB
+arrived), preloads ±1, the creator sidebar patches `.active` instead of
+re-`innerHTML`-ing 150 rows on every click, and the filter-change skeletons wait
+120 ms so a fast page no longer flashes a populated grid to placeholders.
+
+**Not done:** §7's "clone a `<template>` instead of HTML strings per card".
+Windowing already cut card construction from ~1,200 to ~21 per render, so the
+remaining per-card `innerHTML` parse is bounded — and moving to a template means
+re-expressing every interpolation imperatively, against markup whose escaping is
+pinned by a security suite (`test_escaping.js`). Not worth that trade for 21
+cards; revisit if a profile ever shows card construction.
+
+Also not done: the checkbox markup stays conditional on `state.selectMode`
+rather than moving to a CSS-only toggle. `tests/ui/test_classify_review.js`
+counts `.card-select-cb`, so that DOM contract is pinned — and windowing already
+cut the select-mode redraw from every loaded card to the ~21 in view, which is
+what made it expensive.
+
+**Known trade, as §7 predicted:** Ctrl-F no longer finds off-screen cards. The
+search box goes to the server.
+
+### 11.8 Files
+
+| Change | Where |
+|--------|-------|
+| Slim projection, per-statement joins, bare-column ORDER BY | `promptstudio/storage/db.py` — `_PHOTO_COLUMNS`, `_VERDICT_COLUMNS`, `_photo_from`, `query_photos` |
+| Reader pool | `db.py` — `_new_reader`, `_take_reader`, `_read`, `_recycle_reader`, `set_trace_callback` · `config.py` `DB_READERS` |
+| Windowed grid | `app.js` — `measureGalleryGeometry`, `galleryWindowRange`, `syncGalleryWindow`, `buildPhotoCard`, `renderGallery` · `style.css` `.gallery-spacer` |
+| Lightbox thumb-first + ±1 preload | `app.js` — `paintLightboxImage`, `preloadLightboxNeighbours` |
+| Sidebar `.active` patch | `app.js` — `setActiveCreatorRow` |
+| Deferred filter-change skeletons | `app.js` — `showGallerySkeletons`, `paintGallerySkeletons` |
+| `media_kind` column + write-time coalesce | `db.py` — `_SCHEMA`, `media_kind_for_filename`, `upsert_photo`, `rebuild`, `_migrate_sort_columns` |
+| Composite sort indexes | `db.py` — `_migrate_identity_columns` (`idx_photos_added_name`, `idx_photos_mtime`) |
+| HTTP/1.1 + response framing | `promptstudio/server/handler.py` — `protocol_version`, `timeout`, `parse_request`, `send_header`, `end_headers`, `_send_json`, `do_OPTIONS`, `do_HEAD` |
+| Thumbnails off the GET path | `promptstudio/storage/thumb_queue.py` (new) · `handler.py` `_serve_thumb` · `thumbs.py` `PLACEHOLDER_GIF` |
+| Ingest hook | `db.py` `upsert_photo` → `thumb_queue.enqueue` (`rebuild()` deliberately does not) |
+| Backfill | `scripts/backfill_thumbnails.py` (new) |
+| Knobs | `promptstudio/config.py` `THUMB_WORKERS`, `THUMB_WAIT_SEC` · `.env.example` |
+| Tests | `tests/test_gallery_query_plan.py` · `tests/test_http_keepalive.py` · `tests/test_thumbs_at_ingest.py` · `tests/test_migrate_sort_columns.py` · `tests/test_reader_pool.py` · `tests/ui/test_gallery_windowing.js` |
+
+Still open: the **grouped-newest sort** in §11.5. Everything §7 ranked —
+P0.1, P0.2, P0.3 and both P1s — is in.
+
+---
+
+## 12. Code index (so the next session does not rescan)
 
 | Concern | File |
 |---------|------|

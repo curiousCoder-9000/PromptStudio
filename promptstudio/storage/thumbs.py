@@ -19,6 +19,17 @@ def thumb_disk_path(rel_path: str, thumb_dir: str = THUMB_DIR) -> str:
     return os.path.join(thumb_dir, thumb_rel_path(rel_path))
 
 
+# A 1x1 GIF the colour of an empty card, served when a tile's thumbnail does
+# not exist yet and the worker did not finish inside the request. Bytes rather
+# than a file: it has to work before `_thumbs/` exists, without Pillow, and
+# without a CDN (rule 15). The GET path used to fall back to the *original*
+# here — a 3.5 MB decode inside a 220 px box.
+PLACEHOLDER_GIF = (
+    b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x1a\x1a$\x00\x00\x00!\xf9\x04\x00"
+    b"\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
+)
+PLACEHOLDER_CONTENT_TYPE = "image/gif"
+
 
 def ensure_thumbnail(
     full_path: str,
@@ -30,6 +41,18 @@ def ensure_thumbnail(
     Create a JPEG thumbnail if missing. Returns absolute thumb path or None.
     Uses Pillow when available; falls back to OpenCV.
     Videos use quality-ranked mid-clip frames (not first frame only).
+
+    **This is worker-side work.** Callers are `storage.thumb_queue`'s pool and
+    `scripts/backfill_thumbnails.py`. `GET /media/thumb/` only reaches it when
+    `THUMB_WORKERS=0`, because the video branch below decodes an entire timeline
+    to rank frames and that has no business happening on a request thread —
+    see the module docstring in `thumb_queue.py`.
+
+    `optimize=True` is gone from the JPEG saves. Measured on a 1.85 MB source:
+    28.6 ms with it, 25.7 ms without, for 2.8 KB more output over loopback.
+    Pillow's `thumbnail()` already applies `draft()` DCT scaling, so there is no
+    cheaper decode left to find here — the win was never in the encoder flags,
+    it was in not doing this sixty times inside sixty HTTP requests.
     """
     out_path = thumb_disk_path(rel_path, thumb_dir)
     # Always store thumbs as .jpg for consistency
@@ -63,7 +86,7 @@ def ensure_thumbnail(
                     with Image.open(cover) as img:
                         img = img.convert("RGB")
                         img.thumbnail((max_size, max_size))
-                        img.save(out_path, "JPEG", quality=82, optimize=True)
+                        img.save(out_path, "JPEG", quality=82)
                     if os.path.isfile(out_path):
                         return out_path
                 except Exception:
@@ -109,7 +132,7 @@ def ensure_thumbnail(
         with Image.open(full_path) as img:
             img = img.convert("RGB")
             img.thumbnail((max_size, max_size))
-            img.save(out_path, "JPEG", quality=82, optimize=True)
+            img.save(out_path, "JPEG", quality=82)
         return out_path
     except Exception:
         pass

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import queue
 import re
 import sqlite3
 import threading
@@ -16,6 +18,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from promptstudio.config import (
     ARCHIVE_DB_FILE,
     CLASSIFY_REJECT_MAX_TIER,
+    DB_READERS,
     DISTRIBUTION_MAX_SHARE,
     EXCLUDED_FOLDERS,
     FTS_SEARCH,
@@ -62,15 +65,25 @@ CREATE TABLE IF NOT EXISTS photos (
   caption_search TEXT,
   post_id TEXT,
   shortcode TEXT,
-  source TEXT NOT NULL DEFAULT 'instagram'
+  source TEXT NOT NULL DEFAULT 'instagram',
+  -- 'photo' | 'video', decided from the extension once at write time. NOT the
+  -- same vocabulary as media_verdicts.media_kind, which says 'photo' | 'reel'
+  -- because the classifier judges a reel from a contact sheet. This one exists
+  -- so the media_type filter and stats() stop evaluating four
+  -- LOWER(filename) LIKE '%.ext' predicates against every row in the archive
+  -- (measured: 61 ms per /api/stats on a 61k catalog).
+  -- Deliberately NOT indexed: with an index, media_type + sort=newest becomes
+  -- SEARCH (media_kind=?) + USE TEMP B-TREE FOR ORDER BY; without one it rides
+  -- idx_photos_added_name and stops after 60 rows.
+  media_kind TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_photos_creator ON photos(creator);
 CREATE INDEX IF NOT EXISTS idx_photos_taken ON photos(taken_at);
 CREATE INDEX IF NOT EXISTS idx_photos_fav ON photos(favorite);
 CREATE INDEX IF NOT EXISTS idx_photos_prompt ON photos(has_prompt);
--- idx_photos_added is created in _migrate_identity_columns after the
--- added_at column is ensured (CREATE TABLE IF NOT EXISTS is a no-op on
--- older DBs that predate the column).
+-- idx_photos_added / _added_name / _mtime are created in
+-- _migrate_identity_columns after the added_at column is ensured
+-- (CREATE TABLE IF NOT EXISTS is a no-op on older DBs that predate it).
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT
@@ -208,6 +221,53 @@ _GROUP_BY_SQL = "p.creator, IFNULL(NULLIF(p.post_id, ''), p.filename)"
 _GROUP_KEY_SQL = "p.creator || '/' || IFNULL(NULLIF(p.post_id, ''), p.filename)"
 
 
+# Exactly the photos columns `_row_to_photo` publishes, named rather than
+# `p.*`. What this leaves behind is the point: `prompt_search`,
+# `caption_search` (4.7 MB across the live archive, and no tile shows a
+# character of it) and the orphaned glam_*/facet_* columns 1cc0f44 left on
+# pre-existing DBs. Measured on the 61k archive: `SELECT p.*` + joins +
+# IFNULL order = 267.5 ms, slim + verdict join + indexed order = 0.2 ms
+# (docs/review_gallery_performance.md §3.2).
+_PHOTO_COLUMNS = (
+    "p.rel_path, p.creator, p.filename, p.taken_at, p.mtime, p.added_at, "
+    "p.favorite, p.has_prompt, p.prompt_stale, p.post_id, p.shortcode, "
+    "p.source, p.media_kind, p.p_keep"
+)
+
+# The verdict fields a card badge or the triage panel actually reads. Dropped
+# from what `p.*` used to drag along: `media_kind`, `verdict_source` and
+# `classified_at` — nothing in app.js or the API touches them, and
+# /api/media/detail serves the full row from get_verdict() for the inspector.
+_VERDICT_COLUMNS = (
+    "v.tier AS v_tier, v.manual AS v_manual, v.reason AS v_reason, "
+    "v.confidence AS v_confidence, v.prompt_version AS v_prompt_version, "
+    "v.sheet_path AS v_sheet_path, v.error AS v_error"
+)
+
+_VERDICT_JOIN = " LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path"
+_LABEL_JOIN = " LEFT JOIN labels lb ON lb.rel_path = p.rel_path"
+
+
+def _photo_from(*, verdict: bool, label: bool) -> str:
+    """FROM clause carrying only the joins the statement can justify.
+
+    Both joins are on the other table's primary key, so neither changes the
+    number of rows — which is exactly why the COUNT was allowed to keep them
+    for so long, and exactly why dropping them is safe. It is not free, though:
+    EXPLAIN on the live archive showed the unfiltered count scanning all 61k
+    rows and then probing `media_verdicts` and `labels` once per row, at
+    1,036 ms cold against 5 ms for a bare COUNT.
+
+    Join a table if — and only if — a predicate, an ORDER BY term or the
+    projection names it.
+    """
+    return (
+        " FROM photos p"
+        + (_VERDICT_JOIN if verdict else "")
+        + (_LABEL_JOIN if label else "")
+    )
+
+
 def _photo_select(verdict_case: str) -> Tuple[str, str]:
     """(select list, FROM clause) shared by every gallery-shaped read.
 
@@ -215,14 +275,9 @@ def _photo_select(verdict_case: str) -> Tuple[str, str]:
     fetched by the gallery query — the lightbox is handed both.
     """
     return (
-        "p.*, v.tier AS v_tier, v.manual AS v_manual, v.reason AS v_reason, "
-        "v.media_kind AS v_media_kind, v.verdict_source AS v_source, "
-        "v.confidence AS v_confidence, v.prompt_version AS v_prompt_version, "
-        "v.sheet_path AS v_sheet_path, v.error AS v_error, "
-        f"v.classified_at AS v_classified_at, {verdict_case} AS v_verdict, "
+        f"{_PHOTO_COLUMNS}, {_VERDICT_COLUMNS}, {verdict_case} AS v_verdict, "
         "lb.label AS taste_label, lb.labelled_at AS taste_labelled_at",
-        " FROM photos p LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path "
-        "LEFT JOIN labels lb ON lb.rel_path = p.rel_path",
+        _photo_from(verdict=True, label=True),
     )
 
 
@@ -416,11 +471,18 @@ _IDENTITY_COLUMNS = (
     ("added_at", "REAL"),
     # Creator-written text (caption, author) — see caption_search_blob.
     ("caption_search", "TEXT"),
+    # 'photo' | 'video'. See the _SCHEMA comment: stored so the media_type
+    # filter and stats() stop scanning filenames. Backfilled by
+    # _migrate_sort_columns.
+    ("media_kind", "TEXT"),
 )
 
 DEFAULT_SOURCE = "instagram"
 
 _PROMPTS_IMPORTED_KEY = "prompts_imported_from_json"
+# One-shot: added_at/mtime coalesced and media_kind filled in. See
+# _migrate_sort_columns.
+_SORT_COLUMNS_KEY = "sort_columns_coalesced"
 _GENERATIONS_IMPORTED_KEY = "generations_imported_from_json"
 
 # -1 discard · 0 unrated · 1 keep · 2 star. Deliberately cheap to press: an
@@ -458,6 +520,17 @@ def _ratio(num: int, den: int) -> Optional[float]:
 
 def is_media_file(name: str) -> bool:
     return name.lower().endswith(MEDIA_EXTENSIONS)
+
+
+def media_kind_for_filename(name: str) -> str:
+    """'video' | 'photo' for the stored `photos.media_kind` column.
+
+    Two values, not three: this answers the gallery's `media_type=` filter,
+    whose vocabulary is photo/video. `media_classifier.media_kind_for` answers
+    a different question ("was this judged as an image or from a reel contact
+    sheet?") and says photo/reel — do not cross-wire them.
+    """
+    return "video" if name.lower().endswith(VIDEO_EXTENSIONS) else "photo"
 
 
 def normalize_rel_path(rel_path: str) -> str:
@@ -584,6 +657,20 @@ class ArchiveIndex:
         self.db_path = os.path.expanduser(db_path)
         self.base_dir = os.path.expanduser(base_dir)
         self._lock = threading.RLock()
+        # P1 reader pool. Filled lazily on first read, because a `mode=ro`
+        # handle cannot open a database file that does not exist yet and this
+        # constructor is what creates it.
+        self._readers: "queue.LifoQueue[sqlite3.Connection]" = queue.LifoQueue()
+        self._readers_made = 0
+        self._readers_lock = threading.Lock()
+        self._readers_ok = DB_READERS > 0
+        # Which reader (if any) the current thread already holds, so a read
+        # nested inside another read reuses it instead of waiting for a second
+        # one. `query_photos`'s semantic branch calls `all_embeddings` and
+        # `photos_for_rel_paths`; `list_creators` calls two more. Without this,
+        # a pool of N deadlocks at N nested reads.
+        self._reader_local = threading.local()
+        self._trace: Optional[Any] = None
         os.makedirs(os.path.dirname(self.db_path) or self.base_dir, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -604,6 +691,8 @@ class ArchiveIndex:
             self._migrate_added_at()
             self._migrate_caption_search()
             self._migrate_taste_columns()
+            # After _migrate_added_at, which is what it cleans up behind.
+            self._migrate_sort_columns()
             self._conn.commit()
         # After the schema commit, not inside it: the import writes rows, and a
         # failure here must leave a usable index rather than an app that will
@@ -631,6 +720,155 @@ class ArchiveIndex:
                 self._conn.execute(pragma)
             except sqlite3.DatabaseError as e:
                 log.debug("pragma failed (%s): %s", pragma, e)
+
+    # ── reader pool ──────────────────────────────────────────────────
+    #
+    # One writer, N read-only connections. The point is not raw query speed —
+    # P0.1 did that. It is that a gallery read no longer queues behind a
+    # classify verdict or a scrape upsert. Everything used to share `_conn`
+    # under a process-wide `RLock`, so WAL bought nothing: WAL only lets a
+    # reader run during a write if the reader is a *different* connection.
+    # Measured symptoms in §6 of the review — `list_creators` median 122 ms
+    # against a 1,601 ms max, and an offset page ranging 390–1,931 ms, all from
+    # lock contention rather than SQL.
+    #
+    # Verified before building it: a `mode=ro` handle on this WAL database
+    # reads fine, refuses writes, sees commits made after it opened, picks up
+    # DDL, and does not block while the writer holds an open transaction.
+
+    def _new_reader(self) -> Optional[sqlite3.Connection]:
+        """A read-only handle, or None if this platform will not give one."""
+        try:
+            conn = sqlite3.connect(
+                f"file:{self.db_path}?mode=ro",
+                uri=True,
+                check_same_thread=False,
+            )
+            conn.row_factory = sqlite3.Row
+            # Not journal_mode — that is a property of the database, and a
+            # read-only handle cannot set it anyway. busy_timeout still
+            # matters: a reader can briefly meet a checkpoint.
+            with contextlib.suppress(sqlite3.DatabaseError):
+                conn.execute("PRAGMA busy_timeout=5000")
+            if self._trace is not None:
+                conn.set_trace_callback(self._trace)
+            return conn
+        except sqlite3.DatabaseError as e:
+            log.warning(
+                "read-only SQLite handle unavailable, gallery reads fall back "
+                "to the writer connection: %s",
+                e,
+            )
+            return None
+
+    def _take_reader(self) -> Optional[sqlite3.Connection]:
+        """Check a reader out, growing the pool up to DB_READERS first."""
+        if not self._readers_ok:
+            return None
+        try:
+            return self._readers.get_nowait()
+        except queue.Empty:
+            pass
+        with self._readers_lock:
+            if self._readers_made < DB_READERS:
+                conn = self._new_reader()
+                if conn is None:
+                    # Don't retry per query — one failure means this platform
+                    # or file mode will not support it at all.
+                    self._readers_ok = False
+                    return None
+                self._readers_made += 1
+                return conn
+        # Pool is at capacity and every handle is busy. Block rather than open
+        # an unbounded number of connections; the wait is a query, not a job.
+        return self._readers.get()
+
+    @contextlib.contextmanager
+    def _read(self):
+        """A connection for a statement that only reads.
+
+        Reentrant per thread, and falls back to the writer (under its lock)
+        when the pool is disabled or unavailable — so every call site is
+        written once and works either way.
+        """
+        held = getattr(self._reader_local, "conn", None)
+        if held is not None:
+            yield held
+            return
+        conn = self._take_reader()
+        if conn is None:
+            with self._lock:
+                yield self._conn
+            return
+        self._reader_local.conn = conn
+        try:
+            yield conn
+        finally:
+            self._reader_local.conn = None
+            if self._recycle_reader(conn):
+                self._readers.put(conn)
+
+    def _recycle_reader(self, conn: sqlite3.Connection) -> bool:
+        """End any transaction before the handle goes back. False = discard it.
+
+        This is not housekeeping, it is the difference between a live gallery
+        and a frozen one. A read-only connection still gets an implicit `BEGIN`
+        from Python's sqlite3 in front of a DML statement, and when that
+        statement is then refused with "attempt to write a readonly database"
+        the `BEGIN` stays open — verified: `in_transaction` is True afterwards.
+        The next SELECT on that handle pins a WAL snapshot for the life of the
+        transaction, which is now forever. The handle returns to the pool and
+        serves that frozen snapshot to every later read that draws it, so with
+        four readers roughly a quarter of gallery requests would answer from a
+        stale archive, with nothing logged and no error.
+
+        A held snapshot also blocks WAL checkpointing, so the `-wal` file grows
+        without bound for as long as the handle lives.
+        """
+        try:
+            if conn.in_transaction:
+                conn.rollback()
+            return True
+        except sqlite3.DatabaseError as e:
+            # Unusable rather than merely dirty. Drop it; `_take_reader` opens a
+            # replacement, and `_readers_made` is left alone so the cap still
+            # counts this slot as available.
+            log.warning("discarding a reader that would not reset: %s", e)
+            with contextlib.suppress(sqlite3.DatabaseError):
+                conn.close()
+            with self._readers_lock:
+                self._readers_made -= 1
+            return False
+
+    def set_trace_callback(self, fn) -> None:
+        """Install a statement tracer on the writer *and* every reader.
+
+        Tests assert on the SQL the gallery actually issued
+        (`tests/test_gallery_query_plan.py`). Since those statements moved off
+        `_conn`, tracing only the writer would silently observe nothing and
+        every such assertion would vacuously pass.
+        """
+        self._trace = fn
+        self._conn.set_trace_callback(fn)
+        # Drain and re-arm: the idle handles are the ones a later read will use.
+        parked = []
+        while True:
+            try:
+                parked.append(self._readers.get_nowait())
+            except queue.Empty:
+                break
+        for conn in parked:
+            conn.set_trace_callback(fn)
+            self._readers.put(conn)
+
+    def _close_readers(self) -> None:
+        while True:
+            try:
+                self._readers.get_nowait().close()
+            except queue.Empty:
+                return
+            except sqlite3.DatabaseError:
+                continue
 
     def _init_fts(self) -> None:
         """Create the FTS5 index if this SQLite build has FTS5.
@@ -1089,15 +1327,15 @@ class ArchiveIndex:
         discards that no longer have a photos row are in `discard` but not
         subtracted from unlabeled — they are not in the labeling queue.
         """
-        with self._lock:
-            row = self._conn.execute(
+        with self._read() as conn:
+            row = conn.execute(
                 "SELECT "
                 "SUM(CASE WHEN label = 1 THEN 1 ELSE 0 END) AS keep, "
                 "SUM(CASE WHEN label = -1 THEN 1 ELSE 0 END) AS discard, "
                 "COUNT(*) AS labelled "
                 "FROM labels"
             ).fetchone()
-            unlabeled = self._conn.execute(
+            unlabeled = conn.execute(
                 "SELECT COUNT(*) AS c FROM photos p "
                 "LEFT JOIN labels lb ON lb.rel_path = p.rel_path "
                 "WHERE lb.rel_path IS NULL"
@@ -1195,14 +1433,14 @@ class ArchiveIndex:
         """``{rel_path: float32 vector}``. Lazy-import numpy at the call site."""
         import numpy as np
 
-        with self._lock:
+        with self._read() as conn:
             if model:
-                rows = self._conn.execute(
+                rows = conn.execute(
                     "SELECT rel_path, vector, dim FROM embeddings WHERE model = ?",
                     (model,),
                 ).fetchall()
             else:
-                rows = self._conn.execute(
+                rows = conn.execute(
                     "SELECT rel_path, vector, dim FROM embeddings"
                 ).fetchall()
         out: Dict[str, Any] = {}
@@ -2004,8 +2242,8 @@ class ArchiveIndex:
         sql, params = self._verdict_counts_sql(
             cut=cut, stale_versions=stale_versions, source=source
         )
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+        with self._read() as conn:
+            rows = conn.execute(sql, params).fetchall()
         return {
             row["creator"]: {key: int(row[key] or 0) for key in _EMPTY_VERDICT_COUNTS}
             for row in rows
@@ -2096,8 +2334,8 @@ class ArchiveIndex:
             selects.append(f"SUM(CASE WHEN {clause} THEN 1 ELSE 0 END) AS n_{name}")
             params.extend(clause_params)
 
-        with self._lock:
-            row = self._conn.execute(
+        with self._read() as conn:
+            row = conn.execute(
                 "SELECT " + ", ".join(selects) + " FROM photos p "
                 "LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path",
                 params,
@@ -2204,8 +2442,8 @@ class ArchiveIndex:
         no information — that is how the v2 prompt shipped at 85% one value
         without anyone noticing. This makes it visible without a labelled set.
         """
-        with self._lock:
-            rows = self._conn.execute(
+        with self._read() as conn:
+            rows = conn.execute(
                 "SELECT tier, COUNT(*) AS c FROM media_verdicts GROUP BY tier"
             ).fetchall()
         return {str(int(row["tier"])): int(row["c"]) for row in rows}
@@ -2236,6 +2474,27 @@ class ArchiveIndex:
         )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_photos_added ON photos(added_at)"
+        )
+        # The two orders the gallery is actually opened in, as composites whose
+        # direction matches the ORDER BY term for term. That is load-bearing:
+        # `(added_at DESC, filename ASC)` satisfies "newest" outright, while a
+        # plain ASC composite or the single-column index above leaves
+        # `p.filename ASC` to a temp B-tree. Measured on the live 61k archive:
+        # ORDER BY IFNULL(added_at, mtime) = 58.1 ms and a full scan; the bare
+        # indexed column = 0.1 ms.
+        #
+        # idx_photos_added stays: `oldest` reverses the leading term, which the
+        # DESC composite cannot serve, and the planner picks the ASC index for
+        # it (verified with EXPLAIN QUERY PLAN).
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photos_added_name "
+            "ON photos(added_at DESC, filename ASC)"
+        )
+        # `posted` = post chronology via mtime. There was no mtime index at
+        # all, so that sort was a 61k scan plus a temp B-tree (31.3 ms warm).
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_photos_mtime "
+            "ON photos(mtime DESC, filename ASC)"
         )
         # Carousel grouping (C2). An expression index, matching _GROUP_BY_SQL
         # term for term — idx_photos_post_id cannot serve it, because the group
@@ -2304,6 +2563,48 @@ class ArchiveIndex:
             )
         self._meta_set("added_at_backfilled", "1")
 
+    def _migrate_sort_columns(self) -> None:
+        """Move the sort fallbacks from the ORDER BY to the stored row.
+
+        `ORDER BY IFNULL(p.added_at, p.mtime)` was defending rows with no
+        ingest time — 0 of 61,344 on the live archive — and the wrapper made
+        every "newest" page a full scan plus a temp B-tree to do it. The
+        fallback is still here; it just happens once, in SQL that runs when the
+        column is written, instead of once per row per page.
+
+        `media_kind` is the same trade for `media_type=` and `stats()`: decide
+        photo-vs-video from the extension at write time rather than evaluating
+        four `LOWER(filename) LIKE '%.ext'` predicates per row per request.
+
+        Rows that end up with 0 in both columns keep it. That is an honest
+        "no ingest time recorded" — it sorts last under `newest`, where a
+        substituted `now()` would have shoved unknown rows to the top of the
+        one view whose whole purpose is showing what just arrived.
+        """
+        if self._meta_get(_SORT_COLUMNS_KEY) == "1":
+            return
+        # Cross-fill, then settle for whichever one is known. Order matters:
+        # added_at borrows from the untouched mtime before mtime borrows back.
+        self._conn.execute(
+            "UPDATE photos SET added_at = mtime "
+            "WHERE (added_at IS NULL OR added_at = 0) AND mtime > 0"
+        )
+        self._conn.execute(
+            "UPDATE photos SET mtime = added_at "
+            "WHERE (mtime IS NULL OR mtime = 0) AND added_at > 0"
+        )
+        self._conn.execute(
+            "UPDATE photos SET added_at = 0 WHERE added_at IS NULL"
+        )
+        self._conn.execute("UPDATE photos SET mtime = 0 WHERE mtime IS NULL")
+        video_likes = " OR ".join("LOWER(filename) LIKE ?" for _ in VIDEO_EXTENSIONS)
+        self._conn.execute(
+            f"UPDATE photos SET media_kind = CASE WHEN {video_likes} "
+            "THEN 'video' ELSE 'photo' END WHERE media_kind IS NULL",
+            [f"%{ext}" for ext in VIDEO_EXTENSIONS],
+        )
+        self._meta_set(_SORT_COLUMNS_KEY, "1")
+
     def _migrate_deleted_posts(self) -> None:
         """Add deleted_posts.platform and scope the unique indexes by it.
 
@@ -2363,6 +2664,7 @@ class ArchiveIndex:
             return cls._instance
 
     def close(self) -> None:
+        self._close_readers()
         with self._lock:
             self._conn.close()
 
@@ -2465,7 +2767,17 @@ class ArchiveIndex:
                     has_p, stale, blob = prompt_flags(entry, engine_id)
                     fav = 1 if rel in favs else 0
                     post_id, shortcode = self._identity_from_file(full, side)
-                    added = prior_added.get(rel) or file_added_at(full) or mtime
+                    added = (
+                        prior_added.get(rel)
+                        or file_added_at(full)
+                        or mtime
+                        or time.time()
+                    )
+                    # Both sort columns land non-zero here so `ORDER BY
+                    # added_at` / `ORDER BY mtime` can ride their indexes
+                    # instead of an IFNULL/CASE the planner cannot see through.
+                    if not mtime:
+                        mtime = added
                     rows.append(
                         (
                             rel,
@@ -2484,6 +2796,7 @@ class ArchiveIndex:
                             post_id or None,
                             shortcode or None,
                             self._source_from_file(full, side),
+                            media_kind_for_filename(filename),
                         )
                     )
 
@@ -2493,8 +2806,8 @@ class ArchiveIndex:
                 "INSERT INTO photos("
                 "rel_path, creator, filename, taken_at, mtime, added_at, "
                 "favorite, has_prompt, prompt_stale, prompt_search, caption_search, "
-                "post_id, shortcode, source"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "post_id, shortcode, source, media_kind"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
             self._meta_set(
@@ -2584,22 +2897,34 @@ class ArchiveIndex:
                 added_at = float(existing["added_at"])
             else:
                 added_at = time.time()
+            # Coalesce here, not in the ORDER BY. `posted` sorts on mtime
+            # directly now so it can use idx_photos_mtime, which means a row
+            # with no filesystem mtime needs a sortable number on disk rather
+            # than a CASE the planner has to evaluate per row. added_at is
+            # always set by the branch above, so this is never 0.
+            if not mtime:
+                mtime = added_at
             self._conn.execute(
                 "INSERT INTO photos("
                 "rel_path, creator, filename, taken_at, mtime, added_at, "
                 "favorite, has_prompt, prompt_stale, prompt_search, caption_search, "
-                "post_id, shortcode, source"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "post_id, shortcode, source, media_kind"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(rel_path) DO UPDATE SET "
                 "creator=excluded.creator, filename=excluded.filename, "
                 "taken_at=excluded.taken_at, mtime=excluded.mtime, "
-                "added_at=COALESCE(photos.added_at, excluded.added_at), "
+                # Not COALESCE: a stored 0 is not NULL, so COALESCE kept it and
+                # the row stayed unsortable however many times it was upserted.
+                # Existing non-zero times are still preserved, which is what
+                # keeps a favourite toggle from reshuffling "newest".
+                "added_at=CASE WHEN photos.added_at > 0 THEN photos.added_at "
+                "ELSE excluded.added_at END, "
                 "favorite=excluded.favorite, has_prompt=excluded.has_prompt, "
                 "prompt_stale=excluded.prompt_stale, prompt_search=excluded.prompt_search, "
                 "caption_search=excluded.caption_search, "
                 "post_id=COALESCE(excluded.post_id, photos.post_id), "
                 "shortcode=COALESCE(excluded.shortcode, photos.shortcode), "
-                "source=excluded.source",
+                "source=excluded.source, media_kind=excluded.media_kind",
                 (
                     rel,
                     creator,
@@ -2615,9 +2940,20 @@ class ArchiveIndex:
                     post_id or None,
                     shortcode or None,
                     self._norm_platform(source),
+                    media_kind_for_filename(filename),
                 ),
             )
             self._conn.commit()
+        # Thumbnail at ingest, not at first view. This is the one place every
+        # arrival funnels through — downloader, gallery-dl, manual upload,
+        # trash restore — so hooking it here is what makes "newest" a page of
+        # cache hits instead of 60 JPEG encodes inside 60 HTTP requests.
+        # Outside the lock: the queue must never wait on the DB, and the DB
+        # must never wait on an encode. Existing thumbs are a cheap no-op, so
+        # a favourite toggle costs a dict lookup.
+        from promptstudio.storage.thumb_queue import enqueue as _enqueue_thumb
+
+        _enqueue_thumb(rel, full)
 
     def delete_photo(self, rel_path: str, *, drop_verdict: bool = True) -> None:
         """Drop a photo from the index.
@@ -2945,19 +3281,24 @@ class ArchiveIndex:
             photo["taste_labelled_at"] = row["taste_labelled_at"] or ""
         # Only present when the caller joined media_verdicts (query_photos does;
         # rebuild's internal row reads do not).
+        #
+        # Every key here is read by a card badge or `renderTriageBlock`, which
+        # works off the *grid* row rather than /api/media/detail — that is why
+        # `confidence`, `prompt_version` and `sheet_path` survive the slimming
+        # even though a tile shows none of them. `media_kind`,
+        # `verdict_source` and `classified_at` do not: nothing reads them, and
+        # the inspector gets the whole row from `get_verdict()`. A 60-row page
+        # was 52.8 KB of JSON, most of it this object.
         if "v_verdict" in keys and row["v_verdict"] != "unclassified":
             photo["verdict"] = {
                 "verdict": row["v_verdict"],
                 "tier": int(row["v_tier"] if row["v_tier"] is not None else -1),
                 "manual": row["v_manual"] or None,
                 "reason": row["v_reason"] or "",
-                "media_kind": row["v_media_kind"] or "",
-                "verdict_source": row["v_source"] or "",
                 "confidence": row["v_confidence"],
                 "prompt_version": row["v_prompt_version"] or "",
                 "sheet_path": row["v_sheet_path"] or None,
                 "error": row["v_error"] or None,
-                "classified_at": row["v_classified_at"] or "",
             }
         return photo
 
@@ -3038,8 +3379,8 @@ class ArchiveIndex:
         does this folder hold". Sorting moves to Python — creator counts are in
         the hundreds, which is not where time goes.
         """
-        with self._lock:
-            rows = self._conn.execute(
+        with self._read() as conn:
+            rows = conn.execute(
                 "SELECT creator, source, COUNT(*) AS n, MIN(filename) AS cover "
                 "FROM photos GROUP BY creator, source"
             ).fetchall()
@@ -3065,17 +3406,16 @@ class ArchiveIndex:
         init, and the end of a classify run), and B4 is only useful if the
         number is on screen without asking for it.
         """
-        video_case = " OR ".join(
-            "LOWER(filename) LIKE ?" for _ in VIDEO_EXTENSIONS
-        )
-        with self._lock:
-            row = self._conn.execute(
+        # `media_kind` is a stored column now. This scan used to evaluate one
+        # LOWER(filename) LIKE '%.ext' per video extension per row — 61 ms of
+        # the /api/stats call on a 61k catalog, on the app's init path.
+        with self._read() as conn:
+            row = conn.execute(
                 "SELECT COUNT(*) AS total, "
                 "COUNT(DISTINCT creator) AS creators, "
                 "SUM(CASE WHEN has_prompt = 1 THEN 1 ELSE 0 END) AS prompts_ready, "
-                f"SUM(CASE WHEN ({video_case}) THEN 1 ELSE 0 END) AS videos "
-                "FROM photos",
-                [f"%{ext}" for ext in VIDEO_EXTENSIONS],
+                "SUM(CASE WHEN media_kind = 'video' THEN 1 ELSE 0 END) AS videos "
+                "FROM photos"
             ).fetchone()
         total = int(row["total"] or 0)
         videos = int(row["videos"] or 0)
@@ -3101,8 +3441,8 @@ class ArchiveIndex:
         Anti-join on media_verdicts' primary key, so it is index probes rather
         than a second scan.
         """
-        with self._lock:
-            row = self._conn.execute(
+        with self._read() as conn:
+            row = conn.execute(
                 "SELECT COUNT(*) AS n FROM photos p "
                 "LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path "
                 "WHERE v.rel_path IS NULL"
@@ -3163,17 +3503,22 @@ class ArchiveIndex:
             where.append("p.favorite = 1")
         if unanalyzed:
             where.append("p.has_prompt = 0")
-        if media_type == "video":
-            video_likes = " OR ".join("LOWER(p.filename) LIKE ?" for _ in VIDEO_EXTENSIONS)
-            where.append(f"({video_likes})")
-            params.extend(f"%{ext}" for ext in VIDEO_EXTENSIONS)
-        elif media_type == "photo":
-            photo_likes = " OR ".join("LOWER(p.filename) LIKE ?" for _ in IMAGE_EXTENSIONS)
-            where.append(f"({photo_likes})")
-            params.extend(f"%{ext}" for ext in IMAGE_EXTENSIONS)
+        if media_type in ("video", "photo"):
+            # A stored column, so this is one comparison per row instead of
+            # two-to-four LOWER(p.filename) LIKE '%.ext' evaluations, and the
+            # planner is free to walk idx_photos_added_name and stop at the
+            # page rather than scanning and sorting the whole archive.
+            where.append("p.media_kind = ?")
+            params.append(media_type)
 
         cut = self._reject_cut(reject_cut)
         verdict_case = _VERDICT_CASE.format(cut=cut)
+        # Which joins the WHERE clause earns. Everything below appends to
+        # `where` *and* flips one of these — a predicate that names v. or lb.
+        # without setting its flag is an "no such column" error at execute
+        # time, not a silently wrong answer.
+        where_needs_verdict = False
+        where_needs_label = False
         if verdict:
             # Same predicate the pass-rate badge counts with — see
             # `_verdict_predicate`. Raw-tier names (T0–T4) split reject and
@@ -3183,13 +3528,17 @@ class ArchiveIndex:
             if clause:
                 where.append(clause)
                 params.extend(clause_params)
+                where_needs_verdict = True
 
         if label == "unlabeled":
             where.append("lb.label IS NULL")
+            where_needs_label = True
         elif label == "keep":
             where.append("lb.label = 1")
+            where_needs_label = True
         elif label == "discard":
             where.append("lb.label = -1")
+            where_needs_label = True
 
         if collection_id is not None:
             where.append(
@@ -3242,22 +3591,22 @@ class ArchiveIndex:
         # mtime to the remote post date, so mtime alone cannot mean "just got".
         # posted = Instagram/post chronology via mtime, falling back to added_at
         # (file birth/ctime at index time) when mtime is missing or zero.
+        #
+        # Bare columns, no IFNULL/CASE. Wrapping the leading term in an
+        # expression is what kept these off idx_photos_added: measured on the
+        # live 61k archive, `ORDER BY IFNULL(added_at, mtime) DESC, filename`
+        # was a full scan plus a temp B-tree at 58.1 ms, against 0.1 ms for the
+        # indexed column. The fallbacks moved to write time — see
+        # `upsert_photo` and `_migrate_sort_columns` — so both columns are
+        # always populated and there is nothing left for an IFNULL to catch.
         if sort == "newest":
-            order = "ORDER BY IFNULL(p.added_at, p.mtime) DESC, p.filename ASC"
+            order = "ORDER BY p.added_at DESC, p.filename ASC"
         elif sort == "oldest":
-            order = "ORDER BY IFNULL(p.added_at, p.mtime) ASC, p.filename ASC"
+            order = "ORDER BY p.added_at ASC, p.filename ASC"
         elif sort == "posted":
-            order = (
-                "ORDER BY CASE "
-                "WHEN p.mtime IS NOT NULL AND p.mtime > 0 THEN p.mtime "
-                "ELSE IFNULL(p.added_at, 0) END DESC, p.filename ASC"
-            )
+            order = "ORDER BY p.mtime DESC, p.filename ASC"
         elif sort == "posted_oldest":
-            order = (
-                "ORDER BY CASE "
-                "WHEN p.mtime IS NOT NULL AND p.mtime > 0 THEN p.mtime "
-                "ELSE IFNULL(p.added_at, 0) END ASC, p.filename ASC"
-            )
+            order = "ORDER BY p.mtime ASC, p.filename ASC"
         elif sort == "tier":
             # Harshest first: this is the review order, so the files most likely
             # to be deleted are the ones you see without scrolling. Errors (-1)
@@ -3289,25 +3638,48 @@ class ArchiveIndex:
         else:
             order = "ORDER BY p.creator ASC, p.filename ASC"
 
-        select_cols, join = _photo_select(verdict_case)
+        # Three FROM clauses, because three statements want different things.
+        #
+        # `row_join` is the full pair: the grid row draws the verdict badge and
+        # carries `taste_label`, so a page of photo dicts always reads both
+        # tables.
+        #
+        # `count_join` gets only what its WHERE clause names — never the
+        # projection's, because it has no projection. That is the 1,036 ms cold
+        # / 35.6 ms warm the unfiltered first page spent probing
+        # media_verdicts and labels once per row for a number neither join can
+        # change: both are on the other table's primary key, so neither adds or
+        # removes a row.
+        #
+        # `ids_join` is the paths_only page: rel_path and favorite only, so it
+        # needs the filter's joins plus whatever the ORDER BY names.
+        select_cols, row_join = _photo_select(verdict_case)
+        count_join = _photo_from(
+            verdict=where_needs_verdict, label=where_needs_label
+        )
+        ids_join = _photo_from(
+            verdict=where_needs_verdict or sort == "tier",
+            label=where_needs_label,
+        )
 
         if paths_only and not semantic:
             # Selection is per file even when the grid is grouped. Favourite
             # rides along so "select all" can skip them without a second pass.
             # Semantic ranking is a different branch: the WHERE clause does
             # not include the search text, so this shortcut would over-select.
-            with self._lock:
+            #
+            with self._read() as conn:
                 total = int(
-                    self._conn.execute(
-                        f"SELECT COUNT(*) AS c{join}{where_sql}", params
+                    conn.execute(
+                        f"SELECT COUNT(*) AS c{count_join}{where_sql}", params
                     ).fetchone()["c"]
                 )
-                sql = f"SELECT p.rel_path, p.favorite{join}{where_sql} {order}"
+                sql = f"SELECT p.rel_path, p.favorite{ids_join}{where_sql} {order}"
                 page_params = list(params)
                 if limit is not None:
                     sql += " LIMIT ?"
                     page_params.append(int(limit))
-                rows = self._conn.execute(sql, page_params).fetchall()
+                rows = conn.execute(sql, page_params).fetchall()
             return (
                 [
                     {"rel_path": r["rel_path"], "favorite": bool(r["favorite"])}
@@ -3322,9 +3694,9 @@ class ArchiveIndex:
             # order, and C1 is a retrieval view not a browse view.
             from promptstudio.taste import embed_model_name, rank_by_query
 
-            with self._lock:
-                path_rows = self._conn.execute(
-                    f"SELECT p.rel_path{join}{where_sql}", params
+            with self._read() as conn:
+                path_rows = conn.execute(
+                    f"SELECT p.rel_path{count_join}{where_sql}", params
                 ).fetchall()
             candidates = [r["rel_path"] for r in path_rows]
             embeddings = self.all_embeddings(model=embed_model_name())
@@ -3356,7 +3728,7 @@ class ArchiveIndex:
             return photos, total
 
         group_sql = ""
-        total_sql = f"SELECT COUNT(*) AS c{join}{where_sql}"
+        total_sql = f"SELECT COUNT(*) AS c{count_join}{where_sql}"
         if group_posts:
             # MIN() is not decoration. Bare columns under GROUP BY are
             # otherwise taken from whichever row SQLite happened to visit last,
@@ -3377,17 +3749,17 @@ class ArchiveIndex:
             # same reason the GROUP BY is two-term: this one can use the index.
             total_sql = (
                 f"SELECT COUNT(*) AS c FROM "
-                f"(SELECT 1{join}{where_sql} GROUP BY {_GROUP_BY_SQL})"
+                f"(SELECT 1{count_join}{where_sql} GROUP BY {_GROUP_BY_SQL})"
             )
 
-        with self._lock:
-            total = self._conn.execute(total_sql, params).fetchone()["c"]
-            sql = f"SELECT {select_cols}{join}{where_sql}{group_sql} {order}"
+        with self._read() as conn:
+            total = conn.execute(total_sql, params).fetchone()["c"]
+            sql = f"SELECT {select_cols}{row_join}{where_sql}{group_sql} {order}"
             page_params = list(params)
             if limit is not None:
                 sql += " LIMIT ? OFFSET ?"
                 page_params.extend([int(limit), max(0, int(offset))])
-            rows = self._conn.execute(sql, page_params).fetchall()
+            rows = conn.execute(sql, page_params).fetchall()
 
         photos = [self._row_to_photo(r) for r in rows]
         if group_posts:
@@ -3421,13 +3793,13 @@ class ArchiveIndex:
             _VERDICT_CASE.format(cut=self._reject_cut(reject_cut))
         )
         out: Dict[str, Dict[str, Any]] = {}
-        with self._lock:
+        with self._read() as conn:
             # Chunked: a page of carousels is small, but the parameter limit is
             # a cliff rather than a slowdown when it is hit.
             for start in range(0, len(wanted), 400):
                 chunk = wanted[start : start + 400]
                 marks = ",".join("?" * len(chunk))
-                rows = self._conn.execute(
+                rows = conn.execute(
                     f"SELECT {select_cols}{join} WHERE p.rel_path IN ({marks})",
                     chunk,
                 ).fetchall()

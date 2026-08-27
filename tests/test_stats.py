@@ -208,11 +208,14 @@ def test_verdict_facet_shares_are_none_on_an_empty_archive():
 def test_verdict_facets_are_one_query_not_one_per_chip(make_photo):
     index = _seed_tiers(make_photo, [0, 1, 2, 3])
     statements = []
-    index._conn.set_trace_callback(statements.append)
+    # Via the index, not `index._conn`: this read runs on the P1 read-only pool
+    # now, so tracing the writer alone would see nothing and the "exactly one
+    # SELECT" assertion would pass for the wrong reason.
+    index.set_trace_callback(statements.append)
     try:
         index.verdict_facet_counts()
     finally:
-        index._conn.set_trace_callback(None)
+        index.set_trace_callback(None)
 
     selects = [s for s in statements if s.strip().upper().startswith("SELECT")]
     assert len(selects) == 1, statements

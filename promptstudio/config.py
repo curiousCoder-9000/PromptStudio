@@ -506,6 +506,43 @@ MAX_PHOTOS_API_PAGE = int(os.environ.get("PROMPTSTUDIO_PHOTO_PAGE", "300"))
 # the selection was truncated rather than pretend the whole pile is covered.
 MAX_PHOTO_IDS_API = int(os.environ.get("PROMPTSTUDIO_PHOTO_IDS", "10000"))
 THUMB_MAX_SIZE = int(os.environ.get("PROMPTSTUDIO_THUMB_SIZE", "400"))
+# Thumbnails used to be created inside `GET /media/thumb/`, and only there —
+# nothing generated them at ingest, so `_thumbs/` covered 20% of a 61k catalog
+# and the newest 500 files were 91% unthumbed. A first page of "newest" was
+# then 60 simultaneous Pillow decodes on the six connections a browser opens,
+# and for a reel, an unbounded frame-ranking pass over the whole timeline.
+#
+# These workers own that encode instead. The request thread submits and waits
+# briefly; the archive-wide backlog is `scripts/backfill_thumbnails.py`.
+# 0 = no workers, generate inline on the request thread (the old behaviour,
+# kept as an escape hatch rather than a code path anyone should choose).
+#
+# Scaled off the CPU rather than fixed at 1: Pillow releases the GIL inside the
+# decode, so these do overlap, and the miss path is what a first browse hits on
+# an archive that predates thumbnail-at-ingest (run the backfill CLI and it
+# stops mattering). Capped at 4 — the point is to stop competing with the API
+# for threads, not to saturate the machine behind a gallery scroll.
+THUMB_WORKERS = _env_num(
+    "PROMPTSTUDIO_THUMB_WORKERS",
+    min(4, max(2, (os.cpu_count() or 4) // 2)),
+    int,
+)
+# How long a tile request waits for a worker before giving up and sending the
+# placeholder. Long enough to cover a still on a warm filesystem, short enough
+# that a reel's frame-ranking pass cannot hold a connection hostage.
+THUMB_WAIT_SEC = _env_num("PROMPTSTUDIO_THUMB_WAIT", 2.0, float)
+
+# Read-only SQLite connections for the gallery reads, alongside the single
+# writer. WAL lets a reader run while a write is in flight, but that only helps
+# if the reader is a *different* connection — the whole index used to share one,
+# behind a process-wide RLock, so `/api/photos` queued behind every classify
+# verdict and scrape upsert. `busy_timeout=5000` meant a write could stall the
+# grid for five seconds (docs/review_gallery_performance.md §6).
+#
+# 0 disables the pool and sends every read back through the writer, which is
+# the pre-P1 behaviour and the escape hatch if a platform's SQLite refuses a
+# read-only handle on a WAL database.
+DB_READERS = _env_num("PROMPTSTUDIO_DB_READERS", 4, int)
 
 # Ollama vision engine
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")

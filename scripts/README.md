@@ -46,6 +46,24 @@ py scripts/find_duplicates.py --distance 4      # near-identical only
 py scripts/find_duplicates.py --json dupes.json
 ```
 
+## Gallery thumbnails
+
+Thumbnails are generated at ingest now. This is the one-time pass over media
+that arrived before that was true — on the live archive, `_thumbs/` covered
+12,148 of 61,344 rows and the newest 500 files were 91% unthumbed, which is why
+opening "newest" after a scrape asked for 60 JPEG encodes at once.
+
+Newest-first, safe to interrupt, resumes on re-run. Reads the catalog and
+writes only under `_thumbs/`.
+
+```powershell
+py scripts/backfill_thumbnails.py                  # everything, newest first
+py scripts/backfill_thumbnails.py --dry-run        # coverage census only
+py scripts/backfill_thumbnails.py --limit 500      # just the recent tail
+py scripts/backfill_thumbnails.py --stills-only    # skip reels (timeline decode)
+py scripts/backfill_thumbnails.py --sleep 0.05     # stay out of the way
+```
+
 ## Back up derived state
 
 Everything the archive cannot re-download — prompts and verdicts that cost GPU
