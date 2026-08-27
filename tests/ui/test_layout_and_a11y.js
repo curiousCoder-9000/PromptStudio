@@ -69,6 +69,15 @@ async function tab(s) {
   // ── the first screen is mostly photos ──────────────────────────────
   r.section('chrome budget at 1440x900');
 
+  // Chrome is measured from the top of the document, so start there and report
+  // scrollY with the number -- when this check first failed at
+  // `firstCardTop=1049` the obvious suspect was a restored scroll position from
+  // the previous suite, and it was not: `<main>` had escaped `.workspace`, so
+  // the grid was sitting in grid row 2 *below* the 650px sidebar. Printing
+  // scrollY is what ruled the innocent explanation out.
+  await s.eval('window.scrollTo(0, 0); return true;');
+  await sleep(300);
+
   const budget = await s.eval(`
     const box = (sel) => {
       const el = document.querySelector(sel);
@@ -82,6 +91,7 @@ async function tab(s) {
       stats: box('.stats-bar'),
       header: box('.gallery-header'),
       firstCardTop: card ? Math.round(card.getBoundingClientRect().top) : null,
+      scrollY: Math.round(window.scrollY),
       viewport: window.innerHeight,
     };
   `);
@@ -89,7 +99,82 @@ async function tab(s) {
     budget.stats && budget.stats.height <= 80, JSON.stringify(budget.stats));
   r.check('the first photo is in the top half of the first screen',
     budget.firstCardTop !== null && budget.firstCardTop < 480,
-    `firstCardTop=${budget.firstCardTop} of ${budget.viewport}`);
+    `firstCardTop=${budget.firstCardTop} of ${budget.viewport}, scrollY=${budget.scrollY}`);
+
+  // ── the action bar, and what it costs ─────────────────────────────
+  r.section('navbar hierarchy (U25)');
+
+  // Rows have to be clustered, not counted by distinct `top`. Buttons on the
+  // same visual row differ by a pixel (one is 42px tall because of its count
+  // badge), so `new Set(tops).size` reported 4 rows where there were 2 -- a
+  // number I nearly wrote into the review before checking it against the
+  // container height.
+  const navGeom = async () => s.eval(`
+    const bar = document.querySelector('.nav-actions');
+    const vis = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    const btns = [...bar.querySelectorAll('button')].filter(vis);
+    const tops = btns.map((b) => b.getBoundingClientRect().top).sort((a, b) => a - b);
+    let rows = tops.length ? 1 : 0;
+    for (let i = 1; i < tops.length; i += 1) if (tops[i] - tops[i - 1] > 10) rows += 1;
+    return {
+      rows,
+      buttons: btns.length,
+      sumWidth: Math.round(btns.reduce((a, b) => a + b.getBoundingClientRect().width, 0)),
+      barWidth: Math.round(bar.getBoundingClientRect().width),
+      barHeight: Math.round(bar.getBoundingClientRect().height),
+      navHeight: Math.round(document.querySelector('.navbar').getBoundingClientRect().height),
+      primaries: btns.filter((b) => b.classList.contains('btn-primary')).map((b) => b.id),
+      // Printed so the two measurements below cannot silently be the same one.
+      viewportWidth: window.innerWidth,
+    };
+  `);
+
+  const nav1440 = await navGeom();
+  r.check('the action bar is one row at 1440px',
+    nav1440.rows === 1, JSON.stringify(nav1440));
+  r.check('nothing in the action bar claims to be the primary action',
+    nav1440.primaries.length === 0, JSON.stringify(nav1440.primaries));
+
+  await s.send('Emulation.setDeviceMetricsOverride',
+    { width: 1280, height: 800, deviceScaleFactor: 1, mobile: false });
+  await sleep(400);
+  const nav1280 = await navGeom();
+  r.check('and still one row at 1280px, where it used to wrap',
+    nav1280.rows === 1, JSON.stringify(nav1280));
+  r.check('the buttons fit the bar with room to spare',
+    nav1280.sumWidth < nav1280.barWidth, JSON.stringify(nav1280));
+
+  await s.send('Emulation.setDeviceMetricsOverride',
+    { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  await sleep(400);
+
+  // ── the sidebar's primary navigation ──────────────────────────────
+  r.section('sidebar order (U34)');
+
+  const sidebar = await s.eval(`
+    const side = document.querySelector('.sidebar');
+    const list = document.getElementById('creatorList');
+    return {
+      order: [...side.children]
+        .filter((c) => { const r = c.getBoundingClientRect(); return r.width > 0 && r.height > 0; })
+        .map((c) => c.id || c.className.split(' ')[0]),
+      creatorListTop: Math.round(list.getBoundingClientRect().top),
+      sidebarTop: Math.round(side.getBoundingClientRect().top),
+      viewport: window.innerHeight,
+    };
+  `);
+  const listOffset = sidebar.creatorListTop - sidebar.sidebarTop;
+  // Ordering, not a pixel budget: the source-pill row appears between the
+  // search box and the list once more than one source is indexed, and a tight
+  // offset threshold would fail on that rather than on anything being wrong.
+  const iList = sidebar.order.indexOf('creatorList');
+  r.check('the creator list comes before Saved views and Boards',
+    iList >= 0
+      && iList < sidebar.order.indexOf('savedViewsSection')
+      && iList < sidebar.order.indexOf('collectionsSection'),
+    JSON.stringify(sidebar.order));
+  r.check('and it starts in the top third of the sidebar',
+    listOffset < 200, `${listOffset}px into a sidebar at y=${sidebar.sidebarTop}`);
 
   // ── the pinned row is the one with the filters on it ───────────────
   r.section('sticky element');
@@ -399,7 +484,7 @@ async function tab(s) {
       captionBlockExists: Boolean(document.getElementById('mediaCaptionBlock')),
       footer: R('.inspector-footer'),
       heroGone: !document.getElementById('mediaDetailThumb'),
-      facts: document.getElementById('mediaDetailGrid').textContent.replace(/\s+/g, ' ').trim(),
+      facts: document.getElementById('mediaDetailGrid').textContent.replace(/\\s+/g, ' ').trim(),
     };
   `);
 
@@ -515,6 +600,226 @@ async function tab(s) {
   const ratio = contrast(hexToRgb(tokens.muted), hexToRgb(tokens.bg));
   r.check('--text-muted meets AA for small text on --bg-dark',
     ratio >= 4.5, `${tokens.muted} on ${tokens.bg} = ${ratio.toFixed(2)}:1`);
+
+  // ── chrome that belongs to a different view (U31) ─────────────────
+  r.section('view-appropriate chrome (U31)');
+
+  await s.load();
+  await sleep(600);
+  const before = await s.eval(`
+    const side = document.querySelector('.sidebar');
+    const gal = document.querySelector('.gallery-container:not(.outputs-container)');
+    return { sidebarWidth: Math.round(side.getBoundingClientRect().width),
+             galleryWidth: Math.round(gal.getBoundingClientRect().width) };
+  `);
+  await s.eval(`document.getElementById('outputsBtn').click(); return true;`);
+  await sleep(1200);
+  const outputs = await s.eval(`
+    const side = document.querySelector('.sidebar');
+    const cs = getComputedStyle(side);
+    const view = document.getElementById('outputsView');
+    return {
+      sidebarShown: cs.display !== 'none',
+      columns: getComputedStyle(document.querySelector('.workspace')).gridTemplateColumns,
+      outputsWidth: Math.round(view.getBoundingClientRect().width),
+      // Its own filters, which is why the creator sidebar is redundant here.
+      ownFilters: ['outputsCreator', 'outputsWorkflow', 'outputsRating', 'outputsCheckpoint']
+        .filter((id) => document.getElementById(id)).length,
+    };
+  `);
+  r.check('the Outputs view has its own creator/workflow/rating filters',
+    outputs.ownFilters === 4, String(outputs.ownFilters));
+  r.check('so it drops the photo gallery sidebar', !outputs.sidebarShown,
+    JSON.stringify(outputs));
+  r.check('and the outputs grid takes the width back',
+    outputs.outputsWidth > before.galleryWidth + before.sidebarWidth - 40,
+    `${before.galleryWidth} + ${before.sidebarWidth} sidebar -> ${outputs.outputsWidth}`);
+
+  await s.eval(`document.getElementById('outputsBtn').click(); return true;`);
+  await sleep(900);
+
+  await s.eval(`
+    const input = document.getElementById('searchInput');
+    input.value = 'zzzznomatchzzzz';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  `);
+  await sleep(1400);
+  const empty = await s.eval(`
+    const vis = (id) => {
+      const el = document.getElementById(id);
+      if (!el) return false;
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    };
+    return {
+      cards: document.querySelectorAll('.photo-card').length,
+      // Act on results that are not there.
+      resultControls: ['sortSelect', 'groupPostsBtn', 'selectModeBtn', 'gridNormal', 'gridLarge']
+        .filter(vis),
+      // The way out of an empty view.
+      filters: ['mediaTypeSelect', 'verdictFilterSelect', 'favoritesFilterBtn', 'unanalyzedFilterBtn']
+        .filter(vis),
+      headerHeight: Math.round(
+        document.querySelector('.gallery-container:not(.outputs-container) .gallery-header')
+          .getBoundingClientRect().height),
+    };
+  `);
+  r.check('the filter matched nothing, so this is the empty case',
+    empty.cards === 0, JSON.stringify(empty));
+  r.check('controls that act on results are gone',
+    empty.resultControls.length === 0, JSON.stringify(empty.resultControls));
+  r.check('and every filter stays, because they are the way out',
+    empty.filters.length === 4, JSON.stringify(empty.filters));
+
+  // ── the app agrees with itself about Ollama (U33) ──────────────────
+  r.section('offline honesty (U33)');
+
+  // Ollama is genuinely absent in the harness, so this is the real state and
+  // not a stubbed one.
+  await s.load();
+  await sleep(2000);
+  const offline = await s.eval(`
+    const badge = document.getElementById('ollamaBadge');
+    const on = document.querySelector('.hint-when-online');
+    const off = document.querySelector('.hint-when-offline');
+    return {
+      bodyClass: document.body.classList.contains('ollama-offline'),
+      status: document.getElementById('ollamaStatusLabel').textContent.trim(),
+      badgeTag: badge.tagName,
+      badgeLabel: badge.getAttribute('aria-label'),
+      badgeTitle: badge.getAttribute('title'),
+      onlineHintShown: on ? getComputedStyle(on).display !== 'none' : null,
+      offlineHintShown: off ? getComputedStyle(off).display !== 'none' : null,
+      offlineHintText: off ? off.textContent.replace(/\\s+/g, ' ').trim() : null,
+    };
+  `);
+  r.check('the harness really has no Ollama', offline.status === 'Offline',
+    JSON.stringify(offline.status));
+  r.check('the whole page knows, not just the badge', offline.bodyClass,
+    JSON.stringify(offline));
+  r.check('the grid stops inviting a prompt it cannot generate',
+    offline.onlineHintShown === false && offline.offlineHintShown === true,
+    JSON.stringify(offline));
+  r.check('and says what is actually true instead',
+    /offline/i.test(offline.offlineHintText || ''), String(offline.offlineHintText));
+  r.check('the status pill is a control with a next step',
+    offline.badgeTag === 'BUTTON'
+      && /offline/i.test(offline.badgeLabel || '')
+      && /11434/.test(offline.badgeTitle || ''),
+    JSON.stringify(offline));
+
+  const rechecked = await s.eval(`
+    document.getElementById('ollamaBadge').click();
+    await new Promise((res) => setTimeout(res, 1500));
+    const toast = document.querySelector('.toast');
+    return toast ? toast.textContent.replace(/\\s+/g, ' ').trim() : null;
+  `);
+  r.check('pressing it re-checks and names the fix',
+    Boolean(rechecked) && /ollama serve/.test(rechecked), String(rechecked));
+
+  // ── the stacked layout, where a finger is the pointer (U35) ───────
+  r.section('touch targets at 390x844 (U35)');
+
+  await s.send('Emulation.setDeviceMetricsOverride',
+    { width: 390, height: 844, deviceScaleFactor: 1, mobile: false });
+  await s.load();
+  await sleep(1200);
+  const touch = await s.eval(`
+    const vis = (el) => {
+      const cs = getComputedStyle(el);
+      if (cs.display === 'none' || cs.visibility === 'hidden') return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    };
+    const els = [...document.querySelectorAll(
+      'button, select, input[type=text], input[type=date], .filter-chip')].filter(vis);
+    const boxes = els.map((el) => {
+      const r = el.getBoundingClientRect();
+      return { id: el.id || el.className.toString().split(' ')[0],
+               w: Math.round(r.width), h: Math.round(r.height) };
+    });
+    return {
+      total: boxes.length,
+      under40: boxes.filter((b) => b.h < 40).length,
+      worst: boxes.sort((a, b) => a.h - b.h).slice(0, 14),
+      // The chrome budget from §11 has to survive raising the targets.
+      firstCardTop: (() => {
+        const c = document.querySelector('.photo-card');
+        return c ? Math.round(c.getBoundingClientRect().top) : null;
+      })(),
+      viewport: window.innerHeight,
+    };
+  `);
+  r.check('no visible control is under 40px in the stacked layout',
+    touch.total > 0 && touch.under40 === 0,
+    `${touch.under40} of ${touch.total} under 40px; worst ${JSON.stringify(touch.worst)}`);
+  // A no-regression budget, not a target. At 390px the first photo has never
+  // been on the first screen -- pre-fix it was at y=1217 of 844, because the
+  // navbar stacks into a wrapping row of eleven buttons. Raising the targets
+  // could easily have made that worse; instead the icon-only grouping brought
+  // it to 1164. Getting a photo above the fold at this width needs the navbar
+  // to collapse into a menu, which is U9 and still open.
+  r.check('the stacked layout did not get taller for it',
+    touch.firstCardTop !== null && touch.firstCardTop <= 1200,
+    `firstCardTop=${touch.firstCardTop} of ${touch.viewport} (pre-fix 1217)`);
+
+  // ── the one native control nothing styled (U30) ────────────────────
+  r.section('native inputs (U30)');
+
+  await s.send('Emulation.setDeviceMetricsOverride',
+    { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+  await s.load();
+  await sleep(900);
+  const native = await s.eval(`
+    // Measured with the dialog OPEN: a control inside display:none reports 0.
+    document.getElementById('uploadPhotoBtn').click();
+    await new Promise((res) => setTimeout(res, 600));
+    const file = document.getElementById('uploadFileInput');
+    const ref = document.getElementById('uploadCreatorSelect');
+    const cs = getComputedStyle(file);
+    const rs = getComputedStyle(ref);
+    return {
+      height: Math.round(file.getBoundingClientRect().height),
+      bg: cs.backgroundColor,
+      borderWidth: cs.borderTopWidth,
+      radius: cs.borderTopLeftRadius,
+      font: cs.fontFamily.split(',')[0].replace(/["']/g, ''),
+      refFont: rs.fontFamily.split(',')[0].replace(/["']/g, ''),
+      refRadius: rs.borderTopLeftRadius,
+      // The field itself always shared the grouped .modal-input/.modal-select
+      // rule -- no backticks in here, they close this template literal. What
+      // no rule reached is the button the UA draws *inside* the field: the grey
+      // platform chunk sitting on a glass-dark card.
+      buttonBg: getComputedStyle(file, '::file-selector-button').backgroundColor,
+      buttonFont: getComputedStyle(file, '::file-selector-button')
+        .fontFamily.split(',')[0].replace(/["']/g, ''),
+      // getComputedStyle cannot see into a UA shadow pseudo-element like
+      // ::-webkit-calendar-picker-indicator -- it answers with the host
+      // element's own style, so asking about the glyph here returns
+      // "filter: none" whatever the stylesheet says. The rule is asserted at
+      // source level in tests/test_markup_structure.py instead. What *is*
+      // observable, and what makes the native widget draw dark, is this:
+      dateColorScheme: (() => {
+        const d = document.getElementById('outputsSince');
+        return d ? getComputedStyle(d).colorScheme : null;
+      })(),
+    };
+  `);
+  r.check('the field matches the select beside it',
+    native.font === native.refFont && native.radius === native.refRadius,
+    JSON.stringify({ file: native.font, select: native.refFont }));
+  r.check('and so does the button the browser draws inside it',
+    native.buttonBg !== 'rgba(0, 0, 0, 0)'
+      && native.buttonBg !== 'rgb(255, 255, 255)'
+      && native.buttonFont === native.refFont,
+    JSON.stringify({ bg: native.buttonBg, font: native.buttonFont }));
+  r.check('the date inputs ask the platform for dark widgets',
+    native.dateColorScheme === 'dark', String(native.dateColorScheme));
+  await s.key('Escape');
+  await sleep(300);
 
   r.finish(s);
   process.exit(process.exitCode || 0);

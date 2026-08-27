@@ -22,8 +22,8 @@
         <header class="navbar">
             <div class="logo">
                 <i class="fa-solid fa-wand-magic-sparkles logo-icon"></i>
-                <span class="logo-text">Prompt<span class="highlight">Studio</span></span>
-                <span class="badge" id="ollamaBadge"><i class="fa-solid fa-eye"></i> Ollama <span id="ollamaStatusLabel">…</span></span>
+                <h1 class="logo-text">Prompt<span class="highlight">Studio</span></h1>
+                <button type="button" class="badge" id="ollamaBadge" title="Check again"><i class="fa-solid fa-eye"></i> Ollama <span id="ollamaStatusLabel">…</span></button>
             </div>
 
             <div class="search-bar-container">
@@ -31,9 +31,9 @@
                 <input type="text" id="searchInput" placeholder="Search creators or prompt descriptors (e.g. bikini, sunset, 35mm)..." autocomplete="off">
                 <button id="clearSearch" class="clear-btn" style="display:none;"><i class="fa-solid fa-xmark"></i></button>
             </div>
-            <button id="semanticSearchBtn" class="filter-chip search-mode-chip" type="button" title="Semantic search over taste embeddings (C1)">Semantic</button>
+            <button id="semanticSearchBtn" aria-pressed="false" class="filter-chip search-mode-chip" type="button" title="Search by feel rather than by keyword">Semantic</button>
 
-            <div class="nav-actions">
+            <div class="nav-actions" role="group" aria-label="Archive actions">
                 <button id="batchPromptBtn" class="btn btn-secondary" title="Analyze all uncached photos with Ollama Vision">
                     <i class="fa-solid fa-bolt"></i> Batch Analyze
                 </button>
@@ -42,34 +42,38 @@
                 <button id="classifyAllBtn" class="btn btn-secondary" title="Classify every unclassified photo and reel across all creators">
                     <i class="fa-solid fa-wand-sparkles"></i> Classify All
                 </button>
-                <button id="labelBtn" class="btn btn-secondary" title="Label keep/discard for the preference model (K / X)">
+                <button id="labelBtn" class="btn btn-secondary" title="Teach the app your taste — keep or discard (K / X)">
                     <i class="fa-solid fa-tags"></i> Label <span class="nav-count-badge" id="labelCountBadge">0</span>
                 </button>
                 <button id="syncInstagramBtn" class="btn btn-secondary" title="Download creators, saved posts, following">
                     <i class="fa-solid fa-cloud-arrow-down"></i> Download
                 </button>
-                <button id="uploadPhotoBtn" class="btn btn-secondary">
-                    <i class="fa-solid fa-cloud-arrow-up"></i> Upload Photo
+                <!-- Everything from here is "go look at something", not
+                     "start a job". Grouped and icon-only so the four verbs
+                     above read as the primary row. -->
+                <span class="nav-divider" aria-hidden="true"></span>
+                <button id="uploadPhotoBtn" class="btn btn-secondary icon-only" title="Upload a photo" aria-label="Upload a photo">
+                    <i class="fa-solid fa-cloud-arrow-up"></i>
                 </button>
-                <button id="duplicatesBtn" class="btn btn-secondary" title="Review near-duplicate groups (pHash + embeddings)">
-                    <i class="fa-solid fa-clone"></i> Duplicates
+                <button id="duplicatesBtn" class="btn btn-secondary icon-only" title="Find photos saved more than once" aria-label="Duplicates — find photos saved more than once">
+                    <i class="fa-solid fa-clone"></i>
                 </button>
-                <button id="activityBtn" class="btn btn-secondary" title="What last night's jobs actually did">
-                    <i class="fa-solid fa-clock-rotate-left"></i> Activity
+                <button id="activityBtn" class="btn btn-secondary icon-only" title="What the overnight jobs did" aria-label="Activity — what the overnight jobs did">
+                    <i class="fa-solid fa-clock-rotate-left"></i>
                 </button>
-                <button id="trashBtn" class="btn btn-secondary" title="Restore or permanently remove deleted media" style="display:none;">
-                    <i class="fa-solid fa-trash-can"></i> Trash <span class="nav-count-badge" id="trashCountBadge">0</span>
+                <button id="trashBtn" class="btn btn-secondary icon-only" title="Restore or permanently remove deleted media" aria-label="Trash — restore or permanently remove deleted media" style="display:none;">
+                    <i class="fa-solid fa-trash-can"></i> <span class="nav-count-badge" id="trashCountBadge">0</span>
                 </button>
                 <!-- Outputs is a sibling view, not a modal: it is a gallery in
                      its own right and gets scrolled, filtered and paged. -->
-                <button id="outputsBtn" class="btn btn-secondary" title="Browse everything ComfyUI has generated">
-                    <i class="fa-solid fa-images"></i> Outputs
+                <button id="outputsBtn" class="btn btn-secondary icon-only" title="Browse everything ComfyUI has generated" aria-label="Outputs — browse everything ComfyUI has generated">
+                    <i class="fa-solid fa-images"></i>
                 </button>
-                <button id="insightsBtn" class="btn btn-secondary" title="Prompt edit rate, generation counts">
-                    <i class="fa-solid fa-chart-line"></i> Insights
+                <button id="insightsBtn" class="btn btn-secondary icon-only" title="Prompt edit rate, generation counts" aria-label="Insights — prompt edit rate, generation counts">
+                    <i class="fa-solid fa-chart-line"></i>
                 </button>
-                <button id="refreshBtn" class="btn btn-primary">
-                    <i class="fa-solid fa-arrows-rotate"></i> Refresh
+                <button id="refreshBtn" class="btn btn-secondary icon-only" title="Reload the archive" aria-label="Reload the archive">
+                    <i class="fa-solid fa-arrows-rotate"></i>
                 </button>
             </div>
         </header>
@@ -111,27 +115,9 @@
             
             <!-- Sidebar Navigation -->
             <aside class="sidebar">
-                <div class="sidebar-section" id="savedViewsSection">
-                    <div class="sidebar-header">
-                        <h3><i class="fa-solid fa-bookmark"></i> Saved views</h3>
-                        <button class="icon-btn sm" id="saveViewBtn" title="Save the current filters as a named view">
-                            <i class="fa-solid fa-plus"></i>
-                        </button>
-                    </div>
-                    <div class="saved-views-list" id="savedViewsList"></div>
-                </div>
-                <div class="sidebar-section" id="collectionsSection">
-                    <div class="sidebar-header">
-                        <h3><i class="fa-solid fa-layer-group"></i> Boards</h3>
-                        <button class="icon-btn sm" id="newCollectionBtn" title="New collection">
-                            <i class="fa-solid fa-plus"></i>
-                        </button>
-                    </div>
-                    <div class="saved-views-list" id="collectionsList"></div>
-                </div>
                 <div class="sidebar-header">
                     <h3><i class="fa-solid fa-folder-tree"></i> Creators (<span id="creatorCount">0</span>)</h3>
-                    <button class="icon-btn sm" id="newCreatorBtn" title="Create New Creator Folder">
+                    <button class="icon-btn sm" id="newCreatorBtn" title="Create New Creator Folder" aria-label="Create creator folder">
                         <i class="fa-solid fa-folder-plus"></i>
                     </button>
                 </div>
@@ -142,8 +128,31 @@
                 <!-- Source pills. Built from /api/sources so a new registered
                      source appears without a markup edit. -->
                 <div class="source-pill-row" id="sourcePillRow" role="group" aria-label="Filter by source"></div>
-                <div class="creator-list" id="creatorList">
+                <nav class="creator-list" id="creatorList" aria-label="Creators">
                     <!-- Dynamic Creator Items -->
+                </nav>
+                <!-- Saved views and Boards sit under the creator list, not
+                     over it: the list is the primary navigation and used to
+                     start at y=584 of a 900px viewport, below two sections
+                     that are usually empty. `.creator-list` is `flex: 1`, so
+                     these keep their natural height at the bottom. -->
+                <div class="sidebar-section" id="savedViewsSection">
+                    <div class="sidebar-header">
+                        <h3><i class="fa-solid fa-bookmark"></i> Saved views</h3>
+                        <button class="icon-btn sm" id="saveViewBtn" title="Save the current filters as a named view" aria-label="Save current filters as a view">
+                            <i class="fa-solid fa-plus"></i>
+                        </button>
+                    </div>
+                    <div class="saved-views-list" id="savedViewsList"></div>
+                </div>
+                <div class="sidebar-section" id="collectionsSection">
+                    <div class="sidebar-header">
+                        <h3><i class="fa-solid fa-layer-group"></i> Boards</h3>
+                        <button class="icon-btn sm" id="newCollectionBtn" title="New collection" aria-label="New board">
+                            <i class="fa-solid fa-plus"></i>
+                        </button>
+                    </div>
+                    <div class="saved-views-list" id="collectionsList"></div>
                 </div>
                 <div class="creator-style-panel" id="creatorStylePanel" style="display:none;">
                     <div class="sync-status-label">Instagram</div>
@@ -185,8 +194,12 @@
                 </div>
             </aside>
 
+            <!-- Both gallery views live inside the document's single <main>.
+                 They are siblings so each keeps its own scroll and paging
+                 state; only one is displayed at a time. -->
+            <main class="workspace-views">
             <!-- Main Gallery View -->
-            <main class="gallery-container">
+            <div class="gallery-container">
                 <div class="gallery-header">
                     <div class="gallery-title-group">
                         <h2 id="galleryTitle">All Photos</h2>
@@ -228,27 +241,27 @@
                             <option value="unclassified">Not classified</option>
                             <option value="error">Classify errors</option>
                         </select>
-                        <button class="filter-chip" id="favoritesFilterBtn" type="button" title="Show favorites only">
+                        <button class="filter-chip" id="favoritesFilterBtn" aria-pressed="false" type="button" title="Show favorites only">
                             <i class="fa-solid fa-star"></i> Favorites
                         </button>
-                        <button class="filter-chip" id="selectModeBtn" type="button" title="Select multiple photos">
+                        <button class="filter-chip" id="selectModeBtn" aria-pressed="false" type="button" title="Select multiple photos">
                             <i class="fa-solid fa-check-double"></i> Select
                         </button>
-                        <button class="filter-chip" id="unanalyzedFilterBtn" type="button" title="Show only photos needing analysis">
+                        <button class="filter-chip" id="unanalyzedFilterBtn" aria-pressed="false" type="button" title="Show only photos needing analysis">
                             <i class="fa-solid fa-bolt"></i> Unanalyzed
                         </button>
                         <!-- C2: a carousel is one post, not N unrelated tiles.
                              Off by default — the flat grid is still the right
                              default for triage-shaped browsing. -->
-                        <button class="filter-chip" id="groupPostsBtn" type="button" title="Collapse a post's slides into one tile — open it to walk them">
+                        <button class="filter-chip" id="groupPostsBtn" aria-pressed="false" type="button" title="Collapse a post's slides into one tile — open it to walk them">
                             <i class="fa-solid fa-layer-group"></i> Group posts
                         </button>
                         <button class="btn btn-ghost btn-sm" id="addToCollectionBtn" type="button" title="Add the current selection to a board" style="display:none;">
                             <i class="fa-solid fa-folder-plus"></i> Add to board
                         </button>
                         <span class="control-label">Grid Size:</span>
-                        <button class="icon-btn active" id="gridNormal"><i class="fa-solid fa-border-all"></i></button>
-                        <button class="icon-btn" id="gridLarge"><i class="fa-solid fa-table-cells-large"></i></button>
+                        <button class="icon-btn active" id="gridNormal" type="button" title="Normal grid" aria-label="Normal grid density" aria-pressed="true"><i class="fa-solid fa-border-all"></i></button>
+                        <button class="icon-btn" id="gridLarge" type="button" title="Large grid" aria-label="Large grid density" aria-pressed="false"><i class="fa-solid fa-table-cells-large"></i></button>
                     </div>
                 </div>
 
@@ -261,7 +274,7 @@
                         <!-- Rewritten per state by updateReviewBar(): the static
                              copy promised click-to-triage while select mode was
                              forced on and made that click impossible. -->
-                        <span class="review-bar-hint" id="reviewBarHint">Click any card to open triage · <kbd>K</kbd> keep <kbd>R</kbd> reject</span>
+                        <span class="review-bar-hint" id="reviewBarHint">Keep or Reject on a card · <kbd>K</kbd> keep <kbd>R</kbd> reject <kbd>X</kbd> delete</span>
                     </div>
                     <!-- Each chip carries its pass rate (B4): the share of the
                          whole archive that filter admits, warning-styled once a
@@ -283,7 +296,7 @@
                              in review mode by `body.review-mode .view-controls`,
                              so without this the mode had an entrance and no
                              exit. Same button both ways. -->
-                        <button class="filter-chip review-select-toggle" id="reviewSelectToggleBtn" type="button" title="Select multiple items to delete (Esc to leave)">
+                        <button class="filter-chip review-select-toggle" id="reviewSelectToggleBtn" aria-pressed="false" type="button" title="Select multiple items to delete (Esc to leave)">
                             <i class="fa-solid fa-check-double"></i> Select
                         </button>
                         <button class="btn btn-secondary btn-sm" id="reviewSelectAllBtn" type="button" title="Select every non-favourite loaded in the grid">
@@ -354,11 +367,11 @@
                         Clear filters
                     </button>
                 </div>
-            </main>
+            </div>
 
             <!-- Outputs gallery (A1). Sibling of the photo gallery so both keep
                  their own scroll position and paging state. -->
-            <main class="gallery-container outputs-container" id="outputsView" style="display:none;">
+            <div class="gallery-container outputs-container" id="outputsView" style="display:none;">
                 <div class="gallery-header">
                     <div class="gallery-title-group">
                         <h2><i class="fa-solid fa-images"></i> Outputs</h2>
@@ -419,18 +432,19 @@
                     <h3>Nothing generated yet</h3>
                     <p>Open a photo, generate with ComfyUI, and every output lands here.</p>
                 </div>
+            </div>
             </main>
         </div>
     </div>
 
     <!-- Output detail: source vs output, full provenance, regenerate. -->
-    <div class="modal-dialog-container" id="outputDetailModal" style="display:none;">
+    <div class="modal-dialog-container" id="outputDetailModal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="outputDetailTitle">
         <div class="modal-overlay" id="outputDetailOverlay"></div>
         <div class="modal-card wide">
             <div class="sync-modal-header">
                 <div class="modal-icon purple"><i class="fa-solid fa-wand-magic-sparkles"></i></div>
                 <div class="sync-modal-titles">
-                    <h3>Generation</h3>
+                    <h3 id="outputDetailTitle">Generation</h3>
                     <p class="sync-modal-sub">Everything recorded about this output — enough to reproduce it.</p>
                 </div>
                 <button type="button" class="icon-btn" id="closeOutputDetail" title="Close" aria-label="Close">
@@ -506,7 +520,7 @@
     </div>
 
     <!-- Lightbox AI Prompt Inspector Modal -->
-    <div class="lightbox" id="lightboxModal" style="display:none;">
+    <div class="lightbox" id="lightboxModal" style="display:none;" role="dialog" aria-modal="true" aria-label="Media inspector">
         <div class="lightbox-overlay" id="lightboxOverlay"></div>
         <div class="lightbox-modal-card">
             <button class="lightbox-close" id="lightboxClose" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
@@ -792,14 +806,14 @@
     </div>
 
     <!-- Quality Insights Modal (Phase 13 B1) -->
-    <div class="modal-dialog-container" id="insightsModal" style="display:none;">
+    <div class="modal-dialog-container" id="insightsModal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="insightsModalTitle">
         <div class="modal-overlay" id="insightsModalOverlay"></div>
         <div class="modal-card insights-modal-card">
             <div class="sync-modal-header">
                 <div class="modal-icon purple"><i class="fa-solid fa-chart-line"></i></div>
                 <div class="sync-modal-titles">
-                    <h3>Quality Insights</h3>
-                    <p class="sync-modal-sub">Signals already on disk — no new instrumentation. Prompt edit rate and generation counts.</p>
+                    <h3 id="insightsModalTitle">Quality Insights</h3>
+                    <p class="sync-modal-sub">How often you rewrite a prompt, and what you have generated.</p>
                 </div>
                 <button type="button" class="icon-btn" id="closeInsightsBtn" title="Close" aria-label="Close insights">
                     <i class="fa-solid fa-xmark"></i>
@@ -818,14 +832,14 @@
     </div>
 
     <!-- E2 — run journal, read-only -->
-    <div class="modal-dialog-container" id="activityModal" style="display:none;">
+    <div class="modal-dialog-container" id="activityModal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="activityModalTitle">
         <div class="modal-overlay" id="activityModalOverlay"></div>
         <div class="modal-card wide insights-modal-card">
             <div class="sync-modal-header">
                 <div class="modal-icon cyan"><i class="fa-solid fa-clock-rotate-left"></i></div>
                 <div class="sync-modal-titles">
-                    <h3>Activity</h3>
-                    <p class="sync-modal-sub">What the last jobs actually did — stop reason, counts, backoff.</p>
+                    <h3 id="activityModalTitle">Activity</h3>
+                    <p class="sync-modal-sub">What each job did, and why it stopped.</p>
                 </div>
                 <button type="button" class="icon-btn" id="closeActivityBtn" title="Close" aria-label="Close activity">
                     <i class="fa-solid fa-xmark"></i>
@@ -872,7 +886,7 @@
     </div>
 
     <!-- Custom Confirmation Delete Modal -->
-    <div class="modal-dialog-container" id="deleteConfirmModal" style="display:none;">
+    <div class="modal-dialog-container" id="deleteConfirmModal" style="display:none;" role="alertdialog" aria-modal="true" aria-labelledby="deleteConfirmTitle">
         <div class="modal-overlay"></div>
         <div class="modal-card red-theme">
             <div class="modal-icon red"><i class="fa-solid fa-triangle-exclamation"></i></div>
@@ -887,11 +901,11 @@
     </div>
 
     <!-- Create New Creator Modal -->
-    <div class="modal-dialog-container" id="newCreatorModal" style="display:none;">
+    <div class="modal-dialog-container" id="newCreatorModal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="newCreatorModalTitle">
         <div class="modal-overlay"></div>
         <div class="modal-card">
             <div class="modal-icon purple"><i class="fa-solid fa-folder-plus"></i></div>
-            <h3>Create Creator Folder</h3>
+            <h3 id="newCreatorModalTitle">Create Creator Folder</h3>
             <p>Enter the creator handle name to create a new storage folder:</p>
             <input type="text" id="newCreatorInput" placeholder="e.g. alexa_model" class="modal-input" autocomplete="off">
             <div class="modal-actions">
@@ -902,15 +916,21 @@
     </div>
 
     <!-- Download / Sync Modal — single primary path + following picker + advanced -->
-    <div class="modal-dialog-container" id="syncModal" style="display:none;">
+    <div class="modal-dialog-container" id="syncModal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="syncModalTitle">
         <div class="modal-overlay" id="syncModalOverlay"></div>
         <div class="modal-card sync-modal-card">
             <div class="sync-modal-header">
                 <div class="modal-icon pink"><i class="fa-solid fa-cloud-arrow-down"></i></div>
                 <div class="sync-modal-titles">
-                    <h3>Download media</h3>
+                    <h3 id="syncModalTitle">Download media</h3>
                     <p class="sync-modal-lead">Add creators to a serial queue. One download at a time — no parallel scrapes.</p>
                 </div>
+                <!-- This dialog is 828px tall, so the footer Close sat at y=995
+                     on a 900px viewport: out of reach without scrolling the
+                     card. Every other dialog here already has a header x. -->
+                <button type="button" class="icon-btn" id="closeSyncHeaderBtn" title="Close" aria-label="Close download panel">
+                    <i class="fa-solid fa-xmark"></i>
+                </button>
             </div>
 
             <div class="sync-actions">
@@ -1042,11 +1062,11 @@
     </div>
 
     <!-- Trash Modal — restore or permanently remove soft-deleted media -->
-    <div class="modal-dialog-container" id="trashModal" style="display:none;">
+    <div class="modal-dialog-container" id="trashModal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="trashModalTitle">
         <div class="modal-overlay"></div>
         <div class="modal-card wide">
             <div class="modal-icon red"><i class="fa-solid fa-trash-can"></i></div>
-            <h3>Trash</h3>
+            <h3 id="trashModalTitle">Trash</h3>
             <p id="trashSummary">Deleted media is kept here so you can put it back.</p>
 
             <div class="trash-grid" id="trashList">
@@ -1066,11 +1086,11 @@
     </div>
 
     <!-- Upload Photo Modal -->
-    <div class="modal-dialog-container" id="uploadModal" style="display:none;">
+    <div class="modal-dialog-container" id="uploadModal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="uploadModalTitle">
         <div class="modal-overlay"></div>
         <div class="modal-card">
             <div class="modal-icon cyan"><i class="fa-solid fa-cloud-arrow-up"></i></div>
-            <h3>Upload Photo</h3>
+            <h3 id="uploadModalTitle">Upload Photo</h3>
             <p>Select a creator folder and pick an image file to upload:</p>
             <select id="uploadCreatorSelect" class="modal-select">
                 <!-- Dynamic Creator Options -->
@@ -1084,7 +1104,7 @@
     </div>
 
     <!-- Fullscreen Photo Viewer Overlay -->
-    <div class="photo-viewer-overlay" id="photoViewerOverlay" style="display:none;">
+    <div class="photo-viewer-overlay" id="photoViewerOverlay" style="display:none;" role="dialog" aria-modal="true" aria-label="Fullscreen viewer">
         <button class="photo-viewer-close" id="photoViewerClose" title="Close (Esc)">
             <i class="fa-solid fa-xmark"></i>
         </button>

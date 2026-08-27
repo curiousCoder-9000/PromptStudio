@@ -150,6 +150,17 @@ body {
     letter-spacing: -0.02em;
 }
 
+/* The wordmark is the document's one <h1> (there was none at all). Strip the
+   heading defaults -- 2em and a 0.67em block margin -- so it keeps inheriting
+   from .logo the way the <span> it replaced did. */
+.logo-text {
+    font-size: inherit;
+    font-weight: inherit;
+    line-height: inherit;
+    letter-spacing: inherit;
+    margin: 0;
+}
+
 .logo-icon {
     color: var(--accent-purple);
     font-size: 1.5rem;
@@ -164,6 +175,12 @@ body {
 }
 
 .badge {
+    /* #ollamaBadge is a <button> -- a status with no next step was a dead end
+       when the answer was "offline". These four undo the UA button styling. */
+    border: none;
+    font-family: inherit;
+    line-height: 1.4;
+    cursor: pointer;
     background: linear-gradient(135deg, var(--accent-purple), var(--accent-pink));
     color: #fff;
     font-size: 0.68rem;
@@ -319,9 +336,24 @@ body {
 .nav-actions {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     flex-wrap: wrap;
     justify-content: flex-end;
+}
+
+/* Separates the four job verbs from the icons that only navigate. */
+.nav-divider {
+    width: 1px;
+    align-self: stretch;
+    margin: 4px 2px;
+    background: var(--border-glass);
+}
+
+/* `.btn.icon-only`'s 8px/10px is tuned for `.btn-sm` in the inspector panel.
+   Here it has to keep the 40px height of the labelled buttons beside it, or
+   the row goes ragged. */
+.nav-actions .btn.icon-only {
+    padding: 10px 13px;
 }
 
 .btn {
@@ -512,6 +544,30 @@ body {
     grid-template-columns: 320px 1fr;
     gap: 20px;
     min-height: 650px;
+}
+
+/* Outputs brings its own creator, workflow, checkpoint, rating and date
+   filters. Saved views, Boards and the creator list filter none of them. */
+body.outputs-view .sidebar {
+    display: none;
+}
+
+body.outputs-view .workspace {
+    grid-template-columns: 1fr;
+}
+
+/* The document's single <main>, holding both gallery views. There used to be
+   two <main> elements, and this grid placed the second one at row 2 column 1 --
+   the sidebar's column. It only ever looked right because the outputs view is
+   display:none until you open it. */
+.workspace-views {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.workspace-views > .gallery-container {
+    flex: 1;
 }
 
 /* Sidebar */
@@ -987,6 +1043,76 @@ body {
 .photo-card-overlay .overlay-top-actions label,
 .photo-card-overlay .overlay-top-actions .card-select-wrap {
     pointer-events: auto;
+}
+
+/* ── grid-level triage (U16) ─────────────────────────────────────────────
+   Review mode only, and it *replaces* the prompt hint rather than joining it:
+   during triage the bottom row's job is the decision. The overlay is
+   pointer-events: none, so these have to opt back in like the top row does. */
+.card-triage-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 2px;
+    pointer-events: auto;
+}
+
+.card-triage-btn {
+    flex: 1 1 0;
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border-glass);
+    background: rgba(15, 23, 42, 0.82);
+    color: var(--text-secondary);
+    font-family: var(--font-sub);
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: var(--transition-fast);
+}
+
+.card-triage-btn:hover {
+    background: rgba(30, 41, 59, 0.95);
+    color: var(--text-primary);
+}
+
+.card-triage-btn.keep.active {
+    background: rgba(6, 182, 212, 0.24);
+    border-color: rgba(6, 182, 212, 0.65);
+    color: #a5f3fc;
+}
+
+.card-triage-btn.reject.active {
+    background: rgba(239, 68, 68, 0.22);
+    border-color: rgba(239, 68, 68, 0.6);
+    color: #fecaca;
+}
+
+/* Which side is already chosen has to survive the label being dropped at
+   narrow widths, so the state is on the whole button, not on the text. */
+.card-triage-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.card-triage-manual {
+    flex: 0 0 auto;
+    font-size: 0.62rem;
+    color: var(--text-muted);
+}
+
+/* A 150px tile cannot hold two labelled buttons. The icons carry it, and
+   `aria-label` names the file either way. */
+@media (max-width: 900px) {
+    .card-triage-label {
+        display: none;
+    }
 }
 
 .prompt-status-badge {
@@ -3653,6 +3779,12 @@ button.tag-pill.tag-clickable:hover {
     border-color: rgba(6, 182, 212, 0.45);
 }
 
+/* Used by the Ollama-offline notice. Not `.error`: nothing failed, a
+   dependency is not running, and the toast says how to start it. */
+.toast.warn {
+    border-color: rgba(245, 158, 11, 0.55);
+}
+
 /* Generate Prompt Section */
 .generate-prompt-section {
     flex: 1;
@@ -4240,6 +4372,63 @@ button.tag-pill.tag-clickable:hover {
         flex: 1 1 auto;
         padding: 9px 12px;
         font-size: 0.82rem;
+    }
+
+    /* Touch targets (U35). Measured at 390x844 before this: 36 of 38 visible
+       controls were under 40px, and the five primary filter chips -- the most
+       tapped things on the screen -- were 29px. WCAG 2.5.5 asks for 44px, which
+       would give back the chrome budget §11 just cut, so 40px is the floor:
+       comfortably past the 24px minimum 2.5.8 requires, and thumb-reachable.
+       `.icon-btn.sm` is listed explicitly because it is (0,2,0) and would
+       otherwise keep its 30px right through this block. */
+    .filter-chip,
+    .sort-select,
+    .btn-sm,
+    input[type="text"],
+    .modal-select,
+    .modal-file-input {
+        min-height: 40px;
+    }
+
+    .filter-chip {
+        padding: 9px 14px;
+    }
+
+    .icon-btn,
+    .icon-btn.sm {
+        width: 40px;
+        height: 40px;
+    }
+
+    /* `.nav-actions .btn.icon-only` is (0,3,0), so it keeps its desktop
+       padding right through this block -- min-height is what reaches it. */
+    .nav-actions .btn {
+        min-height: 40px;
+    }
+
+    /* This became a <button> for U33, which put a 23px control on the page. */
+    #ollamaBadge {
+        min-height: 40px;
+        padding: 8px 14px;
+    }
+
+    /* Source pills are filters, so they are tap targets. They only exist once
+       more than one source is indexed, which is why they were invisible to an
+       isolated run of the suite and only turned up in a full one. */
+    .source-pill {
+        min-height: 40px;
+        padding: 9px 14px;
+    }
+
+    /* U35's floor applies to the U16 triage buttons too -- they are the most
+       tapped controls on the screen in review mode. */
+    .card-triage-btn {
+        min-height: 40px;
+    }
+
+    .card-trash-btn {
+        width: 40px;
+        height: 40px;
     }
 
     .gallery-container {
@@ -5195,4 +5384,78 @@ body.label-mode .view-controls {
     color: var(--accent-purple);
     border-color: rgba(139, 92, 246, 0.5);
     font-variant-numeric: tabular-nums;
+}
+
+
+/* ── Ollama offline (U33) ────────────────────────────────────────────────
+   The grid used to advertise "Click for AI Prompt" on every tile while the
+   model was unreachable. Both hints are in the DOM and this picks one, because
+   the health poller flips the body class every 30s without re-rendering the
+   grid -- a card that decided at mount time would be stale. */
+.hint-when-offline {
+    display: none;
+}
+
+body.ollama-offline .hint-when-online {
+    display: none;
+}
+
+body.ollama-offline .hint-when-offline {
+    display: flex;
+}
+
+/* ── an empty result set keeps its filters, not its result controls (U31) ──
+   Sort, grid density, Group posts and Select all act on rows that are not
+   there. The filter chips and selects stay: they are the way out. */
+.gallery-header.results-empty .control-label,
+.gallery-header.results-empty #sortSelect,
+.gallery-header.results-empty #groupPostsBtn,
+.gallery-header.results-empty #selectModeBtn,
+.gallery-header.results-empty #gridNormal,
+.gallery-header.results-empty #gridLarge {
+    display: none;
+}
+
+
+/* ── native controls (U30) ───────────────────────────────────────────────
+   `.modal-file-input` shares the grouped `.modal-input, .modal-select` rule
+   above, so the *field* was already glass-dark. What no rule reached was the
+   button the user agent draws inside it -- a grey platform chunk sitting on the
+   card -- and the picker glyph a date input draws, which is dark on dark. Both
+   need their own pseudo-element selectors; `color-scheme` does not reach
+   either. */
+.modal-file-input {
+    cursor: pointer;
+}
+
+.modal-file-input::file-selector-button {
+    background: rgba(139, 92, 246, 0.18);
+    border: 1px solid rgba(139, 92, 246, 0.45);
+    border-radius: var(--radius-sm);
+    color: var(--text-primary);
+    font-family: var(--font-sub);
+    font-size: 0.82rem;
+    font-weight: 600;
+    padding: 7px 14px;
+    margin-right: 12px;
+    cursor: pointer;
+    transition: var(--transition-fast);
+}
+
+.modal-file-input::file-selector-button:hover {
+    background: rgba(139, 92, 246, 0.3);
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: invert(0.85);
+    opacity: 0.7;
+    cursor: pointer;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator:hover {
+    opacity: 1;
+}
+
+input[type="date"].sort-select {
+    color-scheme: dark;
 }

@@ -60,6 +60,7 @@ These are the single source of truth — other docs point here rather than resta
 | A new score or filter | `promptstudio/insights.py` `saturation_report` + `tests/test_distribution_guard.py` (rule 17) |
 | Vision / prompts | `promptstudio/prompts/engine.py` |
 | Keep/reject classify | `promptstudio/scraping/media_classifier.py` · job in `classify_job.py` |
+| Setting a verdict from anywhere in the UI | `applyManualVerdict(photo, value)` + `patchCardVerdict(photo)` in `app.js`. The lightbox and the card are two callers of one function on purpose — never re-implement the patch, and never refetch (it drops the row out from under the cursor) |
 | Gallery index | `promptstudio/storage/db.py` |
 | Gallery feels slow | [`docs/review_gallery_performance.md`](docs/review_gallery_performance.md) — §11 for what already shipped; measure first; do not flip FTS5 |
 | Thumbnails | `promptstudio/storage/thumb_queue.py` (ingest + workers) · `thumbs.py` (encode) · `scripts/backfill_thumbnails.py`. **Never** encode on the `/media/thumb/` request thread |
@@ -74,6 +75,10 @@ These are the single source of truth — other docs point here rather than resta
 | ComfyUI | `promptstudio/comfy/client.py` |
 | Frontend | `app.js` |
 | Layout budget · focus rings · icon glyphs | `tests/ui/test_layout_and_a11y.js` — measured, not read; see [`docs/review_ui_product.md`](docs/review_ui_product.md) §10–11 |
+| A new overlay, or anything about focus | `openDialog`/`closeDialog` in `app.js` — never assign `style.display` on a dialog directly. `tests/ui/test_dialogs_and_aria.js` · [`docs/review_ui_product.md`](docs/review_ui_product.md) §13 |
+| A new toggle button | `setToggleState()` in `app.js` — sets the `active` class and `aria-pressed` together |
+| Anything in `index.html`, or a new browser suite | `tests/test_markup_structure.py` — tag balance, one `<main>` and whose child it is, unique ids, `aria-labelledby` resolution, user-visible copy, and the suites' own regex escaping |
+| A new navbar button | It goes in one of the two groups either side of `.nav-divider`: labelled if it starts a job, `icon-only` + `aria-label` if it navigates. The bar has ~340px of slack at 1280px; spend it and it wraps to two rows again ([`docs/review_ui_product.md`](docs/review_ui_product.md) §14) |
 
 ## Runtime checks
 
@@ -132,3 +137,12 @@ the whole `scripts/` tree for non-scrape work.
 | Any `fa-*` class name works offline | Only names in the vendored **Free** set. A Pro name (`fa-sparkles`, `fa-image-slash`) renders at **width 0** — an invisible icon, not a fallback box. `tests/test_offline_assets.py` enforces |
 | One SQLite connection behind one `RLock` | Writer + N `mode=ro` readers. Reads go through `_read()`; a SELECT on `self._conn` re-introduces the contention |
 | The grid holds a card per loaded photo | It mounts a window (~21 at 1280×800). An absent card is normal — every `[data-rel-path]` patch site must stay `if (card)` |
+| A photo card is a `div` you click | It is `tabindex="0"` with an `aria-label` and an Enter/Space handler. It carries **no** `role="button"` on purpose — that role has presentational children and would hide the per-card delete from AT |
+| Triage lives in the lightbox | Since U16 it is on the card too, in review mode only: Keep/Reject **replace** the prompt hint (`cardTriageRowHtml`), and K/R/X work on a focused tile. `X` differs between the two on purpose — the lightbox soft-deletes with Undo, the grid opens `#deleteConfirmModal`, because one keystroke on a grid fires at whatever last had focus |
+| Pressing the active Keep/Reject does nothing | It hands the photo back to the model (`verdict: "auto"`, which the API already maps to null). Two directions per control keeps a third button off a 200px tile |
+| Escape covers every overlay | It covers the ones listed in the one prioritised chain in `app.js`. `#insightsModal` and `#activityModal` were missing from it for three phases and the chain still *read* complete |
+| An element's tag can be changed on its own line | Both ends, or the parser unwinds. `<div class="creator-list">` → `<nav …>` with the `</div>` left behind cost `<main>` its place in the `.workspace` grid and put the gallery under the sidebar. `tests/test_markup_structure.py` parses `index.html` — tag balance, one `<main>` *and* whose child it is, unique ids, `aria-labelledby` resolution |
+| Ollama being down is the badge's business | It sets `body.ollama-offline`, which the grid reads to stop advertising "Click for AI Prompt". Both hint variants ship and CSS picks one — the health poller flips the class every 30s and does **not** re-render the grid, so deciding from `state.ollamaOnline` at card-mount time goes stale |
+| `getComputedStyle(el, pseudo)` reads the pseudo-element | Not for UA shadow pseudo-elements. `::-webkit-calendar-picker-indicator` answers with the **host**'s style, so a browser check on it always passes. `::file-selector-button` does work. Assert the unreachable ones in `tests/test_markup_structure.py` |
+| A regex in a browser suite is written once | It is written **twice** — `Session.eval` interpolates into a template literal, so `/\s+/` must be `/\\s+/` in the file or it collapses to `/s+/` and eats every letter s. No backticks in an eval body either, comments included |
+| A dialog can be shown with `style.display = 'flex'` | Use `openDialog()`. Raw assignment skips the focus hand-off, the return stack and Tab containment — and focus must be set on the **next frame**, since a `display:none` subtree has no geometry and `focus()` on it silently no-ops |

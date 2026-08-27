@@ -319,6 +319,7 @@ const elements = {
     syncProgressFill: document.getElementById('syncProgressFill'),
     syncRateMeta: document.getElementById('syncRateMeta'),
     closeSyncModalBtn: document.getElementById('closeSyncModalBtn'),
+    closeSyncHeaderBtn: document.getElementById('closeSyncHeaderBtn'),
     syncInstagramBtn: document.getElementById('syncInstagramBtn'),
     scrapeCreatorInput: document.getElementById('scrapeCreatorInput'),
     scrapeSourceSelect: document.getElementById('scrapeSourceSelect'),
@@ -586,7 +587,7 @@ function applyViewPrefsToControls() {
         if (btn) btn.classList.toggle('active', Boolean(on));
     });
     if (elements.semanticSearchBtn) {
-        elements.semanticSearchBtn.classList.toggle('active', state.searchMode === 'semantic');
+        setToggleState(elements.semanticSearchBtn, state.searchMode === 'semantic');
     }
 }
 
@@ -594,8 +595,8 @@ function applyGridSize(size) {
     const large = size === 'large';
     state.gridSize = large ? 'large' : 'normal';
     if (elements.galleryGrid) elements.galleryGrid.classList.toggle('large', large);
-    if (elements.gridNormal) elements.gridNormal.classList.toggle('active', !large);
-    if (elements.gridLarge) elements.gridLarge.classList.toggle('active', large);
+    setToggleState(elements.gridNormal, !large);
+    setToggleState(elements.gridLarge, large);
 }
 
 // Initialize
@@ -719,6 +720,15 @@ function updateOllamaBadge(data) {
     state.comfyOnline = data.comfy == null ? state.comfyOnline : Boolean(data.comfy);
     elements.ollamaBadge.classList.toggle('offline', !online);
     elements.ollamaBadge.classList.toggle('online', online);
+    // One class the whole page can read, so the grid stops advertising an
+    // action that cannot run. The badge used to be the only thing that knew.
+    document.body.classList.toggle('ollama-offline', !online);
+    elements.ollamaBadge.title = online
+        ? 'Ollama is answering. Click to check again.'
+        : 'Ollama is not answering on localhost:11434. Click to check again.';
+    elements.ollamaBadge.setAttribute('aria-label', online
+        ? 'Ollama is online — check again'
+        : 'Ollama is offline — check again');
     const model = data.model ? ` ${data.model}` : '';
     const comfyBit = state.comfyOnline ? ' · Comfy' : '';
     elements.ollamaStatusLabel.textContent = online
@@ -938,7 +948,13 @@ async function applyModeEToEditor({ save = false } = {}) {
 
 function requireOllama() {
     if (state.ollamaOnline === false) {
-        showToast('Ollama is offline — start Ollama to generate prompts');
+        showToast({
+            title: 'Ollama is not answering',
+            body: 'Nothing is listening on localhost:11434. Start it with '
+                + '`ollama serve`, then press the Ollama badge to re-check.',
+            variant: 'warn',
+            duration: 6000,
+        });
         return false;
     }
     return true;
@@ -1257,12 +1273,12 @@ async function loadInsights() {
 
 function openInsightsModal() {
     if (!elements.insightsModal) return;
-    elements.insightsModal.style.display = 'flex';
+    openDialog(elements.insightsModal);
     loadInsights();
 }
 
 function closeInsightsModal() {
-    if (elements.insightsModal) elements.insightsModal.style.display = 'none';
+    closeDialog(elements.insightsModal);
 }
 
 async function fetchCreators() {
@@ -1771,12 +1787,12 @@ async function purgeTrash(payload) {
 
 function openTrashModal() {
     if (!elements.trashModal) return;
-    elements.trashModal.style.display = 'flex';
+    openDialog(elements.trashModal);
     loadTrashList();
 }
 
 function closeTrashModal() {
-    if (elements.trashModal) elements.trashModal.style.display = 'none';
+    closeDialog(elements.trashModal);
 }
 
 async function deletePhoto(relPath) {
@@ -1838,7 +1854,7 @@ function setSelectMode(enabled) {
     state.selectMode = enabled;
     if (!enabled) state.selectedPaths.clear();
     if (elements.selectModeBtn) {
-        elements.selectModeBtn.classList.toggle('active', enabled);
+        setToggleState(elements.selectModeBtn, enabled);
     }
     elements.galleryGrid.classList.toggle('select-mode', enabled);
     if (elements.addToCollectionBtn) {
@@ -2465,6 +2481,11 @@ function galleryHasActiveFilters() {
 function updateEmptyState() {
     const el = elements.emptyState;
     if (!el) return;
+    // Sort order, grid density, Group posts and Select act on results. With no
+    // results they are eight controls describing nothing. The *filters* stay:
+    // they are how you get out of an empty view.
+    const header = document.querySelector('.gallery-container:not(.outputs-container) .gallery-header');
+    if (header) header.classList.toggle('results-empty', state.photos.length === 0);
     if (state.photos.length > 0) {
         el.style.display = 'none';
         return;
@@ -2585,8 +2606,8 @@ function clearGalleryFilters() {
         elements.verdictFilterSelect.classList.remove('is-active');
     }
     if (elements.mediaTypeSelect) elements.mediaTypeSelect.value = 'all';
-    if (elements.favoritesFilterBtn) elements.favoritesFilterBtn.classList.remove('active');
-    if (elements.unanalyzedFilterBtn) elements.unanalyzedFilterBtn.classList.remove('active');
+    setToggleState(elements.favoritesFilterBtn, false);
+    setToggleState(elements.unanalyzedFilterBtn, false);
     saveViewPrefs();
     if (typeof renderFacetChips === 'function') renderFacetChips();
     fetchPhotos();
@@ -2852,6 +2873,16 @@ function buildPhotoCard(tile) {
     const verdictCls = verdictCardClass(p);
     card.className = `photo-card${state.selectMode ? ' select-mode' : ''}${selected ? ' selected' : ''}${p.favorite ? ' is-favorite' : ''}${verdictCls}`;
     card.dataset.relPath = p.rel_path;
+    // The card was a <div> with a click listener and nothing else, so there
+    // was no keyboard path into the lightbox -- and the lightbox is the only
+    // home of the prompt editor, triage, favourite and every ComfyUI export.
+    // The whole second half of this app was mouse-only.
+    //
+    // No `role="button"`: that role has presentational children, which would
+    // hide the per-card delete from assistive tech. A focusable card with a
+    // name and an Enter/Space handler claims only what it implements.
+    card.tabIndex = 0;
+    card.setAttribute('aria-label', `${p.filename} by @${p.creator}`);
     const imgSrc = p.thumb_url || p.url;
     const status = promptStatusMeta(p);
     const favMark = p.favorite
@@ -2860,9 +2891,20 @@ function buildPhotoCard(tile) {
     // Single source of truth for video detection (was a divergent inline list)
     const isVideo = isVideoFilename(p.filename);
     const videoBadge = isVideo ? '<div class="video-badge"><i class="fa-solid fa-play"></i></div>' : '';
+    // U16: during triage the bottom row's job is the decision, not an
+    // invitation to open the prompt editor. So the hint is *replaced* rather
+    // than joined -- U11 already calls four affordances on a 200px tile
+    // crowded, and adding a fifth and sixth to the only mode where the tile
+    // matters most is the wrong trade.
+    const triageRow = state.reviewMode ? cardTriageRowHtml(p) : '';
+    // Both variants ship and CSS picks one from `body.ollama-offline`. The
+    // health poller changes that class every 30s and does not re-render the
+    // grid, so deciding here from `state.ollamaOnline` would leave whatever
+    // was true when the card was mounted.
     const bottomHint = isVideo
         ? `<div class="photo-card-prompt-hint"><i class="fa-solid fa-clapperboard"></i> Click for reel details</div>`
-        : `<div class="photo-card-prompt-hint"><i class="fa-solid fa-wand-magic-sparkles"></i> Click for AI Prompt</div>`;
+        : `<div class="photo-card-prompt-hint hint-when-online"><i class="fa-solid fa-wand-magic-sparkles"></i> Click for AI Prompt</div>
+           <div class="photo-card-prompt-hint hint-when-offline"><i class="fa-solid fa-plug-circle-xmark"></i> Ollama offline — open details</div>`;
     const topBadge = isVideo
         ? `<span class="prompt-status-badge ready" title="Reel"><i class="fa-solid fa-film"></i> Reel</span>`
         : `<span class="prompt-status-badge ${status.cls}"><i class="fa-solid ${status.icon}"></i> ${status.label}</span>`;
@@ -2883,13 +2925,14 @@ function buildPhotoCard(tile) {
                     ? `<label class="card-select-wrap" title="Select"><input type="checkbox" class="card-select-cb" ${selected ? 'checked' : ''}></label>`
                     : topBadge}
                 ${favMark}
-                <button class="card-trash-btn" title="Delete Photo"><i class="fa-solid fa-trash-can"></i></button>
+                <button class="card-trash-btn" type="button" title="Delete Photo"
+                    aria-label="Delete ${escapeHtml(p.filename || p.rel_path)}"><i class="fa-solid fa-trash-can"></i></button>
             </div>
             <div class="overlay-bottom-info">
                 <div class="photo-card-creator">@${escapeHtml(p.creator)}</div>
                 ${state.selectMode
                     ? topBadge
-                    : bottomHint}
+                    : (triageRow || bottomHint)}
             </div>
         </div>
         ${verdictBadgeHtml(p)}
@@ -2909,7 +2952,7 @@ function buildPhotoCard(tile) {
         });
     }
 
-    card.addEventListener('click', () => {
+    const activate = () => {
         if (state.selectMode) {
             const next = !state.selectedPaths.has(p.rel_path);
             togglePhotoSelection(p.rel_path, next);
@@ -2923,6 +2966,31 @@ function buildPhotoCard(tile) {
             const at = state.photos.findIndex((x) => x.rel_path === p.rel_path);
             openLightbox(at >= 0 ? at : index);
         }
+    };
+
+    card.querySelectorAll('.card-triage-btn').forEach((btn) => {
+        btn.addEventListener('click', async (e) => {
+            // Or the card's own click handler opens the lightbox underneath.
+            e.stopPropagation();
+            const want = btn.dataset.verdict;
+            const current = p.verdict && p.verdict.verdict;
+            // A second press on the active side hands it back to the model,
+            // which is what the lightbox's Auto button does. One control, two
+            // directions, rather than a third button on the tile.
+            const value = current === want ? 'auto' : want;
+            const ok = await applyManualVerdict(p, value);
+            if (ok) updateReviewBar();
+        });
+    });
+
+    card.addEventListener('click', activate);
+    card.addEventListener('keydown', (e) => {
+        // Only the card itself. The nested delete button and select checkbox
+        // handle their own keys, and Space on a checkbox must stay a checkbox.
+        if (e.target !== card) return;
+        if (e.key !== 'Enter' && e.key !== ' ' && e.code !== 'Space') return;
+        e.preventDefault();
+        activate();
     });
     return card;
 }
@@ -3342,7 +3410,7 @@ function openLightbox(index, { skipPromptLoad = false } = {}) {
         }
         if (elements.photoViewerOverlay) {
             elements.photoViewerOverlay.classList.remove('is-video');
-            elements.photoViewerOverlay.style.display = 'none';
+            closeDialog(elements.photoViewerOverlay);
         }
     }
 
@@ -3370,7 +3438,7 @@ function openLightbox(index, { skipPromptLoad = false } = {}) {
     renderTriageBlock(photo);
     state.compareMode = false;
     setCompareMode(false);
-    elements.lightboxModal.style.display = 'flex';
+    openDialog(elements.lightboxModal, '#lightboxClose');
     
     // Always load the media details for both photos and videos
     loadMediaDetailPanel(photo);
@@ -3805,6 +3873,10 @@ function showOutputsView(on) {
     if (on && state.reviewMode) exitReviewMode();
     if (on && state.labelMode) exitLabelMode({ refetch: false });
     state.outputsView = on;
+    // Outputs has its own creator, workflow, checkpoint, rating and date
+    // filters. Saved views, Boards and the creator list filter none of them,
+    // and were taking 320px of the row to do it.
+    document.body.classList.toggle('outputs-view', on);
     const gallery = document.querySelector('.gallery-container:not(.outputs-container)');
     if (gallery) gallery.style.display = on ? 'none' : 'flex';
     if (elements.outputsView) elements.outputsView.style.display = on ? 'flex' : 'none';
@@ -3905,11 +3977,11 @@ function openOutputDetail(genId) {
             ? `Re-run with seed ${gen.seed}`
             : 'This generation predates seed recording and cannot be reproduced';
     }
-    elements.outputDetailModal.style.display = 'flex';
+    openDialog(elements.outputDetailModal);
 }
 
 function closeOutputDetail() {
-    if (elements.outputDetailModal) elements.outputDetailModal.style.display = 'none';
+    closeDialog(elements.outputDetailModal);
     state.outputDetail = null;
 }
 
@@ -4732,7 +4804,7 @@ function closeLightbox() {
     if (state.videoInFullscreenShell || isDisplayFlex(elements.photoViewerOverlay)) {
         closePhotoViewer({ keepVideoPlaying: false });
     }
-    elements.lightboxModal.style.display = 'none';
+    closeDialog(elements.lightboxModal);
     state.lightboxIndex = -1;
     state.currentPromptData = null;
     stopAndClearLightboxVideo();
@@ -4770,7 +4842,7 @@ function openPhotoViewer() {
         elements.photoViewerImg.src = photo.url;
     }
     elements.photoViewerOverlay.classList.remove('is-video');
-    elements.photoViewerOverlay.style.display = 'flex';
+    openDialog(elements.photoViewerOverlay, '#photoViewerClose');
 
     // Reset zoom/pan state
     state.viewerZoom = 1;
@@ -5082,7 +5154,7 @@ function openVideoViewer() {
     state.fsScrubbing = false;
 
     elements.photoViewerOverlay.classList.add('is-video');
-    elements.photoViewerOverlay.style.display = 'flex';
+    openDialog(elements.photoViewerOverlay, '#photoViewerClose');
 
     // User gesture path — unmute
     ensureVideoAudible(v);
@@ -5137,7 +5209,7 @@ function closePhotoViewer(opts = {}) {
         elements.photoViewerImg.style.display = 'block';
     }
     elements.photoViewerOverlay.classList.remove('is-video');
-    elements.photoViewerOverlay.style.display = 'none';
+    closeDialog(elements.photoViewerOverlay);
     state.viewerZoom = 1;
     state.viewerPanX = 0;
     state.viewerPanY = 0;
@@ -5274,7 +5346,7 @@ function promptDeletePhoto(photo) {
     }
     elements.deleteFilenamePreview.textContent = `${photo.creator}/${photo.filename}`;
     applyDeleteConfirmMode();
-    elements.deleteConfirmModal.style.display = 'flex';
+    openDialog(elements.deleteConfirmModal, '#cancelDeleteBtn');
 }
 
 function promptBulkDelete() {
@@ -5306,21 +5378,125 @@ function promptBulkDelete() {
     }
     elements.deleteFilenamePreview.textContent = preview;
     applyDeleteConfirmMode();
-    elements.deleteConfirmModal.style.display = 'flex';
+    openDialog(elements.deleteConfirmModal, '#cancelDeleteBtn');
 }
 
 function closeDeleteModal() {
-    elements.deleteConfirmModal.style.display = 'none';
+    closeDialog(elements.deleteConfirmModal);
     state.photoToDelete = null;
     state.photosToDelete = null;
 }
 
 function closeNewCreatorModal() {
-    if (elements.newCreatorModal) elements.newCreatorModal.style.display = 'none';
+    closeDialog(elements.newCreatorModal);
 }
 
 function closeUploadModal() {
-    if (elements.uploadModal) elements.uploadModal.style.display = 'none';
+    closeDialog(elements.uploadModal);
+}
+
+/**
+ * A toggle's state belongs in the accessibility tree, not only in a class.
+ * Measured: 0 of the 5 visible `.filter-chip` toggles carried `aria-pressed`,
+ * so a screen reader read "Favorites, button" identically whether the filter
+ * was on or off. Pairing the two here keeps them from drifting apart at the
+ * nine call sites that used to set the class alone.
+ */
+function setToggleState(el, on) {
+    if (!el) return;
+    el.classList.toggle('active', Boolean(on));
+    el.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+
+/* ------------------------------------------------------------------ dialogs
+ * Every overlay here was opened by assigning `style.display` at the call site,
+ * and nothing moved focus. Measured across six of them at 1440x900: focus
+ * stayed on <body> in five of six on open, and after Esc it was on <body> in
+ * all six -- so dismissing a dialog dropped a keyboard user at the top of the
+ * document, having lost the control they opened it from. Tab also walked
+ * straight out of the card into the gallery behind it.
+ *
+ * openDialog/closeDialog own that part: display, the focus hand-off, the
+ * return stack and Tab containment. Escape deliberately stays in the one
+ * prioritised keydown handler -- which overlay unwinds first is a product
+ * decision, not a stack.
+ */
+
+/* Opener per dialog, so closing can hand focus back. Weak: a dialog element
+   outliving the page is not a thing, but neither is holding the openers. */
+const dialogReturnFocus = new WeakMap();
+
+/* Innermost first -- the same order the Escape chain unwinds in. */
+const DIALOG_STACK_ORDER = [
+    'photoViewerOverlay', 'deleteConfirmModal', 'outputDetailModal', 'lightboxModal',
+    'syncModal', 'uploadModal', 'newCreatorModal', 'trashModal', 'duplicatesModal',
+    'insightsModal', 'activityModal',
+];
+
+const DIALOG_FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
+function dialogFocusables(root) {
+    return Array.from(root.querySelectorAll(DIALOG_FOCUSABLE)).filter((el) => {
+        if (el.disabled || el.getAttribute('aria-hidden') === 'true') return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    });
+}
+
+function focusQuietly(el) {
+    if (!el) return false;
+    try {
+        el.focus({ preventScroll: true });
+    } catch (_) {
+        el.focus();
+    }
+    return document.activeElement === el;
+}
+
+/**
+ * Show a dialog and put focus in it.
+ * `initialFocus` is a selector inside the dialog; the first focusable otherwise.
+ */
+function openDialog(el, initialFocus) {
+    if (!el) return;
+    const opener = document.activeElement;
+    if (opener instanceof HTMLElement && opener !== document.body && !el.contains(opener)) {
+        dialogReturnFocus.set(el, opener);
+    }
+    el.style.display = 'flex';
+    // Next frame, not now: a subtree that was display:none has no geometry
+    // yet, and focus() on a zero-box element silently does nothing.
+    requestAnimationFrame(() => {
+        if (el.style.display === 'none') return;
+        if (el.contains(document.activeElement)) return;
+        const wanted = initialFocus ? el.querySelector(initialFocus) : null;
+        focusQuietly(wanted || dialogFocusables(el)[0] || null);
+    });
+}
+
+/** Hide a dialog and hand focus back to whatever opened it. */
+function closeDialog(el) {
+    if (!el) return;
+    el.style.display = 'none';
+    const back = dialogReturnFocus.get(el);
+    dialogReturnFocus.delete(el);
+    // `isConnected` is load-bearing, not defensive: the grid mounts a window of
+    // cards, so the card that opened the lightbox is routinely gone by the time
+    // it closes. No focus is the right answer then -- not a throw.
+    if (!back || !back.isConnected) return;
+    const style = window.getComputedStyle(back);
+    if (style.display === 'none' || style.visibility === 'hidden') return;
+    focusQuietly(back);
+}
+
+function topmostOpenDialog() {
+    for (const id of DIALOG_STACK_ORDER) {
+        const el = document.getElementById(id);
+        if (el && el.style.display === 'flex') return el;
+    }
+    return null;
 }
 
 /** Wire .modal-overlay click → close (overlay is a sibling of .modal-card). */
@@ -5706,12 +5882,12 @@ function renderActivityRuns(runs) {
 
 function openActivityModal() {
     if (!elements.activityModal) return;
-    elements.activityModal.style.display = 'flex';
+    openDialog(elements.activityModal);
     loadActivity();
 }
 
 function closeActivityModal() {
-    if (elements.activityModal) elements.activityModal.style.display = 'none';
+    closeDialog(elements.activityModal);
 }
 
 async function loadDuplicates() {
@@ -5944,7 +6120,7 @@ function openPhotoViewerFromUrl(url, alt) {
         elements.photoViewerImg.alt = alt || 'Full resolution view';
     }
     elements.photoViewerOverlay.classList.remove('is-video');
-    elements.photoViewerOverlay.style.display = 'flex';
+    openDialog(elements.photoViewerOverlay, '#photoViewerClose');
     state.viewerZoom = 1;
     state.viewerPanX = 0;
     state.viewerPanY = 0;
@@ -5961,7 +6137,7 @@ function openPhotoViewerFromUrl(url, alt) {
 
 function openDuplicatesModal() {
     if (!elements.duplicatesModal) return;
-    elements.duplicatesModal.style.display = 'flex';
+    openDialog(elements.duplicatesModal);
     loadDuplicates();
 }
 
@@ -5972,7 +6148,7 @@ function closeDuplicatesModal() {
         && !isDisplayFlex(elements.lightboxModal)) {
         closePhotoViewer();
     }
-    if (elements.duplicatesModal) elements.duplicatesModal.style.display = 'none';
+    closeDialog(elements.duplicatesModal);
 }
 
 async function sweepDuplicates() {
@@ -6098,7 +6274,7 @@ function setupEventListeners() {
     if (elements.unanalyzedFilterBtn) {
         elements.unanalyzedFilterBtn.addEventListener('click', () => {
             state.unanalyzedOnly = !state.unanalyzedOnly;
-            elements.unanalyzedFilterBtn.classList.toggle('active', state.unanalyzedOnly);
+            setToggleState(elements.unanalyzedFilterBtn, state.unanalyzedOnly);
             saveViewPrefs();
             fetchPhotos();
         });
@@ -6107,7 +6283,7 @@ function setupEventListeners() {
     if (elements.favoritesFilterBtn) {
         elements.favoritesFilterBtn.addEventListener('click', () => {
             state.favoritesOnly = !state.favoritesOnly;
-            elements.favoritesFilterBtn.classList.toggle('active', state.favoritesOnly);
+            setToggleState(elements.favoritesFilterBtn, state.favoritesOnly);
             saveViewPrefs();
             fetchPhotos();
         });
@@ -6116,7 +6292,7 @@ function setupEventListeners() {
     if (elements.groupPostsBtn) {
         elements.groupPostsBtn.addEventListener('click', () => {
             state.groupPosts = !state.groupPosts;
-            elements.groupPostsBtn.classList.toggle('active', state.groupPosts);
+            setToggleState(elements.groupPostsBtn, state.groupPosts);
             saveViewPrefs();
             // A full refetch, not a re-render: `total` and the paging unit both
             // change with the grouping, and only the server knows them.
@@ -6241,6 +6417,22 @@ function setupEventListeners() {
         saveViewPrefs();
     });
 
+    if (elements.ollamaBadge) {
+        elements.ollamaBadge.addEventListener('click', async () => {
+            await fetchHealth();
+            if (state.ollamaOnline === false) {
+                showToast({
+                    title: 'Still not answering',
+                    body: 'Start Ollama with `ollama serve` on localhost:11434.',
+                    variant: 'warn',
+                    duration: 5000,
+                });
+            } else {
+                showToast('Ollama is online');
+            }
+        });
+    }
+
     elements.refreshBtn.addEventListener('click', () => {
         initApp();
         showToast('Refreshed gallery archive');
@@ -6270,7 +6462,7 @@ function setupEventListeners() {
     if (elements.semanticSearchBtn) {
         elements.semanticSearchBtn.addEventListener('click', () => {
             state.searchMode = state.searchMode === 'semantic' ? 'text' : 'semantic';
-            elements.semanticSearchBtn.classList.toggle('active', state.searchMode === 'semantic');
+            setToggleState(elements.semanticSearchBtn, state.searchMode === 'semantic');
             saveViewPrefs();
             if (state.searchQuery) fetchPhotos();
         });
@@ -6318,6 +6510,9 @@ function setupEventListeners() {
 
     elements.syncInstagramBtn.addEventListener('click', openSyncModal);
     elements.closeSyncModalBtn.addEventListener('click', closeSyncModal);
+    if (elements.closeSyncHeaderBtn) {
+        elements.closeSyncHeaderBtn.addEventListener('click', closeSyncModal);
+    }
     elements.syncSavedBtn.addEventListener('click', startSyncSaved);
     elements.syncCreatorBtn.addEventListener('click', startSyncCreator);
     elements.syncFollowingBtn.addEventListener('click', startSyncFollowing);
@@ -6520,8 +6715,7 @@ function setupEventListeners() {
     // Create New Creator Modal Actions
     elements.newCreatorBtn.addEventListener('click', () => {
         elements.newCreatorInput.value = '';
-        elements.newCreatorModal.style.display = 'flex';
-        setTimeout(() => elements.newCreatorInput && elements.newCreatorInput.focus(), 0);
+        openDialog(elements.newCreatorModal, '#newCreatorInput');
     });
 
     elements.cancelNewCreatorBtn.addEventListener('click', closeNewCreatorModal);
@@ -6560,7 +6754,7 @@ function setupEventListeners() {
 
     // Upload Modal Actions
     elements.uploadPhotoBtn.addEventListener('click', () => {
-        elements.uploadModal.style.display = 'flex';
+        openDialog(elements.uploadModal, '#uploadFileInput');
     });
 
     elements.cancelUploadBtn.addEventListener('click', closeUploadModal);
@@ -6612,9 +6806,36 @@ function setupEventListeners() {
         hideCreatorStylePanel();
     });
 
+    // Tab must not walk out of an open dialog into the gallery behind it.
+    // Capture phase and a separate listener on purpose: the Escape chain below
+    // returns early per overlay, and containment has to apply to all of them.
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Tab') return;
+        const dialog = topmostOpenDialog();
+        if (!dialog) return;
+        const items = dialogFocusables(dialog);
+        if (!items.length) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        const active = document.activeElement;
+        if (!dialog.contains(active)) {
+            e.preventDefault();
+            focusQuietly(e.shiftKey ? last : first);
+            return;
+        }
+        if (!e.shiftKey && active === last) {
+            e.preventDefault();
+            focusQuietly(first);
+        } else if (e.shiftKey && active === first) {
+            e.preventDefault();
+            focusQuietly(last);
+        }
+    }, true);
+
     // Keyboard Navigation — Escape priority:
-    // Photo Viewer > Delete > Lightbox > Sync > Upload > New Creator
-    //   > Selection > Select mode > Review mode > Creator panel
+    // Photo Viewer > Delete > Output detail > Lightbox > Sync > Upload
+    //   > New Creator > Trash > Duplicates > Insights > Activity
+    //   > Selection > Select mode > Label mode > Review mode > Creator panel
     // Video: ←/→ seek (hold repeats smoothly), Space play/pause, Shift+←/→ prev/next media
     document.addEventListener('keydown', (e) => {
         if (elements.photoViewerOverlay.style.display === 'flex') {
@@ -6760,6 +6981,14 @@ function setupEventListeners() {
             return;
         }
 
+        // Grid-level triage (U16). Above the outputs rating keys because
+        // review mode and the outputs view are mutually exclusive, and below
+        // every overlay branch above, which all return before reaching here.
+        if (!e.ctrlKey && !e.metaKey && !e.altKey && handleGridTriageKey(e)) {
+            e.preventDefault();
+            return;
+        }
+
         if (state.outputsView && !e.ctrlKey && !e.metaKey && !e.altKey) {
             const ae = document.activeElement;
             const typing = ae && (
@@ -6792,6 +7021,16 @@ function setupEventListeners() {
         }
         if (e.key === 'Escape' && isDisplayFlex(elements.duplicatesModal)) {
             closeDuplicatesModal();
+            return;
+        }
+        // Measured: Escape did nothing in these two. Both are read-only panels
+        // whose only exit was a click, and #insightsModal's card is 792px tall.
+        if (e.key === 'Escape' && isDisplayFlex(elements.insightsModal)) {
+            closeInsightsModal();
+            return;
+        }
+        if (e.key === 'Escape' && isDisplayFlex(elements.activityModal)) {
+            closeActivityModal();
             return;
         }
         // Transient gallery modes unwind before the persistent side panel.
@@ -6878,7 +7117,7 @@ function showToast(messageOrOpts, duration = 3000) {
 
 // Instagram sync helpers
 function openSyncModal() {
-    elements.syncModal.style.display = 'flex';
+    openDialog(elements.syncModal);
     pollSyncStatus();
     ensureScrapePolling();
     loadFollowingPicker();
@@ -7857,7 +8096,7 @@ function formatFollowers(n) {
 }
 
 function closeSyncModal() {
-    elements.syncModal.style.display = 'none';
+    closeDialog(elements.syncModal);
     if (state.syncPollTimer) {
         clearInterval(state.syncPollTimer);
         state.syncPollTimer = null;
@@ -8344,6 +8583,48 @@ function tierLabel(tier) {
     const key = String(tier);
     const labels = state.tierLabels || TIER_LABEL_FALLBACK;
     return labels[key] || TIER_LABEL_FALLBACK[key] || 'Unknown';
+}
+
+/**
+ * Keep/Reject on the card, for review mode only.
+ *
+ * `aria-pressed` rather than a class alone: these are the same two-state
+ * toggles as everywhere else in this file, and `setToggleState` cannot be used
+ * because the markup is built as a string before the element exists.
+ */
+function cardTriageRowHtml(photo) {
+    const v = photo && photo.verdict;
+    if (!v) return '';
+    const name = escapeHtml(photo.filename || photo.rel_path);
+    const button = (verdict, icon, label) => {
+        const on = v.verdict === verdict;
+        return `<button type="button" class="card-triage-btn ${verdict}${on ? ' active' : ''}"
+            data-verdict="${verdict}" aria-pressed="${on ? 'true' : 'false'}"
+            title="${on ? 'Hand back to the model' : label} (${verdict === 'keep' ? 'K' : 'R'})"
+            aria-label="${label} ${name}"><i class="fa-solid ${icon}"></i><span
+            class="card-triage-label">${label}</span></button>`;
+    };
+    const manual = v.manual
+        ? '<i class="fa-solid fa-hand-pointer card-triage-manual" title="Set by hand"></i>'
+        : '';
+    return `<div class="card-triage-row">${button('keep', 'fa-check', 'Keep')}${button('reject', 'fa-ban', 'Reject')}${manual}</div>`;
+}
+
+/** Re-sync one card's triage buttons after its verdict changed. */
+function syncCardTriageButtons(card, photo) {
+    const row = card.querySelector('.card-triage-row');
+    if (!row) return;
+    row.outerHTML = cardTriageRowHtml(photo);
+    // outerHTML replaced the node, so the listeners went with it.
+    card.querySelectorAll('.card-triage-btn').forEach((btn) => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const want = btn.dataset.verdict;
+            const current = photo.verdict && photo.verdict.verdict;
+            const ok = await applyManualVerdict(photo, current === want ? 'auto' : want);
+            if (ok) updateReviewBar();
+        });
+    });
 }
 
 function verdictCardClass(photo) {
@@ -8911,8 +9192,30 @@ function exitReviewMode({ refetch = true } = {}) {
 
 function setVerdictFilter(verdict) {
     if (!REVIEW_FILTERS.includes(verdict) || verdict === state.verdictFilter) return;
+    // U15: switching pile used to discard the selection without a word, so a
+    // mis-click threw away however long the curation took. The selection is
+    // still cleared -- a bulk Delete must never reach photos the current pile
+    // does not show -- but the whole action is now reversible, using the same
+    // Undo-toast shape the soft deletes already use.
+    const dropped = Array.from(state.selectedPaths);
+    const previous = state.verdictFilter;
     state.verdictFilter = verdict;
     clearSelection();
+    if (dropped.length) {
+        showToast({
+            title: `Cleared ${dropped.length} selected`,
+            body: 'A selection belongs to the pile it was made in, so bulk actions '
+                + 'never reach across one. Undo puts both back.',
+            actionLabel: 'Undo',
+            onAction: () => {
+                state.verdictFilter = previous;
+                dropped.forEach((path) => state.selectedPaths.add(path));
+                updateReviewBar();
+                fetchPhotos();
+            },
+            duration: 7000,
+        });
+    }
     updateReviewBar();
     fetchPhotos();
 }
@@ -9064,7 +9367,10 @@ function updateReviewBar() {
     if (elements.reviewBarHint) {
         elements.reviewBarHint.textContent = state.selectMode
             ? 'Click cards to select · Esc or Select to go back to triage'
-            : 'Click a card to triage · K keep · R reject · X delete';
+            // U16 put Keep/Reject on the card, so "click a card to triage" is
+            // now wrong in a new way: a click opens the inspector, and the
+            // buttons on the tile are what decide.
+            : 'Keep or Reject on a card · K · R · X on a focused one · click to open it';
     }
 
     // Archive-wide review used to show zeroes on every chip, because the counts
@@ -9123,7 +9429,7 @@ function updateReviewBar() {
             `<i class="fa-solid fa-list-check"></i> Select all ${pile}`;
     }
     if (elements.reviewSelectToggleBtn) {
-        elements.reviewSelectToggleBtn.classList.toggle('active', Boolean(state.selectMode));
+        setToggleState(elements.reviewSelectToggleBtn, Boolean(state.selectMode));
         elements.reviewSelectToggleBtn.innerHTML = state.selectMode
             ? '<i class="fa-solid fa-check-double"></i> Selecting'
             : '<i class="fa-solid fa-check-double"></i> Select';
@@ -9391,15 +9697,20 @@ function renderTriageBlock(photo) {
 }
 
 /**
- * Pin the current item to keep/reject (or hand it back to the model).
- * Optimistic: the pill and panel update immediately, and the row is patched
- * from the server response rather than refetching the page.
+ * Pin one photo to keep/reject (or hand it back to the model) and patch its
+ * row in place.
+ *
+ * The lightbox and the grid both go through here. They used to be the same
+ * function, which is why the grid could not have it: everything below needs a
+ * photo, and only the caller knows whether that is `currentTriagePhoto()` or
+ * the card under the pointer.
+ *
+ * Optimistic and deliberately non-refetching -- see the comment on the patch.
  */
-async function setManualVerdict(value, { advance = false } = {}) {
-    const photo = currentTriagePhoto();
+async function applyManualVerdict(photo, value) {
     if (!photo || !photo.verdict) {
         showToast('Nothing to judge here');
-        return;
+        return false;
     }
     try {
         const res = await fetch('/api/classify/verdict', {
@@ -9410,25 +9721,48 @@ async function setManualVerdict(value, { advance = false } = {}) {
         const data = await res.json();
         if (!res.ok || data.status !== 'ok') {
             showToast(data.message || 'Could not save that verdict');
-            return;
+            return false;
         }
         photo.verdict = data.verdict;
-        renderTriageBlock(photo);
         // Patch just this card; a refetch would drop it out of the filtered
         // page under the user's cursor and lose their scroll position.
-        const card = elements.galleryGrid.querySelector(
-            `.photo-card[data-rel-path="${cssEscape(photo.rel_path)}"]`
-        );
-        if (card) {
-            card.className = card.className
-                .replace(/ verdict-(reject|keep|error|none)/g, '') + verdictCardClass(photo);
-            const pill = card.querySelector('.verdict-pill');
-            if (pill) pill.outerHTML = verdictBadgeHtml(photo);
-        }
-        if (advance) navigateLightbox(1);
+        patchCardVerdict(photo);
+        return true;
     } catch (err) {
         showToast('Verdict request failed');
+        return false;
     }
+}
+
+/**
+ * Bring one card's tint, pill and triage buttons back in line with its photo.
+ * `if (card)` is required, not defensive: the grid mounts a window, so the row
+ * being judged from the lightbox is often not mounted at all.
+ */
+function patchCardVerdict(photo) {
+    if (!elements.galleryGrid) return;
+    const card = elements.galleryGrid.querySelector(
+        `.photo-card[data-rel-path="${cssEscape(photo.rel_path)}"]`
+    );
+    if (!card) return;
+    card.className = card.className
+        .replace(/ verdict-(reject|keep|error|none)/g, '') + verdictCardClass(photo);
+    const pill = card.querySelector('.verdict-pill');
+    if (pill) pill.outerHTML = verdictBadgeHtml(photo);
+    syncCardTriageButtons(card, photo);
+}
+
+/** Pin the item open in the lightbox, then optionally move to the next one. */
+async function setManualVerdict(value, { advance = false } = {}) {
+    const photo = currentTriagePhoto();
+    if (!photo) {
+        showToast('Nothing to judge here');
+        return;
+    }
+    const ok = await applyManualVerdict(photo, value);
+    if (!ok) return;
+    renderTriageBlock(photo);
+    if (advance) navigateLightbox(1);
 }
 
 /** Delete the item currently open in triage, then advance. */
@@ -9450,6 +9784,55 @@ async function triageDeleteCurrent() {
 function cssEscape(value) {
     if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
     return String(value).replace(/["\\]/g, '\\$&');
+}
+
+/**
+ * K / R / X on a focused card, so triage does not require opening anything.
+ *
+ * The lightbox twin of this is `handleTriageKey`. X differs on purpose: there,
+ * you deliberately opened one item, and the delete is soft with an Undo toast.
+ * Here a single keystroke would fire at whatever the grid last focused, so X
+ * routes through the confirm modal -- the same thing the card's own trash
+ * button does, and what AGENTS.md rule 1 asks for.
+ */
+function handleGridTriageKey(e) {
+    if (!state.reviewMode || state.selectMode) return false;
+    if (topmostOpenDialog()) return false;
+    const card = document.activeElement && document.activeElement.closest
+        ? document.activeElement.closest('.photo-card')
+        : null;
+    // Only when the card itself holds focus. A triage button inside it is a
+    // real button and handles its own keys.
+    if (!card || card !== document.activeElement) return false;
+    const photo = state.photos.find((p) => p.rel_path === card.dataset.relPath);
+    if (!photo) return false;
+
+    const key = e.key.toLowerCase();
+    if (key === 'x') {
+        promptDeletePhoto(photo);
+        return true;
+    }
+    if (key !== 'k' && key !== 'r') return false;
+    const want = key === 'k' ? 'keep' : 'reject';
+    const current = photo.verdict && photo.verdict.verdict;
+    applyManualVerdict(photo, current === want ? 'auto' : want).then((ok) => {
+        if (!ok) return;
+        updateReviewBar();
+        // The grid's version of `advance: true`. Only ever to a mounted
+        // sibling: the window means the next tile may not exist yet, and
+        // scrolling the grid from a keystroke would move the pile underneath.
+        focusNextCard(card);
+    });
+    return true;
+}
+
+/** Move focus to the next mounted card, if there is one. */
+function focusNextCard(card) {
+    let next = card.nextElementSibling;
+    while (next && !next.classList.contains('photo-card')) {
+        next = next.nextElementSibling;
+    }
+    if (next) next.focus({ preventScroll: false });
 }
 
 function handleTriageKey(e) {

@@ -156,6 +156,7 @@ if [ ${#SUITES[@]} -eq 0 ]; then
           test_scrape_lanes.js test_generation_rating.js
           test_outputs_gallery.js test_batch_generate.js test_workflow_registry.js
           test_label_mode.js test_phase15.js test_layout_and_a11y.js
+          test_dialogs_and_aria.js
           # Last on purpose: seed_many.py adds a few hundred rows so the
           # windowing suite has more photos than one window holds, and those
           # rows would change the card counts every suite above asserts on.

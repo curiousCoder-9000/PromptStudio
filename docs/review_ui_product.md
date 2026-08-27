@@ -6,7 +6,7 @@
 | **Scope** | Frontend (`index.html` · `app.js` · `style.css`), UX, and product gaps not covered elsewhere |
 | **Companions** | [`product_review.md`](product_review.md) — value chain, Themes A/B/C/E · [`review_backend_architecture.md`](review_backend_architecture.md) — durability, storage, observability |
 | **Why a third review** | Neither companion audits the UI, and both rest on one premise (§0) that turned out to be false |
-| **Status** | Stage 1 shipped (§5) · Stage 2 shipped (§6) · review-mode trap fixed (§8) · U13–U14 shipped (§9) · U17, U19–U24 shipped (§11) · U18 shipped (§12) · U15–U16, U25–U35 open |
+| **Status** | **U1–U35 all shipped.** Stage 1 (§5) · Stage 2 (§6) · review-mode trap (§8) · U13–U14 (§9) · U17, U19–U24 (§11) · U18 (§12) · U28–U29 (§13) · U15, U25, U30–U35 (§14) · U16 (§15). U9 (commit to a phone layout or drop the breakpoints) is the open one, and it is a decision rather than a bug |
 
 ---
 
@@ -460,3 +460,349 @@ Two of them needed care:
 - "An absent caption costs no space" passes for the wrong reason if it only
   checks that the box has no height — pre-fix the element did not exist at all.
   It asserts the element is present **and** hidden.
+
+---
+
+## 13. Fix log — U28/U29, and the gallery nobody could reach with a keyboard
+
+Driven at 1440×900 across six dialogs, then across every visible control.
+
+### What the measurement found that the note did not
+
+U29 was written as "175 buttons / 13 aria-labels" — a ratio, which is not a
+defect on its own. Driving it turned the ratio into specifics, and turned up one
+thing that is worse than anything in the original list:
+
+**`.photo-card` was a `<div>` with a click listener, no `tabindex` and no key
+handler.** So there was no keyboard path into the lightbox — and the lightbox is
+the only home of the prompt editor, Keep/Reject triage, Favorite, the three
+prompt exports and every ComfyUI control. The entire second half of the app was
+mouse-only, and no line of the markup says so.
+
+| Item | Status | What changed |
+|------|--------|--------------|
+| **U29a** the gallery is operable | ✅ | Cards are `tabindex="0"` with an `aria-label` naming the file and creator, and Enter/Space opens the lightbox. Deliberately **no** `role="button"`: that role has presentational children, which would hide the per-card delete from assistive tech. A focusable card with a name and a key handler claims only what it implements. The global focus ring from §11 makes it visible for free. |
+| **U28a** dialogs are dialogs | ✅ | `role="dialog"` (`alertdialog` for the delete confirm), `aria-modal="true"` and `aria-labelledby` on all 10 modal containers plus the lightbox and the fullscreen viewer, which use `aria-label` because their headings name a panel rather than the dialog. 1 of 11 had this before. |
+| **U28b** focus goes in and comes back | ✅ | One `openDialog`/`closeDialog` pair replaces 14 hand-written `style.display` assignments. It records the opener, focuses the first control on the next frame (a `display:none` subtree has no geometry, so `focus()` on it silently does nothing), and hands focus back on close. `isConnected` on the return path is load-bearing rather than defensive: the grid mounts a *window* of cards, so the card that opened the lightbox is routinely gone by the time it closes. |
+| **U28c** Tab stays inside | ✅ | One capture-phase `Tab` handler wraps focus within `topmostOpenDialog()`. Escape deliberately stayed in the existing prioritised chain — which overlay unwinds first is a product decision, not a stack. |
+| **U28d** two dialogs had no keyboard exit | ✅ | `#insightsModal` (792px card) and `#activityModal` were absent from the Escape chain entirely. Reading it does not show that: the chain looks complete, and what is wrong is which elements are missing from it. |
+| **U28e** `#syncModal` had no reachable exit | ✅ | Its 828px card put the only dismiss control at **y=995 on a 900px viewport**. Added a header `×`, matching the four dialogs that already had one. |
+| **U29b** every control has a name | ✅ | `#gridNormal`/`#gridLarge` had no name at all — icon-only, no `title`, no `aria-label`. 15 more were named by `title` alone, which is a name AT can read, a sighted mouse user can discover, and a touch user cannot reach. Icon-only buttons now carry both. |
+| **U29c** the per-card delete says what it deletes | ✅ | `aria-label="Delete <filename>"` instead of a generic `title="Delete Photo"` repeated on every card in the grid. |
+| **U29d** toggles say whether they are on | ✅ | `aria-pressed` on all 7 visible toggles, via a `setToggleState()` that sets the class and the attribute together — the nine call sites that used to set the class alone are exactly how the two would have drifted. |
+| **U29e** landmarks | ✅ | The document had **no `<h1>`** and **no `<nav>`**. The wordmark is the `h1`; the creator list is the `nav`. |
+| **U29f** two `<main>` elements | ✅ | Found while counting landmarks, and not in the original note. `.workspace` is a `320px 1fr` grid, so the second `<main>` was placed at row 2 **column 1 — the sidebar's own column**. It only ever looked right because the outputs view is `display:none` until you open it. Both views now live inside one `<main class="workspace-views">`. |
+
+### Measurements
+
+| | before | after |
+|---|---:|---:|
+| dialogs with `role` + `aria-modal` | 1 of 11 | **11 of 11** |
+| dialogs that move focus in on open | 1 of 6 driven | **6 of 6** |
+| dialogs that restore focus on close | **0 of 6** | **6 of 6** |
+| dialogs where Escape does nothing | 2 | **0** |
+| `#syncModal` nearest dismiss control | y=995 (viewport 900) | **y=101** |
+| visible buttons with no accessible name | 2 | **0** |
+| icon-only buttons without `aria-label` | 17 | **0** |
+| visible toggles with `aria-pressed` | 0 of 7 | **7 of 7** |
+| `h1` / `nav` / `main` | 0 / 0 / **2** | 1 / 1 / **1** |
+| keyboard paths into the lightbox | **0** | 1 (Enter or Space on a card) |
+
+### Tests
+
+`tests/ui/test_dialogs_and_aria.js`, 65 checks, registered in `run.sh`. **45 of
+the 65 fail against pre-fix `HEAD`**; the other 20 are controls — `duplicatesModal`
+already had its roles, `newCreatorModal` already focused its input, four dialogs
+already closed on Escape.
+
+Three of the checks first passed for the wrong reason, which is the part worth
+recording:
+
+- `outputsView.closest('main')` was truthy pre-fix because the element **was**
+  a `<main>` and `closest` matches the element itself. It now asserts the tag is
+  no longer `MAIN` *and* that an ancestor `<main>` exists.
+- "aria-pressed agrees with the active class" is vacuous when nothing has the
+  attribute — zero elements disagree. It now counts agreements against the
+  total.
+- "`#syncModal` has a dismiss control above the fold" passed because the
+  matcher `/close|cancel|done/i` hit the scrape queue's **"Cancel job"** button.
+  Matching the id prefix instead makes it fail pre-fix at `y=995`, which is the
+  thing that was actually wrong.
+
+### The regression this change shipped, and the guard that now exists
+
+The `<main>` consolidation broke the layout, and my first diagnosis of it was
+wrong. `firstCardTop` came back as **1049 of 900** in the full run. It only
+failed there and not in isolation, so I called it fixture contamination — a
+restored scroll position plus a windowed grid — and patched the test to scroll
+to the top. That patch printed `scrollY=0` next to the number, which ruled the
+explanation out.
+
+The actual cause: renaming `<div class="creator-list">` to
+`<nav class="creator-list">` without renaming its `</div>`. The `<nav>` was
+never closed, so the parser spent the next four `</div>`s unwinding `aside`,
+`.workspace` and `.app-container` in turn. `<main>` stopped being
+`.workspace`'s second grid child and became a **sibling** of `.workspace`,
+which put the whole gallery in grid row 2, underneath the 650px sidebar.
+
+Nothing failed, and nothing looked wrong. Every tag had a partner on its own
+line, the indentation was consistent, and the browser recovered silently
+because browsers must. `tests/test_markup_structure.py` now parses the file
+instead of reading it: tag balance, one `<main>` **and** that it is
+`.workspace`'s child, one `<h1>`, unique ids, and every `aria-labelledby`
+resolving — a dangling one leaves the element with no name at all rather than
+falling back to its text. Re-introducing the exact break makes it fail with
+`<nav 'creatorList'> opened on line 145 was closed by </div> on line 147`.
+
+Two lessons worth keeping, since both cost time here: "it fails only in the
+full run" is evidence about ordering, not proof of contamination; and a check
+should print the quantity that would exonerate the innocent explanation
+(`scrollY`) next to the one that fails.
+
+---
+
+## 14. Fix log — U25, U30–U35, U15
+
+The last of the second review. Every number below was measured in the same
+driven pass, before and after.
+
+### U25 — eleven co-equal buttons
+
+`.nav-actions` held **1,370px of buttons** in a bar that is 1,186px wide at
+1280px, so it wrapped to two rows and the navbar cost 183px instead of 133px.
+The only `btn-primary` on the screen — the loudest control in the app — was
+*reload the gallery*.
+
+The four buttons that **start a job** keep their labels: Batch Analyze,
+Classify All, Label, Download. The seven that **go look at something** —
+Upload, Duplicates, Activity, Trash, Outputs, Insights, and the reload — became
+icon-only behind a divider, each with `title` + `aria-label`. Nothing is
+`btn-primary` any more, because none of these is *the* action.
+
+| | before | after |
+|---|---:|---:|
+| sum of button widths | 1,370px | **849px** |
+| rows at 1440px / 1280px | 2 / 2 | **1 / 1** |
+| `.nav-actions` height | 92px | **42px** |
+| navbar height | 183px | **133px** |
+| buttons claiming to be primary | 1 | **0** |
+
+A measurement trap on the way: counting `new Set(tops).size` said **4 rows**
+where there were 2. Buttons on one visual row differ by a pixel, and `#labelBtn`
+is 42px tall rather than 40 because of its count badge. The rows are clustered
+with a 10px tolerance now, and I nearly wrote "four rows" into §10 before
+checking it against the container height.
+
+### U34 — the primary navigation was third
+
+The creator list started **295px into the sidebar**, below Saved views and
+Boards, both of which are usually empty. It is first now, and those two sit
+under it — `.creator-list` is `flex: 1`, so they keep their natural height at
+the bottom. **295px → 111px** into the sidebar.
+
+### U32 — copy that describes the machine
+
+Five strings, all user-visible, none of them about the user's world: `Semantic
+search over taste embeddings (C1)` (a backlog id from these very docs),
+`Review near-duplicate groups (pHash + embeddings)`, `Label keep/discard for the
+preference model`, `Signals already on disk — no new instrumentation`, `What the
+last jobs actually did — stop reason, counts, backoff`.
+
+`tests/test_markup_structure.py` now fails on that vocabulary in `index.html`.
+`seed`, `CFG`, `denoise` and `steps` are deliberately **not** on the list:
+they are ComfyUI's own names, and a user driving a ComfyUI workflow knows them.
+
+### U33 — offline was a dead end the rest of the UI ignored
+
+`#ollamaBadge` was a `<span>` reading `Ollama Offline`: a status with no next
+step. Meanwhile every card in the grid still said **"Click for AI Prompt"**, and
+the archive's whole reason to exist is behind that click.
+
+The badge is a `<button>` now — it re-checks on demand and names the fix
+(`ollama serve`, port 11434). Offline sets `body.ollama-offline`, and the card
+hint switches to "Ollama offline — open details". Both hint variants ship in the
+DOM and CSS picks one, because the health poller flips that class every 30s
+without re-rendering the grid: a card that decided from `state.ollamaOnline` at
+mount time would show whatever was true when it was mounted.
+
+### U31 — chrome belonging to another view
+
+The Outputs view kept the photo gallery's **320px** sidebar — Saved views,
+Boards, Creators — while having its own creator, workflow, checkpoint, rating
+and date filters. The grid went from 1,052px to **1,392px** wide.
+
+An empty result set kept all eight of its controls. Sort order, grid density,
+Group posts and Select act on rows that are not there; the filter chips and
+selects are how you get *out* of an empty view. The first four hide, the rest
+stay.
+
+### U35 — 29px controls in the stacked layout
+
+At 390×844, **36 of 38** visible controls were under 40px, and the five primary
+filter chips — the most-tapped things on that screen — were **29px**. All 48 in
+the fixture-rich run are ≥40px now. WCAG 2.5.5 asks for 44px; that would give back the chrome budget §11
+just cut, so 40px is the floor here — well past the 24px minimum 2.5.8 requires,
+and thumb-reachable.
+
+Making `#ollamaBadge` a button for U33 created one of these: a 23px control that
+had not been a control before. And `.source-pill` at 24px was invisible to an
+isolated run of the suite — those pills only exist once more than one source is
+indexed, so only the full run, with `seed_sources.py` before it, ever rendered
+them. Twice now the fixture-rich full run has been the one that told the truth.
+
+The stacked layout's first photo sits at y=1189 of 844 — it was at **y=1217**,
+so raising the targets did not cost anything, but it is still below the fold.
+Getting a photo above it at 390px needs the navbar to collapse into a menu.
+That is **U9**, and it stays open.
+
+### U30 — the native controls, and a claim I had to withdraw
+
+I wrote that `.modal-file-input` had no rule at all. It does: it shares the
+grouped `.modal-input, .modal-select` rule, so the *field* was already
+glass-dark. My grep missed it because the selector is grouped, and the check I
+wrote to prove the fix **passed against pre-fix `HEAD`** — which is how I found
+out.
+
+What no rule reached: the button the user agent draws *inside* the field (the
+grey platform chunk on a dark card) and the picker glyph on a date input, which
+is dark on dark. Both need pseudo-element selectors; `color-scheme` reaches
+neither.
+
+`::-webkit-calendar-picker-indicator` cannot be checked in the browser at all:
+`getComputedStyle(el, pseudo)` answers with the *host* element's style for UA
+shadow pseudo-elements, so it reports `filter: none` whatever the stylesheet
+says. The browser suite asserts the observable half (`color-scheme: dark`) and
+the rule itself is asserted at source level, with the limitation written down
+rather than papered over with a check that always passes.
+
+### U15 — a mis-click ate ten minutes of curation
+
+`setVerdictFilter` called `clearSelection()` and said nothing. The selection is
+**still cleared** — a bulk Delete must never reach photos the current pile does
+not show, which is the more dangerous failure — but the whole action is now
+reversible through the same Undo-toast shape the soft deletes already use.
+Undo restores the selection *and* the pile it belonged to.
+
+### Tests
+
+| Suite | Checks | New here |
+|---|---:|---|
+| `tests/ui/test_layout_and_a11y.js` | 68 | 23 (U25, U34, U31, U33, U35, U30) |
+| `tests/ui/test_classify_review.js` | +4 | U15 |
+| `tests/test_markup_structure.py` | 8 | structure, copy, pseudo-elements, suite hygiene |
+
+18 of the 23 new browser checks fail against pre-fix `HEAD` with the numbers
+quoted above. Of the five that pass, three are controls (the Outputs view's own
+filters exist; the filter chips already survived an empty view; the file *field*
+was already styled) and two were mine to fix — see U30.
+
+### A bug in the tests themselves, made twice
+
+`Session.eval` interpolates into a template literal, so a suite writing
+`replace(/\s+/g, ' ')` ships a bare `\s` **inside** a template literal. `\s`
+is not a JS escape, so it collapses to `s`: the regex becomes `/s+/g` and every
+letter *s* in the measured string turns into a space. The U33 toast came back as
+
+> ``Still not an wering ... `ollama  erve` ... localho t:11434.``
+
+The first occurrence had already shipped in §12 — harmlessly, because that
+string only fed an em-dash test, which is exactly why nothing caught it.
+`tests/test_markup_structure.py` now scans every browser suite's backtick spans
+for single-backslash character classes. Narrowing it mattered: the first version
+flagged fourteen innocent Node-level regexes, where one backslash is correct.
+
+Same family, one line later: a **backtick inside a comment** in an eval body
+closes the template literal. That one at least fails loudly at parse time.
+
+---
+
+## 15. Fix log — U16, grid-level triage
+
+The last item, and the one deliberately left for last: it lands on
+`.photo-card`, which U11 already calls crowded at four affordances in a 200px
+tile.
+
+### What it cost, and what paid for it
+
+A verdict used to cost **open → decide → close** per photo. It now costs one
+click, or one keystroke with the card focused.
+
+The tile did not grow. Keep/Reject **replace** the prompt hint rather than
+joining it — during triage, "Click for AI Prompt" is an invitation to leave the
+task you are in. Measured on a real tile at 1440px: card 238×298, triage row
+212×28, two 103px buttons, contained, **0px² overlap** with the per-card delete.
+Three affordances on the tile, where U11's complaint was four.
+
+| | before | after |
+|---|---:|---:|
+| clicks to judge one photo | 3 (open, decide, close) | **1** |
+| keystrokes with a card focused | — (no keyboard path existed) | **1** |
+| affordances on the tile in review mode | 4 | **3** |
+| triage-row overlap with the delete button | — | 0px² |
+| button height at 390px | — | 40px (U35's floor) |
+
+### Three decisions worth recording
+
+**One control, two directions.** Pressing the already-active side hands the
+photo back to the model rather than doing nothing — the same thing the
+lightbox's separate Auto button does. That keeps a third button off the tile.
+The API already accepted `verdict: "auto"`; nothing server-side changed.
+
+**X asks, where the lightbox's X does not.** In the inspector you deliberately
+opened one item, so `X` soft-deletes with an Undo toast. On the grid a single
+keystroke would fire at whatever the grid last focused, so `X` routes through
+`#deleteConfirmModal` — the same thing the card's own trash button does, and
+what hard rule 1 asks for. The two are deliberately different and the comment
+says why.
+
+**No refetch, ever.** `setManualVerdict` already carried a comment arguing that
+a refetch "would drop it out of the filtered page under the user's cursor and
+lose their scroll position" — so marking a reject as Keep leaves the card in
+place, re-tinted, with its pill and its buttons updated. The test asserts the
+`/api/classify/verdict` POST happened **and** that no `/api/photos` call
+followed, so it cannot pass by doing nothing.
+
+Getting there needed a refactor first: `setManualVerdict` fetched, patched and
+advanced in one function, all of it reachable only from `currentTriagePhoto()`.
+The grid could not use any of it. It is now `applyManualVerdict(photo, value)`
+plus `patchCardVerdict(photo)`, with the lightbox and the card as two callers —
+so the two paths cannot drift on what a verdict change means.
+
+### Copy the change made wrong
+
+The review strip said **"Click a card to triage · K keep · R reject · X
+delete"**. That string already had a history: §8 rewrote it per-mode because
+review mode used to force select mode on, making the promised click impossible.
+U16 broke it again in a new way — a click opens the inspector; the buttons on
+the tile are what decide. It now reads *"Keep or Reject on a card · K · R · X on
+a focused one · click to open it"*, and the §8 test was rewritten to assert the
+substance (the hint names the gesture that triages, and a click still opens
+something) rather than the word "triage".
+
+Worth noting that the screenshot found this, not a test. The assertions were all
+about geometry and state; nothing was watching whether the sentence next to the
+grid was still true.
+
+### Tests
+
+18 new checks in `tests/ui/test_classify_review.js` (104 total). **13 of the 18
+fail against pre-fix `HEAD`.** Of the five that pass, three are honest controls
+(leaving review mode removes the row; the prompt hint comes back; the lightbox
+does not open) and two I had to fix, because `[].every(...)` is `true` — with no
+buttons on the tile, "each names the file it judges" and "the overlay lets the
+clicks through" both passed on an empty list. Both now require exactly two
+buttons first.
+
+### The regex bug's mirror image
+
+§14 recorded shipping `/\s+/g` inside a template literal, where it collapses to
+`/s+/g`. Writing these tests I made the *opposite* mistake in the same
+afternoon: `/T\d/` and `/\.(jpg)$/` doubled at **Node level**, outside any
+template literal, where one backslash is correct. A doubled one matches a
+literal backslash, so it never matches and never throws — `/T\d/.test('T0')` is
+simply `false`, and the check fails for a reason unrelated to the code under
+test.
+
+There are exactly two such occurrences in the whole suite tree and both were
+mine, so `tests/test_markup_structure.py` now guards **both** directions:
+doubled inside a literal is required, doubled outside it is an error.

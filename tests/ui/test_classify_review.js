@@ -86,7 +86,10 @@ const { Session, Report, sleep } = require('./cdp');
   const entryHint = await s.eval(`
     return document.querySelector('.review-bar-hint').textContent.trim();
   `);
-  r.check('hint tells you to click a card', /click/i.test(entryHint) && /triage/i.test(entryHint),
+  r.check('the hint names the gesture that actually triages, and a click still opens something',
+    /keep or reject/i.test(entryHint)
+      && /click/i.test(entryHint)
+      && !/click a card to triage/i.test(entryHint),
     entryHint);
 
   const opened = await s.eval(`
@@ -232,6 +235,222 @@ const { Session, Report, sleep } = require('./cdp');
 
   await s.eval(`setVerdictFilter('reject'); return true;`);
   await sleep(600);
+
+  // ── a decision without opening anything (U16) ──────────────────────
+  r.section('grid-level triage');
+
+  const gridTriage = await s.eval(`
+    const card = document.querySelector('.photo-card');
+    const btns = [...card.querySelectorAll('.card-triage-btn')];
+    return {
+      buttons: btns.map((b) => b.dataset.verdict),
+      // The hint is *replaced*, not joined: four affordances on the tile, not six.
+      hints: card.querySelectorAll('.photo-card-prompt-hint').length,
+      labels: btns.map((b) => b.getAttribute('aria-label')),
+      pressed: btns.map((b) => b.getAttribute('aria-pressed')),
+      verdict: (state.photos[0].verdict || {}).verdict,
+      clickable: btns.map((b) => getComputedStyle(b).pointerEvents),
+    };
+  `);
+  r.check('a card in review mode carries Keep and Reject',
+    JSON.stringify(gridTriage.buttons) === '["keep","reject"]', JSON.stringify(gridTriage.buttons));
+  r.check('and they replace the prompt hint rather than joining it',
+    gridTriage.hints === 0, `${gridTriage.hints} hint(s) still on the tile`);
+  r.check('each names the file it judges',
+    gridTriage.labels.length === 2
+      && gridTriage.labels.every((l) => /\.(jpg|jpeg|png|mp4)$/i.test(l || '')),
+    JSON.stringify(gridTriage.labels));
+  r.check('the overlay lets the clicks through to them',
+    gridTriage.clickable.length === 2
+      && gridTriage.clickable.every((v) => v === 'auto'), JSON.stringify(gridTriage.clickable));
+  r.check('aria-pressed starts on the side the model chose',
+    gridTriage.pressed[gridTriage.verdict === 'keep' ? 0 : 1] === 'true',
+    JSON.stringify(gridTriage));
+
+  // One click, and no refetch: the card must not vanish under the pointer.
+  await s.startRecordingFetches();
+  await s.resetFetchLog();
+  const flipped = await s.eval(`
+    const card = document.querySelector('.photo-card');
+    const path = card.dataset.relPath;
+    const before = (state.photos.find((p) => p.rel_path === path).verdict || {}).verdict;
+    const keep = card.querySelector('.card-triage-btn.keep');
+    if (!keep) return { before, after: before, noRow: true, lightboxOpen: false };
+    keep.click();
+    await new Promise((res) => setTimeout(res, 1100));
+    const now = document.querySelector('.photo-card[data-rel-path="' + CSS.escape(path) + '"]');
+    return {
+      before,
+      after: (state.photos.find((p) => p.rel_path === path).verdict || {}).verdict,
+      stillMounted: Boolean(now),
+      cardClass: now ? now.className : null,
+      pill: now ? (now.querySelector('.verdict-pill') || {}).textContent : null,
+      keepPressed: now ? now.querySelector('.card-triage-btn.keep').getAttribute('aria-pressed') : null,
+      lightboxOpen: getComputedStyle(document.getElementById('lightboxModal')).display !== 'none',
+    };
+  `);
+  const triageCalls = (await s.fetchLog()).calls;
+  r.check('clicking Keep flips the verdict', flipped.before === 'reject' && flipped.after === 'keep',
+    JSON.stringify({ before: flipped.before, after: flipped.after }));
+  r.check('the card stays put and re-tints in place',
+    flipped.stillMounted && / verdict-keep/.test(flipped.cardClass || ''),
+    String(flipped.cardClass));
+  r.check('its pill and its button both follow',
+    /T\d/.test(flipped.pill || '') && flipped.keepPressed === 'true', JSON.stringify(flipped));
+  r.check('it saved the verdict and did not refetch the page under the cursor',
+    triageCalls.some((u) => u.includes('/api/classify/verdict'))
+      && !triageCalls.some((u) => u.includes('/api/photos')), JSON.stringify(triageCalls));
+  r.check('and it did not open the lightbox', flipped.lightboxOpen === false);
+
+  // Pressing the active side again hands it back to the model.
+  const handedBack = await s.eval(`
+    const card = document.querySelector('.photo-card');
+    const keep = card.querySelector('.card-triage-btn.keep');
+    if (!keep) return { noRow: true };
+    keep.click();
+    await new Promise((res) => setTimeout(res, 1100));
+    const p = state.photos.find((x) => x.rel_path === card.dataset.relPath);
+    return { verdict: (p.verdict || {}).verdict, manual: (p.verdict || {}).manual };
+  `);
+  r.check('a second press on the active side clears the manual override',
+    !handedBack.noRow
+      && (handedBack.manual === null || handedBack.manual === undefined)
+      && handedBack.verdict === 'reject',
+    JSON.stringify(handedBack));
+
+  // Keyboard: the whole point is not having to open anything.
+  const key = async (k, code, vk) => {
+    for (const type of ['keyDown', 'char', 'keyUp']) {
+      await s.send('Input.dispatchKeyEvent', {
+        type, key: k, code, text: type === 'char' ? k : undefined,
+        windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk,
+      });
+    }
+    await sleep(900);
+  };
+
+  const focused = await s.eval(`
+    const cards = [...document.querySelectorAll('.photo-card')];
+    const target = cards.find((c) => {
+      const p = state.photos.find((x) => x.rel_path === c.dataset.relPath);
+      return p && p.verdict && p.verdict.verdict === 'reject';
+    }) || cards[1];
+    target.dataset.probe = 'kbd';
+    target.focus();
+    return { path: target.dataset.relPath, isFocused: document.activeElement === target,
+             before: (state.photos.find((x) => x.rel_path === target.dataset.relPath).verdict || {}).verdict };
+  `);
+  r.check('a card can be focused for keyboard triage', focused.isFocused, JSON.stringify(focused));
+
+  await key('k', 'KeyK', 75);
+  const afterK = await s.eval(`
+    const p = state.photos.find((x) => x.rel_path === ${JSON.stringify(focused.path)});
+    const moved = document.activeElement;
+    return {
+      verdict: (p.verdict || {}).verdict,
+      manual: (p.verdict || {}).manual,
+      focusMoved: Boolean(moved && moved.classList && moved.classList.contains('photo-card')
+        && moved.dataset.probe !== 'kbd'),
+      lightboxOpen: getComputedStyle(document.getElementById('lightboxModal')).display !== 'none',
+    };
+  `);
+  r.check('K on a focused card sets keep without opening the lightbox',
+    afterK.verdict === 'keep' && afterK.manual === 'keep' && afterK.lightboxOpen === false,
+    JSON.stringify(afterK));
+  r.check('and focus advances to the next card, the way the lightbox advances',
+    afterK.focusMoved, JSON.stringify(afterK));
+
+  // X is the one key that behaves differently here than in the lightbox.
+  const afterX = await s.eval(`
+    const card = document.querySelector('.photo-card');
+    card.focus();
+    return { path: card.dataset.relPath, count: state.photos.length };
+  `);
+  await key('x', 'KeyX', 88);
+  const confirmed = await s.eval(`
+    const modal = document.getElementById('deleteConfirmModal');
+    return {
+      open: getComputedStyle(modal).display !== 'none',
+      stillThere: state.photos.length,
+      focused: document.activeElement ? document.activeElement.id : null,
+    };
+  `);
+  r.check('X asks before deleting, unlike the lightbox where you opened one item',
+    confirmed.open && confirmed.stillThere === afterX.count,
+    JSON.stringify({ ...confirmed, was: afterX.count }));
+  r.check('and the confirm opens on Cancel', confirmed.focused === 'cancelDeleteBtn',
+    String(confirmed.focused));
+  await s.key('Escape');
+  await sleep(400);
+
+  // Outside review mode the tile is untouched.
+  const outside = await s.eval(`
+    exitReviewMode();
+    await new Promise((res) => setTimeout(res, 1400));
+    const card = document.querySelector('.photo-card');
+    return {
+      triageButtons: card.querySelectorAll('.card-triage-btn').length,
+      hints: card.querySelectorAll('.photo-card-prompt-hint').length,
+      reviewMode: state.reviewMode,
+    };
+  `);
+  r.check('leaving review mode takes the triage row away again',
+    outside.reviewMode === false && outside.triageButtons === 0, JSON.stringify(outside));
+  r.check('and gives the prompt hint back', outside.hints > 0, JSON.stringify(outside));
+
+  await s.eval(`enterReviewMode(); await new Promise((res) => setTimeout(res, 1600)); return true;`);
+
+  await s.eval(`setVerdictFilter('reject'); await new Promise((res) => setTimeout(res, 800)); return true;`);
+  await sleep(400);
+
+  // ── switching pile used to eat the selection silently (U15) ─────────
+  r.section('switching pile is reversible');
+
+  const dropped = await s.eval(`
+    // Curate a selection in this pile, then switch away from it.
+    state.selectedPaths.clear();
+    state.photos.slice(0, 3).forEach((p) => state.selectedPaths.add(p.rel_path));
+    const before = state.selectedPaths.size;
+    document.querySelectorAll('.toast').forEach((t) => t.remove());
+    setVerdictFilter('unusable');
+    await new Promise((res) => setTimeout(res, 800));
+    const toast = document.querySelector('.toast');
+    return {
+      before,
+      after: state.selectedPaths.size,
+      filter: state.verdictFilter,
+      toastText: toast ? toast.textContent.replace(/\\s+/g, ' ').trim() : null,
+      undoLabel: toast ? (toast.querySelector('.toast-action-btn') || {}).textContent : null,
+    };
+  `);
+  r.check('the selection is still cleared, so a bulk action cannot cross piles',
+    dropped.before === 3 && dropped.after === 0, JSON.stringify(dropped));
+  r.check('but it says so instead of doing it silently',
+    /Cleared 3 selected/.test(dropped.toastText || ''), String(dropped.toastText));
+  r.check('and offers Undo', dropped.undoLabel === 'Undo', String(dropped.undoLabel));
+
+  const undone = await s.eval(`
+    const undo = document.querySelector('.toast-action-btn');
+    // Absent before this fix. Report it rather than throwing, so the rest of
+    // the suite still runs when checking this against an older tree.
+    if (!undo) return { selected: state.selectedPaths.size, filter: state.verdictFilter, noUndo: true };
+    undo.click();
+    await new Promise((res) => setTimeout(res, 900));
+    return { selected: state.selectedPaths.size, filter: state.verdictFilter };
+  `);
+  r.check('Undo puts back both the selection and the pile it belonged to',
+    undone.selected === 3 && undone.filter === 'reject', JSON.stringify(undone));
+
+  await s.eval(`
+    state.selectedPaths.clear();
+    setVerdictFilter('unusable');
+    await new Promise((res) => setTimeout(res, 400));
+    setVerdictFilter('reject');
+    await new Promise((res) => setTimeout(res, 400));
+    document.querySelectorAll('.toast').forEach((t) => t.remove());
+    return true;
+  `);
+  await sleep(500);
 
   // ── favourite guard ────────────────────────────────────────────────
   r.section('favourite guard on bulk select');
