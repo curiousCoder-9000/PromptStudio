@@ -862,13 +862,27 @@ class ArchiveIndex:
             self._readers.put(conn)
 
     def _close_readers(self) -> None:
+        self._reset_readers()
+
+    def _reset_readers(self) -> None:
+        """Drop every pooled reader so the next read opens a fresh snapshot.
+
+        A `mode=ro` handle opened before a writer wipe (test `clean_archive`,
+        a rebuild) keeps serving the old WAL snapshot. Closing without
+        resetting `_readers_made` also leaves the pool looking full and empty,
+        so later reads block on a queue that will never refill.
+        """
+        self._reader_local.conn = None
         while True:
             try:
-                self._readers.get_nowait().close()
+                conn = self._readers.get_nowait()
             except queue.Empty:
-                return
-            except sqlite3.DatabaseError:
-                continue
+                break
+            with contextlib.suppress(sqlite3.DatabaseError):
+                conn.close()
+        with self._readers_lock:
+            self._readers_made = 0
+            self._readers_ok = DB_READERS > 0
 
     def _init_fts(self) -> None:
         """Create the FTS5 index if this SQLite build has FTS5.

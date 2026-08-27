@@ -34,6 +34,20 @@ from promptstudio.storage.thumbs import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _ingest_queue():
+    """Give ingest a one-worker pool for this module.
+
+    The process-wide queue is disabled in conftest (`THUMB_WORKERS=0`) so other
+    suites do not lock files on Windows. These tests *are* the ingest path.
+    """
+    q = thumb_queue.ThumbQueue(workers=1)
+    thumb_queue._instance = q
+    yield q
+    q.drain(timeout=20)
+    thumb_queue._instance = None
+
+
 @pytest.fixture
 def pool():
     """A queue of our own, so a test never races the process-wide one."""

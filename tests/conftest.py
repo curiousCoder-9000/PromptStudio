@@ -36,6 +36,10 @@ os.environ["SCRAPE_COOKIES_FROM_BROWSER"] = ""
 # RotatingFileHandler would keep writing to the deleted inode.
 os.environ["PROMPTSTUDIO_LOG_FILE"] = ""
 os.environ["PROMPTSTUDIO_LOG_CONSOLE"] = "0"
+# Background thumb workers open media files; on Windows that locks them and
+# `clean_archive`'s rmtree then leaves leftovers that rebuild() reindexes
+# into the next test. Suites that need a pool construct one themselves.
+os.environ["PROMPTSTUDIO_THUMB_WORKERS"] = "0"
 
 import pytest
 from PIL import Image
@@ -109,6 +113,9 @@ def clean_archive():
         )
         index._conn.commit()
     index.rebuild()
+    # Pooled `mode=ro` handles pin a WAL snapshot. Without this, test B's
+    # gallery reads still see test A's photos after the writer wipe above.
+    index._reset_readers()
     yield
     PromptCache().invalidate_memory()
     FavoritesStore().invalidate_memory()
