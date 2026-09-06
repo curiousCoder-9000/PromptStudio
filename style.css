@@ -4351,10 +4351,8 @@ button.tag-pill.tag-clickable:hover {
 }
 
 .insights-tier-fill.t0 { background: #64748b; }
-.insights-tier-fill.t1 { background: #38bdf8; }
-.insights-tier-fill.t2 { background: #10b981; }
-.insights-tier-fill.t3 { background: #ec4899; }
-.insights-tier-fill.t4 { background: #f97316; }
+.insights-tier-fill.t1 { background: #ec4899; }
+.insights-tier-fill.t2 { background: #f97316; }
 
 .insights-tier-n {
     font-family: "Fira Code", ui-monospace, monospace;
@@ -4921,13 +4919,11 @@ body:not(.review-mode) .triage-keys-review {
     white-space: nowrap;
 }
 
-/* Tier colour runs cool -> warm with exposure, and the two reject tiers read
-   as muted rather than alarming: most of them are simply not interesting. */
+/* Tier colour runs cool -> warm with exposure. T0 is muted (reject);
+   T1 pink (revealing/tight); T2 orange (swim). */
 .tier-chip.t0 { background: rgba(100, 116, 139, 0.28); color: #cbd5e1; }
-.tier-chip.t1 { background: rgba(56, 189, 248, 0.18); color: #7dd3fc; }
-.tier-chip.t2 { background: rgba(16, 185, 129, 0.2); color: #6ee7b7; }
-.tier-chip.t3 { background: rgba(236, 72, 153, 0.2); color: #f9a8d4; }
-.tier-chip.t4 { background: rgba(249, 115, 22, 0.22); color: #fdba74; }
+.tier-chip.t1 { background: rgba(236, 72, 153, 0.2); color: #f9a8d4; }
+.tier-chip.t2 { background: rgba(249, 115, 22, 0.22); color: #fdba74; }
 .tier-chip.terr { background: rgba(249, 115, 22, 0.25); color: #fdba74; }
 
 .triage-meta {

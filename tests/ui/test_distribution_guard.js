@@ -23,8 +23,8 @@ const { Session, Report, sleep } = require('./cdp');
 const SATURATED = {
   total: 100,
   warn_above: 0.6,
-  counts: { keep: 5, t2: 2, t3: 2, t4: 1, reject: 95, unusable: 90, modest: 5, unclassified: 0, error: 0, disagreement: 0 },
-  shares: { keep: 0.05, t2: 0.02, t3: 0.02, t4: 0.01, reject: 0.95, unusable: 0.9, modest: 0.05, unclassified: 0, error: 0, disagreement: 0 }
+  counts: { keep: 5, t1: 4, t2: 1, reject: 95, unusable: 95, unclassified: 0, error: 0, disagreement: 0 },
+  shares: { keep: 0.05, t1: 0.04, t2: 0.01, reject: 0.95, unusable: 0.95, unclassified: 0, error: 0, disagreement: 0 }
 };
 
 (async () => {
@@ -49,7 +49,7 @@ const SATURATED = {
   `);
   r.check('stats carries verdict facets', facets !== null, JSON.stringify(facets));
   r.check('every filter has a share', facets
-    && facets.keys.join(',') === 'disagreement,error,keep,modest,reject,t2,t3,t4,unclassified,unusable',
+    && facets.keys.join(',') === 'disagreement,error,keep,reject,t1,t2,unclassified,unusable',
     facets && facets.keys.join(','));
   r.check('the guard limit is served, not hardcoded in the page',
     facets && facets.warn === 0.6, String(facets && facets.warn));
@@ -65,7 +65,7 @@ const SATURATED = {
 
   const agree = await s.eval(`
     const out = [];
-    for (const key of ['reject', 'keep', 't2', 't3', 't4', 'unusable', 'modest', 'unclassified', 'disagreement']) {
+    for (const key of ['reject', 'keep', 't1', 't2', 'unusable', 'unclassified', 'disagreement']) {
       const res = await fetch('/api/photos?limit=1&verdict=' + key);
       const data = await res.json();
       out.push({ key, page: data.total, facet: state.verdictFacets.counts[key] });
@@ -145,11 +145,9 @@ const SATURATED = {
   r.check('and says 95%', flagged.reject.share === '95%', flagged.reject.share);
   r.check('the tooltip explains why it matters',
     /no-op/i.test(flagged.reject.title), flagged.reject.title);
-  r.check('a 90% filter is flagged too', flagged.unusable.warn === true,
-    JSON.stringify(flagged.unusable));
   r.check('filters under the limit are left alone',
-    flagged.keep.warn === false && flagged.modest.warn === false,
-    JSON.stringify([flagged.keep.warn, flagged.modest.warn]));
+    flagged.keep.warn === false && flagged.t1.warn === false,
+    JSON.stringify([flagged.keep.warn, flagged.t1.warn]));
 
   // ── the browse dropdown carries the same number ────────────────────
   //
@@ -182,12 +180,10 @@ const SATURATED = {
       name: 'fully_done',
       photo_count: 40,
       keep_count: 40,
+      t1_count: 30,
       t2_count: 10,
-      t3_count: 20,
-      t4_count: 10,
       reject_count: 0,
       unusable_count: 0,
-      modest_count: 0,
       unclassified_count: 0,
       error_count: 0,
       disagreement_count: 0,
@@ -216,12 +212,10 @@ const SATURATED = {
       name: 'sat',
       photo_count: 100,
       keep_count: 5,
-      t2_count: 2,
-      t3_count: 2,
-      t4_count: 1,
+      t1_count: 4,
+      t2_count: 1,
       reject_count: 95,
-      unusable_count: 90,
-      modest_count: 5,
+      unusable_count: 95,
       unclassified_count: 0,
       error_count: 0,
       disagreement_count: 0,

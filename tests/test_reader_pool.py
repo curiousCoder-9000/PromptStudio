@@ -81,7 +81,7 @@ def test_the_index_level_tracer_still_sees_it(index, make_photo):
 )
 def test_read_paths_do_not_touch_the_writer(index, make_photo, call):
     rel, _ = make_photo(name="a.jpg")
-    index.set_verdict(rel, tier=3)
+    index.set_verdict(rel, tier=1)
     seen: list[str] = []
     index._conn.set_trace_callback(seen.append)
     try:

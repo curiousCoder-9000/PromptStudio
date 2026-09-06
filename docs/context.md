@@ -169,7 +169,7 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
 | `IG_INCLUDE_VIDEOS` | `0` | Creator/following download reels (off — videos trip Instagram) |
 | `IG_POST_RANK` | `1` | Rank feed posts by caption/reel signals |
 | `IG_POST_SCAN_FACTOR` | `3` | Scan window = max_posts × factor |
-| `CLASSIFY_REJECT_MAX_TIER` | `1` | Tiers `0..N` are rejects. Only the tier is stored, so changing this re-thresholds the archive with no re-classify |
+| `CLASSIFY_REJECT_MAX_TIER` | `0` | Tiers `0..N` are rejects (0 reject, 1 revealing/tight, 2 swim). Only the tier is stored, so changing this re-thresholds the archive with no re-classify |
 | `CLASSIFY_REEL_SHEET` | `1` | Score reels from a whole-timeline contact sheet (`0` = ranked frames) |
 | `CLASSIFY_*` | see `.env.example` | Vision request shape, reel contact sheet, frame ranking, retries |
 | `DISTRIBUTION_MAX_SHARE` | `0.6` | **B4 platform rule.** One bucket over this share makes every filter on it a no-op. Read by the pass-rate badges, `/api/insights` and the `tests/test_distribution_guard.py` gate — one number, three readers |

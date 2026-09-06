@@ -116,7 +116,7 @@ def test_verdict_counts_are_source_scoped(mixed_archive):
     """Otherwise the reject pill counts IG rejects while you are viewing X."""
     index = mixed_archive
     index.set_verdict("mira/ig_a.jpg", tier=0, reason="ig reject")
-    index.set_verdict("mira/x_a.jpg", tier=4, reason="x keep")
+    index.set_verdict("mira/x_a.jpg", tier=2, reason="x keep")
 
     ig = index.creator_verdict_counts(source="instagram")["mira"]
     assert ig["reject_count"] == 1

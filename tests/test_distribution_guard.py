@@ -330,24 +330,24 @@ def test_archive_p_keep_distribution_is_not_saturated():
 
 
 def test_keep_tier_filters_are_judged_over_classified_keep_tiers(make_photo):
-    """t2/t3/t4 split the keep pile. Rejects and unclassified are not in their
+    """t1/t2 split the keep pile. Rejects and unclassified are not in their
     denominator — counting either would fire on a mostly-T0 archive, or on one
     that has not been classified yet, which is how a guard gets switched off.
     """
     index = ArchiveIndex.get()
-    for i, tier in enumerate([2] * 12 + [0] * 8):
+    for i, tier in enumerate([1] * 12 + [0] * 8):
         rel, _ = make_photo(name=f"kt_{i:03d}.jpg")
         index.set_verdict(rel, creator="tester", tier=tier)
     for i in range(5):
         make_photo(name=f"unseen_{i}.jpg")
 
     counts = {
-        name: index.query_photos(verdict=name)[1] for name in ("t2", "t3", "t4")
+        name: index.query_photos(verdict=name)[1] for name in ("t1", "t2")
     }
-    assert counts == {"t2": 12, "t3": 0, "t4": 0}, counts
+    assert counts == {"t1": 12, "t2": 0}, counts
     with pytest.raises(AssertionError) as caught:
         assert_not_saturated(counts, what="keep-tier filter", min_n=10)
-    assert "t2" in str(caught.value)
+    assert "t1" in str(caught.value)
 
 
 def test_disagreement_filter_is_judged_over_corrections(make_photo):
@@ -358,13 +358,13 @@ def test_disagreement_filter_is_judged_over_corrections(make_photo):
     rels = []
     for i in range(20):
         rel, _ = make_photo(name=f"dg_{i:03d}.jpg")
-        index.set_verdict(rel, creator="tester", tier=2)
+        index.set_verdict(rel, creator="tester", tier=1)
         rels.append(rel)
     for i in range(5):
         make_photo(name=f"unseen_dg_{i}.jpg")
     # 12 corrections, all mismatches. 8 classified but unlabelled.
     for rel in rels[:12]:
-        index.set_corrected_tier(rel, 3)
+        index.set_corrected_tier(rel, 2)
 
     gold = index.correction_counts()
     disagree = index.query_photos(verdict="disagreement")[1]
@@ -384,4 +384,4 @@ def test_disagreement_filter_is_judged_over_corrections(make_photo):
     hist = {
         f"tier {t}": n for t, n in index.tier_histogram().items() if int(t) >= 0
     }
-    assert hist == {"tier 2": 20}
+    assert hist == {"tier 1": 20}

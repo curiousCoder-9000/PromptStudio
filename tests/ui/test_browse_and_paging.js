@@ -33,11 +33,10 @@ const { Session, Report, sleep } = require('./cdp');
   r.check('verdict filter exists in the normal view controls',
     Array.isArray(hasControl) && hasControl.includes('reject'),
     JSON.stringify(hasControl));
-  r.check('keep is split into t2/t3/t4 — reject already is t0+t1',
+  r.check('keep is split into t1/t2 — reject is t0',
     Array.isArray(hasControl)
-      && hasControl.includes('t2')
-      && hasControl.includes('t3')
-      && hasControl.includes('t4'),
+      && hasControl.includes('t1')
+      && hasControl.includes('t2'),
     JSON.stringify(hasControl));
   r.check('default is "any verdict"', hasControl && hasControl[0] === '',
     String(hasControl && hasControl[0]));
@@ -98,14 +97,14 @@ const { Session, Report, sleep } = require('./cdp');
   await s.resetFetchLog();
   await s.eval(`
     const sel = document.getElementById('verdictFilterSelect');
-    sel.value = 't4';
+    sel.value = 't2';
     sel.dispatchEvent(new Event('change'));
     return true;
   `);
   await sleep(700);
   calls = (await s.fetchLog()).calls.filter((u) => u.includes('/api/photos'));
-  r.check('t4 browse filter reaches the server',
-    calls.some((u) => u.includes('verdict=t4')), calls[0] || '(none)');
+  r.check('t2 browse filter reaches the server',
+    calls.some((u) => u.includes('verdict=t2')), calls[0] || '(none)');
 
   // Native <select> on Windows composites a translucent background against
   // white, so lavender/yellow text on 18% purple vanished. Both active and
@@ -169,17 +168,16 @@ const { Session, Report, sleep } = require('./cdp');
   `);
   await sleep(600);
 
-  // ── select all on a browse filter (T2/T3/T4 piles) ─────────────────
+  // ── select all on a browse filter (T1/T2 piles) ─────────────────
   r.section('select all on a browse filter');
 
   const optionOrder = await s.eval(`
     return [...document.getElementById('verdictFilterSelect').options].map((o) => o.value);
   `);
-  const t4At = optionOrder.indexOf('t4');
-  const t3At = optionOrder.indexOf('t3');
   const t2At = optionOrder.indexOf('t2');
-  r.check('T4 is listed before T3 and T2 — that is the keep-hot pile',
-    t4At > 0 && t4At < t3At && t3At < t2At,
+  const t1At = optionOrder.indexOf('t1');
+  r.check('T2 is listed before T1 — that is the keep-hot pile',
+    t2At > 0 && t2At < t1At,
     JSON.stringify(optionOrder));
 
   const barBefore = await s.eval(`

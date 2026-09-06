@@ -43,9 +43,9 @@ def test_verdict_is_reject_requires_a_successful_read(monkeypatch):
 
 
 def test_every_tier_has_a_label():
-    for tier in range(-1, 5):
+    for tier in range(-1, 3):
         assert mc.TIER_LABELS[tier]
-    assert mc.MediaVerdict(path="x", exposure_tier=4).tier_label == "Swim / lingerie"
+    assert mc.MediaVerdict(path="x", exposure_tier=2).tier_label == "Swim / lingerie"
 
 
 # ── parsing model output ─────────────────────────────────────────────
@@ -53,162 +53,80 @@ def test_every_tier_has_a_label():
 def test_tier_data_round_trips():
     v = mc._verdict_from_tier_data(
         "x.jpg",
-        {"has_woman": True, "exposure_tier": 3, "confidence": 0.9,
-         "brief_reason": "crop top", "figure_visible": True,
-         "figure": "curvy", "body_focus": True},
+        {"has_woman": True, "exposure_tier": 1, "confidence": 0.9,
+         "brief_reason": "crop top", "figure_visible": True},
         source="image",
         prompt_version="v",
     )
-    assert (v.ok, v.exposure_tier, v.has_woman, v.figure_visible) == (True, 3, True, True)
+    assert (v.ok, v.exposure_tier, v.has_woman, v.figure_visible) == (True, 1, True, True)
     assert v.brief_reason == "crop top"
-    assert v.figure == "curvy"
-    assert v.body_focus is True
 
 
-def test_v8_prompt_treats_t3_as_the_horny_keep_bucket():
-    """v7a escalated any listed reveal to 3 and tied up; v8 is the keep-hot bar."""
+def test_v9_prompt_is_the_three_bucket_scale():
     prompt = mc.CLASSIFY_FRAME_PROMPT
-    assert "If unsure between 2 and 3 on a covering dress" in prompt
-    assert "If unsure between 2 and 3, choose 3" not in prompt
-    assert "YouTube plaque" in prompt
-    assert "curvy or voluptuous" in prompt
-    assert "Tight covering bodycon" in prompt
-    assert "ALWAYS 3, never 2" in prompt
-    assert mc.CLASSIFY_FRAME_VERSION == "v4-ordinal-frame-v8"
+    assert "integer 0-2" in prompt
+    assert "Tight clothes are 1" in prompt
+    assert "ALWAYS 2" in prompt
+    assert "integer 0-4" not in prompt
+    assert mc.CLASSIFY_FRAME_VERSION == "v4-ordinal-frame-v9"
     sheet = mc.reel_sheet_prompt(9)
-    assert "horny viewer" in sheet
-    assert "not 3" in sheet
+    assert "integer 0-2" in sheet
+    assert "Bikini/lingerie in any panel is 2" in sheet
 
 
-def _t3_data(**overrides):
+def _keep_data(tier=1, **overrides):
     data = {
         "has_woman": True,
-        "exposure_tier": 3,
-        "confidence": 0.9,
-        "brief_reason": "tight dress with deep cleavage",
-        "figure": "curvy",
-        "body_focus": True,
-    }
-    data.update(overrides)
-    return mc._verdict_from_tier_data("x.jpg", data, source="image", prompt_version="v")
-
-
-@pytest.mark.parametrize(
-    "figure",
-    ["slim", "skinny", "athletic", "average", "petite"],
-)
-def test_t3_is_capped_when_the_figure_is_not_curvy(figure):
-    v = _t3_data(figure=figure)
-    assert v.exposure_tier == 2
-    assert "capped 3→2" in v.brief_reason
-    assert "not curvy" in v.brief_reason
-
-
-def test_t3_is_capped_when_the_body_is_not_the_subject():
-    """The amberna YouTube-plaque case: tight dress, but the award is the shot."""
-    v = _t3_data(body_focus=False)
-    assert v.exposure_tier == 2
-    assert "body not the subject" in v.brief_reason
-
-
-def test_t3_stays_when_curvy_and_body_focused():
-    v = _t3_data(figure="voluptuous", body_focus=True)
-    assert v.exposure_tier == 3
-    assert "capped" not in v.brief_reason
-
-
-def test_t3_figure_aliases_map_onto_the_keep_set():
-    assert _t3_data(figure="busty").exposure_tier == 3
-    assert _t3_data(figure="hourglass").exposure_tier == 3
-    assert _t3_data(figure="thick").exposure_tier == 3
-
-
-def test_missing_figure_and_body_focus_fail_open():
-    """A model that omits the new fields must not collapse every T3 to 2."""
-    v = mc._verdict_from_tier_data(
-        "x.jpg",
-        {"has_woman": True, "exposure_tier": 3, "confidence": 0.9,
-         "brief_reason": "crop top"},
-        source="image",
-        prompt_version="v",
-    )
-    assert v.exposure_tier == 3
-    assert v.figure == ""
-    assert v.body_focus is None
-
-
-def test_t4_is_never_capped_by_figure_or_body_focus():
-    v = mc._verdict_from_tier_data(
-        "x.jpg",
-        {"has_woman": True, "exposure_tier": 4, "confidence": 0.9,
-         "brief_reason": "bikini set", "figure": "slim", "body_focus": False},
-        source="image",
-        prompt_version="v",
-    )
-    assert v.exposure_tier == 4
-
-
-def test_body_focus_string_false_does_not_become_true():
-    """bool('false') is True — the gate has to parse the word."""
-    v = _t3_data(body_focus="false")
-    assert v.body_focus is False
-    assert v.exposure_tier == 2
-
-
-def _t2_data(**overrides):
-    data = {
-        "has_woman": True,
-        "exposure_tier": 2,
+        "exposure_tier": tier,
         "confidence": 0.9,
         "brief_reason": "tight dress",
-        "figure": "curvy",
-        "body_focus": True,
     }
     data.update(overrides)
     return mc._verdict_from_tier_data("x.jpg", data, source="image", prompt_version="v")
 
 
-def test_bikini_reason_with_tier_2_is_floored_to_4():
-    """The model names the garment then sits on 2; policy must not trust the int."""
-    v = _t2_data(brief_reason="bikini set")
-    assert v.exposure_tier == 4
+def test_bikini_reason_is_floored_to_t2():
+    """The model names the garment then sits on 1; policy must not trust the int."""
+    v = _keep_data(tier=1, brief_reason="bikini set")
+    assert v.exposure_tier == 2
 
 
 def test_a_bikini_on_an_event_flyer_is_still_tier_0():
-    v = _t2_data(brief_reason="swimsuit", is_graphic=True)
+    v = _keep_data(tier=1, brief_reason="swimsuit", is_graphic=True)
     assert v.exposure_tier == 0
 
 
-def test_crop_top_t2_floors_to_t3_when_curvy_and_body_focused():
-    v = _t2_data(brief_reason="crop top + jeans")
-    assert v.exposure_tier == 3
-    assert "floored 2→3" in v.brief_reason
-
-
-def test_crop_top_stays_t2_when_the_body_is_not_the_subject():
-    v = _t2_data(brief_reason="crop top + jeans", body_focus=False)
-    assert v.exposure_tier == 2
-
-
-def test_crop_top_stays_t2_when_the_figure_is_not_curvy():
-    v = _t2_data(brief_reason="crop top + jeans", figure="slim")
-    assert v.exposure_tier == 2
-
-
-def test_bare_midriff_floors_t2_without_a_crop_reason():
-    v = _t2_data(brief_reason="yellow top + pants", bare_midriff=True)
-    assert v.exposure_tier == 3
-
-
 def test_undress_class_flag_wins_over_a_modest_reason():
-    v = _t2_data(brief_reason="outfit", undress_class=True)
-    assert v.exposure_tier == 4
+    v = _keep_data(tier=0, brief_reason="outfit", undress_class=True)
+    assert v.exposure_tier == 2
+
+
+def test_swim_without_undress_evidence_is_daywear():
+    v = _keep_data(tier=2, brief_reason="tight dress", undress_class=False)
+    assert v.exposure_tier == 1
+
+
+def test_tight_reason_on_a_reject_is_floored_to_t1():
+    v = _keep_data(tier=0, brief_reason="crop top + jeans")
+    assert v.exposure_tier == 1
+    assert "floored 0→1" in v.brief_reason
+
+
+def test_bare_midriff_floors_a_reject_to_t1():
+    v = _keep_data(tier=0, brief_reason="yellow top + pants", bare_midriff=True)
+    assert v.exposure_tier == 1
+
+
+def test_tight_daywear_is_not_capped_by_figure():
+    """v8 required curvy+body-focus for the keep bucket; v9 keeps tightness."""
+    v = _keep_data(tier=1, figure="slim", body_focus=False)
+    assert v.exposure_tier == 1
 
 
 def test_no_woman_forces_tier_zero():
     v = mc._verdict_from_tier_data(
         "x.jpg",
-        {"has_woman": False, "exposure_tier": 4, "confidence": 0.9},
+        {"has_woman": False, "exposure_tier": 2, "confidence": 0.9},
         source="image",
         prompt_version="v",
     )
@@ -217,12 +135,20 @@ def test_no_woman_forces_tier_zero():
 
 
 def test_out_of_range_tier_is_clamped():
-    for raw, expected in ((9, 4), (-3, 0)):
-        v = mc._verdict_from_tier_data(
-            "x.jpg", {"has_woman": True, "exposure_tier": raw}, source="image",
-            prompt_version="v",
-        )
-        assert v.exposure_tier == expected
+    high = mc._verdict_from_tier_data(
+        "x.jpg",
+        {"has_woman": True, "exposure_tier": 9, "undress_class": True},
+        source="image",
+        prompt_version="v",
+    )
+    assert high.exposure_tier == 2
+    low = mc._verdict_from_tier_data(
+        "x.jpg",
+        {"has_woman": True, "exposure_tier": -3},
+        source="image",
+        prompt_version="v",
+    )
+    assert low.exposure_tier == 0
 
 
 def test_garbage_tier_does_not_crash():
@@ -272,24 +198,24 @@ def test_max_over_panels_catches_a_final_seconds_reveal():
         "panels": [
             {"i": 1, "has_woman": True, "exposure_tier": 1},
             {"i": 2, "has_woman": True, "exposure_tier": 1},
-            {"i": 9, "has_woman": True, "exposure_tier": 4},
+            {"i": 9, "has_woman": True, "exposure_tier": 2},
         ],
         # The model's own rollup is wrong; the panel array wins.
         "reel_exposure": 1,
     }
     tier, peak, panels = mc._aggregate_sheet_panels(data, 9)
-    assert tier == 4
+    assert tier == 2
     assert peak == 9
     assert len(panels) == 3
 
 
 def test_ties_break_to_the_later_panel():
     data = {"panels": [
-        {"i": 2, "has_woman": True, "exposure_tier": 3},
-        {"i": 7, "has_woman": True, "exposure_tier": 3},
+        {"i": 2, "has_woman": True, "exposure_tier": 1},
+        {"i": 7, "has_woman": True, "exposure_tier": 1},
     ]}
     tier, peak, _panels = mc._aggregate_sheet_panels(data, 9)
-    assert (tier, peak) == (3, 7)
+    assert (tier, peak) == (1, 7)
 
 
 def test_a_repeated_panel_index_cannot_stuff_the_ballot():
@@ -332,30 +258,29 @@ def test_no_panels_at_all_reports_zero():
 
 
 def test_malformed_panel_entries_are_skipped():
-    data = {"panels": ["nope", {"i": "x"}, {"i": 4, "has_woman": True, "exposure_tier": 3}]}
+    data = {"panels": ["nope", {"i": "x"}, {"i": 4, "has_woman": True, "exposure_tier": 1}]}
     tier, peak, panels = mc._aggregate_sheet_panels(data, 9)
-    assert (tier, peak, len(panels)) == (3, 4, 1)
+    assert (tier, peak, len(panels)) == (1, 4, 1)
 
 
 # ── confirm cascade ──────────────────────────────────────────────────
 
-@pytest.mark.parametrize("tier", [1, 2, 3])
-def test_boundary_tiers_get_a_full_resolution_confirm(tier):
-    """256px panels can't tell sheer from opaque; the keep/reject cuts must."""
-    assert mc._needs_confirm(tier, 0.95) is True
+def test_boundary_tiers_get_a_full_resolution_confirm():
+    """256px panels can't tell sheer from opaque; the keep/reject cut must."""
+    assert mc._needs_confirm(1, 0.95) is True
 
 
 def test_unambiguous_tiers_skip_the_confirm():
     assert mc._needs_confirm(0, 0.95) is False
-    assert mc._needs_confirm(4, 0.95) is False
+    assert mc._needs_confirm(2, 0.95) is False
 
 
 def test_low_confidence_always_confirms():
-    assert mc._needs_confirm(4, 0.3) is True
+    assert mc._needs_confirm(2, 0.3) is True
 
 
 def test_a_high_tier_in_the_final_shot_confirms():
-    assert mc._needs_confirm(4, 0.95, peak_in_last_shot=True) is True
+    assert mc._needs_confirm(2, 0.95, peak_in_last_shot=True) is True
 
 
 # ── sheet paths stay inside _classify/ ───────────────────────────────
@@ -408,31 +333,31 @@ def test_prompt_versions_cover_both_reel_paths():
 
 def test_higher_tier_wins_between_two_frames():
     a = mc.MediaVerdict(path="x", ok=True, exposure_tier=1, confidence=0.9)
-    b = mc.MediaVerdict(path="x", ok=True, exposure_tier=4, confidence=0.5)
+    b = mc.MediaVerdict(path="x", ok=True, exposure_tier=2, confidence=0.5)
     assert mc._prefer_verdict(a, b) is b
 
 
 def test_confidence_breaks_a_tier_tie():
-    a = mc.MediaVerdict(path="x", ok=True, exposure_tier=3, confidence=0.5)
-    b = mc.MediaVerdict(path="x", ok=True, exposure_tier=3, confidence=0.9)
+    a = mc.MediaVerdict(path="x", ok=True, exposure_tier=1, confidence=0.5)
+    b = mc.MediaVerdict(path="x", ok=True, exposure_tier=1, confidence=0.9)
     assert mc._prefer_verdict(a, b) is b
 
 
 def test_a_failed_read_never_wins():
     ok = mc.MediaVerdict(path="x", ok=True, exposure_tier=0, confidence=0.1)
-    bad = mc.MediaVerdict(path="x", ok=False, exposure_tier=4, confidence=1.0)
+    bad = mc.MediaVerdict(path="x", ok=False, exposure_tier=2, confidence=1.0)
     assert mc._prefer_verdict(ok, bad) is ok
     assert mc._prefer_verdict(bad, ok) is ok
 
 
 def test_a_confident_low_tier_still_earns_a_second_frame():
     """The reveal case: the model is sure about the 'before' outfit."""
-    v = mc.MediaVerdict(path="x", ok=True, has_woman=True, exposure_tier=1, confidence=0.99)
+    v = mc.MediaVerdict(path="x", ok=True, has_woman=True, exposure_tier=0, confidence=0.99)
     assert mc._needs_second_reel_frame(v) is True
 
 
 def test_a_confident_high_tier_stops_looking():
-    v = mc.MediaVerdict(path="x", ok=True, has_woman=True, exposure_tier=4, confidence=0.99)
+    v = mc.MediaVerdict(path="x", ok=True, has_woman=True, exposure_tier=2, confidence=0.99)
     assert mc._needs_second_reel_frame(v) is False
 
 
@@ -444,21 +369,21 @@ def test_persist_writes_the_index_row_and_the_sidecar(make_photo):
 
     rel, full = make_photo(name="a.jpg")
     verdict = mc.MediaVerdict(
-        path=full, ok=True, has_woman=True, exposure_tier=3,
+        path=full, ok=True, has_woman=True, exposure_tier=1,
         confidence=0.8, brief_reason="crop top", source="image",
         prompt_version=mc.CLASSIFY_FRAME_VERSION,
     )
     mc.persist_verdict(rel, verdict, full_path=full, duration_ms=900)
 
     row = ArchiveIndex.get().get_verdict(rel)
-    assert row["tier"] == 3
+    assert row["tier"] == 1
     assert row["verdict"] == "keep"
     assert row["duration_ms"] == 900
     assert row["media_kind"] == "photo"
 
     block = (load_post_metadata(full) or {}).get("classify") or {}
-    assert block["exposure_tier"] == 3
-    assert block["tier_label"] == "Revealing daywear"
+    assert block["exposure_tier"] == 1
+    assert block["tier_label"] == "Revealing / tight"
     assert block["reject"] is False
 
 
@@ -467,13 +392,13 @@ def test_a_failed_retry_does_not_clobber_a_good_sidecar(make_photo):
     from promptstudio.storage.metadata import load_post_metadata
 
     rel, full = make_photo(name="a.jpg")
-    good = mc.MediaVerdict(path=full, ok=True, has_woman=True, exposure_tier=4)
+    good = mc.MediaVerdict(path=full, ok=True, has_woman=True, exposure_tier=2)
     mc.persist_verdict(rel, good, full_path=full)
     bad = mc.MediaVerdict(path=full, ok=False, error="vision timeout")
     mc.persist_verdict(rel, bad, full_path=full)
 
     # The sidecar keeps the last good reading …
-    assert (load_post_metadata(full) or {})["classify"]["exposure_tier"] == 4
+    assert (load_post_metadata(full) or {})["classify"]["exposure_tier"] == 2
     # … while the index records the failure, so the row is retryable.
     row = ArchiveIndex.get().get_verdict(rel)
     assert row["tier"] == -1
@@ -518,14 +443,14 @@ def test_a_reel_is_judged_from_a_persisted_contact_sheet(tmp_path, make_photo):
 
     sheet_reply = {
         "panels": [
-            {"i": i, "has_woman": True, "exposure_tier": 1 if i < 9 else 4}
+            {"i": i, "has_woman": True, "exposure_tier": 1 if i < 9 else 2}
             for i in range(1, 10)
         ],
         "reel_exposure": 1,  # wrong on purpose: the panel array must win
         "confidence": 0.88,
         "brief_reason": "reveal in the last panel",
     }
-    frame_reply = {"has_woman": True, "exposure_tier": 4, "confidence": 0.9,
+    frame_reply = {"has_woman": True, "exposure_tier": 2, "confidence": 0.9,
                    "brief_reason": "bikini set"}
     prompts_seen = []
 
@@ -538,7 +463,7 @@ def test_a_reel_is_judged_from_a_persisted_contact_sheet(tmp_path, make_photo):
 
     assert verdict.ok is True
     assert verdict.source == "video_sheet"
-    assert verdict.exposure_tier == 4
+    assert verdict.exposure_tier == 2
     # Sheet first, then a full-resolution confirm of the peak frame.
     assert prompts_seen == ["sheet", "frame"]
     assert verdict.evidence["peak_panel"] == 9
@@ -554,7 +479,7 @@ def test_a_reel_is_judged_from_a_persisted_contact_sheet(tmp_path, make_photo):
     ArchiveIndex.get().upsert_photo(clip_rel)
     mc.persist_verdict(clip_rel, verdict, full_path=clip, duration_ms=1200)
     row = ArchiveIndex.get().get_verdict(clip_rel)
-    assert row["tier"] == 4
+    assert row["tier"] == 2
     assert row["verdict"] == "keep"
     assert row["media_kind"] == "reel"
     assert row["sheet_path"] == "test_creator/clip.sheet.jpg"

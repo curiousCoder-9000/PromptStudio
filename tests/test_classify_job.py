@@ -78,7 +78,7 @@ def test_idle_status_has_the_full_shape(manager):
     ):
         assert key in status, key
     assert status["running"] is False
-    assert status["tier_hist"] == {"-1": 0, "0": 0, "1": 0, "2": 0, "3": 0, "4": 0}
+    assert status["tier_hist"] == {"-1": 0, "0": 0, "1": 0, "2": 0}
 
 
 def test_histogram_snapshot_is_a_copy(manager):
@@ -174,25 +174,25 @@ def test_the_job_takes_the_lease_while_running(manager, make_photo):
 # ── counters ─────────────────────────────────────────────────────────
 
 def test_keep_and_reject_counters_follow_the_threshold(manager, make_photo):
-    run_job(manager, [0, 1, 2, 3, 4], make_photo)
+    run_job(manager, [0, 0, 1, 2], make_photo)
     status = manager.get_status()
-    assert status["completed"] == 5
-    # Default cut is 1, so tiers 0 and 1 are rejects.
+    assert status["completed"] == 4
+    # Default cut is 0, so only tier 0 is a reject.
     assert status["rejected"] == 2
-    assert status["kept"] == 3
+    assert status["kept"] == 2
     assert status["failed"] == 0
 
 
 def test_the_histogram_records_every_tier(manager, make_photo):
-    run_job(manager, [0, 0, 3, 4], make_photo)
+    run_job(manager, [0, 0, 1, 2], make_photo)
     hist = manager.get_status()["tier_hist"]
-    assert hist["0"] == 2 and hist["3"] == 1 and hist["4"] == 1
+    assert hist["0"] == 2 and hist["1"] == 1 and hist["2"] == 1
     assert hist["-1"] == 0
 
 
 def test_top_tier_share_exposes_a_saturated_classifier(manager, make_photo):
     """The metric that would have caught the previous classifier on day one."""
-    run_job(manager, [3, 3, 3, 3, 1], make_photo)
+    run_job(manager, [1, 1, 1, 1, 0], make_photo)
     status = manager.get_status()
     assert status["top_tier_share"] == pytest.approx(0.8)
     assert status["error_rate"] == 0.0
@@ -201,7 +201,7 @@ def test_top_tier_share_exposes_a_saturated_classifier(manager, make_photo):
 def test_failures_land_in_the_error_bucket_not_a_tier(manager, make_photo):
     for i in range(3):
         make_photo(name=f"p{i}.jpg")
-    replies = iter([_verdict(3), _verdict(0, ok=False, error="timeout"), _verdict(4)])
+    replies = iter([_verdict(1), _verdict(0, ok=False, error="timeout"), _verdict(2)])
     with patch("promptstudio.scraping.classify_job.ollama_reachable", return_value=True), \
          patch("promptstudio.scraping.classify_job.classify_media",
                side_effect=lambda path, rel_path="": next(replies)):
@@ -286,9 +286,9 @@ def test_force_requeues_everything(manager, make_photo):
 def test_only_unclassified_false_behaves_like_force(manager, make_photo):
     rel, _full = make_photo(name="a.jpg")
     ArchiveIndex.get().set_verdict(rel, creator="test_creator", tier=2)
-    result = run_job(manager, [3], make_photo, only_unclassified=False)
+    result = run_job(manager, [1], make_photo, only_unclassified=False)
     assert result["status"] == "started"
-    assert ArchiveIndex.get().get_verdict(rel)["tier"] == 3
+    assert ArchiveIndex.get().get_verdict(rel)["tier"] == 1
 
 
 # ── journal ──────────────────────────────────────────────────────────
@@ -296,7 +296,7 @@ def test_only_unclassified_false_behaves_like_force(manager, make_photo):
 def test_the_run_is_journalled_with_its_distribution(manager, make_photo):
     from promptstudio.storage.journal import read_runs
 
-    run_job(manager, [0, 3, 3], make_photo)
+    run_job(manager, [0, 1, 1], make_photo)
     runs = read_runs("classify", limit=5)
     assert runs, "no classify run journalled"
     # summary() fields are merged flat into the run_end record.
@@ -307,4 +307,4 @@ def test_the_run_is_journalled_with_its_distribution(manager, make_photo):
     assert latest.get("kept") == 2
     assert latest.get("rejected") == 1
     assert latest.get("top_tier_share") == pytest.approx(2 / 3, abs=1e-4)
-    assert latest.get("tier_hist", {}).get("3") == 2
+    assert latest.get("tier_hist", {}).get("1") == 2

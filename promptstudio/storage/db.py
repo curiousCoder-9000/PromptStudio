@@ -20,6 +20,7 @@ from promptstudio.config import (
     DB_READERS,
     DISTRIBUTION_MAX_SHARE,
     EXCLUDED_FOLDERS,
+    EXPOSURE_TIER_MAX,
     FTS_SEARCH,
     IMAGE_EXTENSIONS,
     MEDIA_EXTENSIONS,
@@ -178,25 +179,24 @@ _VERDICT_CASE = (
     "ELSE 'keep' END"
 )
 
-# Raw-tier browse filters. Parallel to `unusable`/`modest` (T0/T1) — those
-# split reject; these split keep. Query values stay `t2`/`t3`/`t4` so a
-# moved reject-cut cannot rename them.
+# Raw-tier browse filters. `unusable` is T0 (the reject measurement). `t1`/`t2`
+# split keep. `t3`/`t4`/`modest` are aliases for old 0–4 bookmarks so a saved
+# view does not 404 after the v9 collapse.
 _TIER_FILTERS = {
     "unusable": 0,
-    "modest": 1,
+    "modest": 0,  # old T1 modest is now reject
+    "t1": 1,
     "t2": 2,
-    "t3": 3,
-    "t4": 4,
+    "t3": 1,  # old revealing daywear
+    "t4": 2,  # old swim / lingerie
 }
 
 VERDICT_FILTERS = (
     "keep",
+    "t1",
     "t2",
-    "t3",
-    "t4",
     "reject",
     "unusable",
-    "modest",
     "unclassified",
     "error",
     "disagreement",
@@ -316,12 +316,10 @@ def _verdict_predicate(name: str, cut: int) -> Tuple[str, List[Any]]:
     Shared by `query_photos` and `verdict_facet_counts` so a chip's pass-rate
     badge cannot end up describing a different filter than the chip runs.
 
-    Raw-tier names (`unusable`/`modest`/`t2`/`t3`/`t4`) are the *effective*
-    bucket: COALESCE(corrected_tier, tier). A keep/reject pin is policy and
+    Raw-tier names (`unusable`/`t1`/`t2`) are the *effective* bucket:
+    COALESCE(corrected_tier, tier). A keep/reject pin is policy and
     does not move the photo out of its measurement chip; a human gold label
-    does. T0/T1 split `reject` (quality gate vs taste call); T2/T3/T4 split
-    `keep`, because `reject` already captures the first two and "Keeps"
-    otherwise collapses three distinct outfits into one chip.
+    does. T0 is the reject measurement; T1/T2 split `keep`.
 
     `disagreement` is gold-vs-model. Uncorrected rows are not in it.
     """
@@ -345,10 +343,8 @@ _EMPTY_VERDICT_COUNTS: Dict[str, int] = {
     "unclassified_count": 0,
     "error_count": 0,
     "unusable_count": 0,
-    "modest_count": 0,
+    "t1_count": 0,
     "t2_count": 0,
-    "t3_count": 0,
-    "t4_count": 0,
     "disagreement_count": 0,
     "stale_count": 0,
 }
@@ -709,6 +705,7 @@ class ArchiveIndex:
             # After _migrate_added_at, which is what it cleans up behind.
             self._migrate_sort_columns()
             self._migrate_verdict_corrections()
+            self._migrate_three_tier_scale()
             self._conn.commit()
     def _apply_pragmas(self) -> None:
         """Connection tuning. Best-effort — an old SQLite must not stop startup.
@@ -1870,7 +1867,7 @@ class ArchiveIndex:
                 value = int(value)
             except (TypeError, ValueError) as e:
                 raise ValueError(f"bad corrected tier: {value!r}") from e
-            if value < 0 or value > 4:
+            if value < 0 or value > EXPOSURE_TIER_MAX:
                 raise ValueError(f"bad corrected tier: {value!r}")
         seen: set[str] = set()
         uniq: List[str] = []
@@ -1958,10 +1955,10 @@ class ArchiveIndex:
     ) -> Dict[str, Dict[str, int]]:
         """Per-creator keep/reject/unclassified counters for the sidebar.
 
-        `unusable` (tier 0) and `modest` (tier 1) are broken out of `reject`,
-        and `t2`/`t3`/`t4` out of `keep`, so the browse dropdown can act on a
-        single exposure tier. The review UI and the gallery labels both read
-        these counters, so they have to arrive separately.
+        `unusable` (tier 0) is broken out of `reject`, and `t1`/`t2` out of
+        `keep`, so the browse dropdown can act on a single exposure tier. The
+        review UI and the gallery labels both read these counters, so they
+        have to arrive separately.
 
         `source` scopes the counters to one platform. Without it a merged folder
         would show its Instagram rejects while the user is filtered to X — a
@@ -2014,13 +2011,9 @@ class ArchiveIndex:
             f"SUM(CASE WHEN {_EFFECTIVE_TIER} = 0 THEN 1 ELSE 0 END) "
             "AS unusable_count",
             f"SUM(CASE WHEN {_EFFECTIVE_TIER} = 1 THEN 1 ELSE 0 END) "
-            "AS modest_count",
+            "AS t1_count",
             f"SUM(CASE WHEN {_EFFECTIVE_TIER} = 2 THEN 1 ELSE 0 END) "
             "AS t2_count",
-            f"SUM(CASE WHEN {_EFFECTIVE_TIER} = 3 THEN 1 ELSE 0 END) "
-            "AS t3_count",
-            f"SUM(CASE WHEN {_EFFECTIVE_TIER} = 4 THEN 1 ELSE 0 END) "
-            "AS t4_count",
             "SUM(CASE WHEN v.corrected_tier IS NOT NULL "
             "AND v.corrected_tier != v.tier THEN 1 ELSE 0 END) "
             "AS disagreement_count",
@@ -2423,6 +2416,74 @@ class ArchiveIndex:
         if "corrected_at" not in cols:
             self._conn.execute(
                 "ALTER TABLE media_verdicts ADD COLUMN corrected_at TEXT"
+            )
+
+    def _migrate_three_tier_scale(self) -> None:
+        """Adopt existing 0–4 scores onto the v9 0–2 scale. No vision calls.
+
+        Two jobs, both one-shot:
+
+        1. Remap the numbers. Detection is `tier > 2` (or a gold label above
+           2). After this runs, nothing is above 2, so a second startup is a
+           no-op. Mapping preserves keep/reject at the new default cut of 0:
+
+               old 0, 1 → 0 (reject)
+               old 2, 3 → 1 (keep: fashion / revealing → revealing/tight)
+               old 4    → 2 (keep: swim / lingerie)
+
+        2. Stamp pre-v9 ``prompt_version`` to the current frame/sheet ids so
+           the remapped rows are not "outdated". Without this, Re-score
+           outdated would send the whole archive through vision again — the
+           opposite of a relabel.
+        """
+        from promptstudio.scraping.media_classifier import (
+            CLASSIFY_FRAME_VERSION,
+            CLASSIFY_SHEET_VERSION,
+        )
+
+        needs_remap = self._conn.execute(
+            "SELECT 1 FROM media_verdicts "
+            "WHERE tier > 2 OR corrected_tier > 2 LIMIT 1"
+        ).fetchone()
+        # Current ids end in `-v9`. Earlier revisions were `-v8`, `-v7a`, …
+        needs_stamp = self._conn.execute(
+            "SELECT 1 FROM media_verdicts "
+            "WHERE tier >= 0 AND IFNULL(prompt_version, '') NOT LIKE '%-v9' "
+            "LIMIT 1"
+        ).fetchone()
+        if not needs_remap and not needs_stamp:
+            return
+        if needs_remap:
+            self._conn.execute(
+                """
+                UPDATE media_verdicts SET
+                  tier = CASE
+                    WHEN tier >= 4 THEN 2
+                    WHEN tier IN (2, 3) THEN 1
+                    WHEN tier = 1 THEN 0
+                    ELSE tier
+                  END,
+                  corrected_tier = CASE
+                    WHEN corrected_tier IS NULL THEN NULL
+                    WHEN corrected_tier >= 4 THEN 2
+                    WHEN corrected_tier IN (2, 3) THEN 1
+                    WHEN corrected_tier = 1 THEN 0
+                    ELSE corrected_tier
+                  END
+                """
+            )
+        if needs_stamp:
+            self._conn.execute(
+                """
+                UPDATE media_verdicts
+                SET prompt_version = CASE
+                    WHEN media_kind = 'reel' THEN ?
+                    ELSE ?
+                END
+                WHERE tier >= 0
+                  AND IFNULL(prompt_version, '') NOT LIKE '%-v9'
+                """,
+                (CLASSIFY_SHEET_VERSION, CLASSIFY_FRAME_VERSION),
             )
 
     @classmethod
@@ -3296,7 +3357,7 @@ class ArchiveIndex:
         where_needs_label = False
         if verdict:
             # Same predicate the pass-rate badge counts with — see
-            # `_verdict_predicate`. Raw-tier names (T0–T4) split reject and
+            # `_verdict_predicate`. Raw-tier names (T0–T2) split reject and
             # keep so a browse pass can act on one exposure bucket rather
             # than the collapsed policy view.
             clause, clause_params = _verdict_predicate(verdict, cut)

@@ -5,19 +5,19 @@
 | **Status** | Implemented |
 | **Date** | 2026-08-29 |
 | **Depends on** | [`design_media_classifier.md`](design_media_classifier.md) |
-| **Problem** | Keep/Reject cannot move a photo between T2 and T3, so the Fashion / Revealing filters stay wrong, and there is no gold label for later training |
+| **Problem** | Keep/Reject cannot move a photo between T1 and T2, so the Revealing / Swim filters stay wrong, and there is no gold label for later training |
 
 ---
 
 ## 1. Why this exists
 
-The classifier stores a 0–4 **exposure measurement**. Keep vs reject is derived
-at query time against `CLASSIFY_REJECT_MAX_TIER` (default 1). That design is
+The classifier stores a 0–2 **exposure measurement**. Keep vs reject is derived
+at query time against `CLASSIFY_REJECT_MAX_TIER` (default 0). That design is
 right and stays.
 
 What the review UI actually lets you do is pin **policy**: `manual = keep|reject`.
-T2 and T3 are both keep at the default cut, so Keep on a T2 is a no-op for every
-filter that matters. The measured error is the 2↔3 boundary
+T1 and T2 are both keep at the default cut, so Keep on a T1 is a no-op for every
+filter that matters. The remaining measurement error is the 1↔2 boundary
 ([`design_media_classifier.md`](design_media_classifier.md) §2).
 
 Training later needs both numbers: *what the model said* and *what the human
@@ -29,7 +29,7 @@ This is a **measurement correction**, not another keep/reject pin.
 ## 2. Storage
 
 ```sql
-corrected_tier INTEGER,   -- 0–4, NULL = no human label
+corrected_tier INTEGER,   -- 0–2, NULL = no human label
 corrected_at   TEXT       -- UTC ISO, NULL iff corrected_tier is NULL
 ```
 

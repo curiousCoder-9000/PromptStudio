@@ -80,17 +80,17 @@ def test_photos_ids_returns_the_whole_filtered_pile(api, make_photo):
 
 
 def test_photos_accepts_keep_tier_filters(api, make_photo):
-    """Reject already is T0+T1. t2/t3/t4 have to be first-class query values
-    or the browse dropdown cannot split the keep pile."""
+    """Reject is T0. t1/t2 have to be first-class query values or the browse
+    dropdown cannot split the keep pile."""
     index = ArchiveIndex.get()
-    rels = _seed(index, make_photo, [("fashion.jpg", 2), ("swim.jpg", 4)])
+    rels = _seed(index, make_photo, [("fashion.jpg", 1), ("swim.jpg", 2)])
 
-    status, payload = api("GET", "/api/photos?verdict=t4")
+    status, payload = api("GET", "/api/photos?verdict=t2")
     assert status == 200
     assert payload["total"] == 1
     assert payload["photos"][0]["rel_path"] == rels["swim.jpg"]
 
-    status, payload = api("GET", "/api/photos?verdict=t2")
+    status, payload = api("GET", "/api/photos?verdict=t1")
     assert status == 200
     assert payload["total"] == 1
     assert payload["photos"][0]["rel_path"] == rels["fashion.jpg"]
@@ -101,27 +101,27 @@ def test_single_tier_correction_shape(api, make_photo):
     rels = _seed(index, make_photo, [("a.jpg", 2)])
 
     status, payload = api(
-        "POST", "/api/classify/verdict", {"rel_path": rels["a.jpg"], "tier": 3}
+        "POST", "/api/classify/verdict", {"rel_path": rels["a.jpg"], "tier": 1}
     )
 
     assert status == 200
     assert payload["status"] == "ok"
     v = payload["verdict"]
     assert v["tier"] == 2
-    assert v["corrected_tier"] == 3
+    assert v["corrected_tier"] == 1
     assert v["verdict"] == "keep"
     assert v["manual"] is None
 
-    status, payload = api("GET", "/api/photos?verdict=t3")
+    status, payload = api("GET", "/api/photos?verdict=t1")
     assert status == 200
     assert payload["total"] == 1
-    assert payload["photos"][0]["verdict"]["corrected_tier"] == 3
+    assert payload["photos"][0]["verdict"]["corrected_tier"] == 1
 
 
 def test_tier_correction_on_unclassified_is_404(api, make_photo):
     rel, _ = make_photo(name="never.jpg")
     status, payload = api(
-        "POST", "/api/classify/verdict", {"rel_path": rel, "tier": 3}
+        "POST", "/api/classify/verdict", {"rel_path": rel, "tier": 1}
     )
     assert status == 404
     assert payload["status"] == "not_classified"
@@ -143,7 +143,7 @@ def test_bad_tier_is_400(api, make_photo):
 def test_clearing_the_gold_label_via_the_api(api, make_photo):
     index = ArchiveIndex.get()
     rels = _seed(index, make_photo, [("a.jpg", 2)])
-    api("POST", "/api/classify/verdict", {"rel_path": rels["a.jpg"], "tier": 3})
+    api("POST", "/api/classify/verdict", {"rel_path": rels["a.jpg"], "tier": 1})
     status, payload = api(
         "POST", "/api/classify/verdict", {"rel_path": rels["a.jpg"], "tier": None}
     )
@@ -161,20 +161,20 @@ def test_bulk_tier_correction(api, make_photo):
         "/api/classify/verdict",
         {
             "rel_paths": [rels["a.jpg"], rels["b.jpg"], unclassified],
-            "tier": 3,
+            "tier": 1,
         },
     )
     assert status == 200
-    assert payload["tier"] == 3
+    assert payload["tier"] == 1
     assert set(payload["updated"]) == {rels["a.jpg"], rels["b.jpg"]}
     assert payload["missing"] == [unclassified]
-    assert payload["verdicts"][rels["a.jpg"]]["corrected_tier"] == 3
+    assert payload["verdicts"][rels["a.jpg"]]["corrected_tier"] == 1
 
 
 def test_photos_accepts_the_disagreement_filter(api, make_photo):
     index = ArchiveIndex.get()
-    rels = _seed(index, make_photo, [("miss.jpg", 2), ("ok.jpg", 3)])
-    index.set_corrected_tier(rels["miss.jpg"], 3)
+    rels = _seed(index, make_photo, [("miss.jpg", 1), ("ok.jpg", 2)])
+    index.set_corrected_tier(rels["miss.jpg"], 2)
     status, payload = api("GET", "/api/photos?verdict=disagreement")
     assert status == 200
     assert payload["total"] == 1

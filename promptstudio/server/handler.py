@@ -12,6 +12,7 @@ from promptstudio.config import (
     CLASSIFY_REJECT_MAX_TIER,
     CREATOR_SCRAPE_QUEUE_ENABLED,
     DEFAULT_MAX_POSTS_PER_CREATOR,
+    EXPOSURE_TIER_MAX,
     FOLLOWING_LIST_FILE,
     HOST,
     INCLUDE_VIDEOS_DEFAULT,
@@ -1558,7 +1559,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/classify/verdict":
             # Two independent writes on the same row:
             #   verdict — policy pin (keep/reject/auto), survives re-classify
-            #   tier    — human gold label 0–4 (or null to hand back to the model)
+            #   tier    — human gold label 0–2 (or null to hand back to the model)
             # `rel_paths` is the bulk form (U13) — one transaction, same
             # unclassified-is-missing contract as the single-path call.
             # Gold is applied first so a recode clears a stale pin, then a
@@ -1608,10 +1609,10 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     try:
                         tier_value = int(raw_tier)
                     except (TypeError, ValueError):
-                        self.send_error(400, "tier must be 0-4 or null")
+                        self.send_error(400, f"tier must be 0-{EXPOSURE_TIER_MAX} or null")
                         return
-                    if tier_value < 0 or tier_value > 4:
-                        self.send_error(400, "tier must be 0-4 or null")
+                    if tier_value < 0 or tier_value > EXPOSURE_TIER_MAX:
+                        self.send_error(400, f"tier must be 0-{EXPOSURE_TIER_MAX} or null")
                         return
             from promptstudio.storage.db import ArchiveIndex
 

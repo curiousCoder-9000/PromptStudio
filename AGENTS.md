@@ -62,7 +62,7 @@ These are the single source of truth — other docs point here rather than resta
 | A new score or filter | `promptstudio/insights.py` `saturation_report` + `tests/test_distribution_guard.py` (rule 17) |
 | Vision / prompts | `promptstudio/prompts/engine.py` |
 | Keep/reject classify | `promptstudio/scraping/media_classifier.py` · job in `classify_job.py` |
-| Setting a verdict from anywhere in the UI | `applyManualVerdict(photo, value)` (keep/reject pin) and `applyCorrectedTier(photo, value)` (gold 0–4) + `patchCardVerdict(photo)` in `app.js`. Lightbox and card are two callers of those functions on purpose — never re-implement the patch, and never refetch (it drops the row out from under the cursor) |
+| Setting a verdict from anywhere in the UI | `applyManualVerdict(photo, value)` (keep/reject pin) and `applyCorrectedTier(photo, value)` (gold 0–2) + `patchCardVerdict(photo)` in `app.js`. Lightbox and card are two callers of those functions on purpose — never re-implement the patch, and never refetch (it drops the row out from under the cursor) |
 | Gallery index | `promptstudio/storage/db.py` |
 | Gallery feels slow | [`docs/review_gallery_performance.md`](docs/review_gallery_performance.md) — §11 for what already shipped; measure first; do not flip FTS5 |
 | Thumbnails | `promptstudio/storage/thumb_queue.py` (ingest + workers) · `thumbs.py` (encode) · `scripts/backfill_thumbnails.py`. **Never** encode on the `/media/thumb/` request thread |

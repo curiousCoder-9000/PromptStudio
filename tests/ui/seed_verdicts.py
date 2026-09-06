@@ -5,7 +5,7 @@ strip, all of which need rows in `media_verdicts`. There is no API to write one
 without running the vision model, so the fixture is written directly — same
 reason `run.sh` seeds JPEGs rather than uploading them.
 
-Tiers are spread across the whole 0-4 range on purpose: a fixture where every
+Tiers are spread across the whole 0-2 range on purpose: a fixture where every
 row lands on one value would pass a test that a saturated classifier also
 passes, which is the exact failure this feature exists to make visible.
 """
@@ -28,10 +28,10 @@ from promptstudio.storage.db import ArchiveIndex
 # (tier, reason) cycled over the seeded photos in filename order.
 _PATTERN = [
     (0, "event flyer, heavy typography"),
-    (1, "crewneck sweater, no skin"),
-    (3, "crop top + jeans, bare midriff"),
-    (2, "sundress, normal length"),
-    (4, "bikini set"),
+    (0, "crewneck sweater, no skin"),
+    (1, "crop top + jeans, bare midriff"),
+    (1, "tight sundress"),
+    (2, "bikini set"),
     (-1, ""),  # a failed attempt, so the error state is covered too
 ]
 

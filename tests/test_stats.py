@@ -115,7 +115,7 @@ def test_unclassified_total_counts_media_with_no_verdict(store, make_photo):
     make_photo(creator="bob", name="b1.jpg")
 
     assert store.stats()["unclassified_total"] == 3
-    index.set_verdict(rel_a, creator="alice", tier=3)
+    index.set_verdict(rel_a, creator="alice", tier=1)
     assert store.stats()["unclassified_total"] == 2
 
 
@@ -126,7 +126,7 @@ def test_unclassified_total_ignores_the_source_filter(store, make_photo):
     rel_x, _ = make_photo(creator="mixed", name="x.jpg")
     index.upsert_photo(rel_ig, source="instagram")
     index.upsert_photo(rel_x, source="x")
-    index.set_verdict(rel_x, creator="mixed", tier=3)
+    index.set_verdict(rel_x, creator="mixed", tier=1)
 
     # Filtered to X the sidebar sees nothing left to do; the archive disagrees.
     scoped = index.creator_verdict_counts(source="x")["mixed"]
@@ -175,7 +175,7 @@ def test_verdict_facet_counts_match_the_filter_each_one_labels(make_photo):
     A facet computed its own way is worse than no facet: it would report a
     pass rate for a filter nobody is running.
     """
-    index = _seed_tiers(make_photo, [0, 0, 1, 2, 3, 4, -1, None, None])
+    index = _seed_tiers(make_photo, [0, 0, 1, 2, 1, 2, -1, None, None])
     facets = index.verdict_facet_counts()
 
     assert facets["total"] == 9
@@ -188,12 +188,11 @@ def test_verdict_facet_shares_are_that_count_over_the_whole_archive(make_photo):
     index = _seed_tiers(make_photo, [0, 0, 1, 2])
     facets = index.verdict_facet_counts()
 
-    assert facets["counts"]["reject"] == 3  # tiers 0, 0, 1 against cut=1
-    assert facets["shares"]["reject"] == 0.75
-    assert facets["shares"]["keep"] == 0.25
+    assert facets["counts"]["reject"] == 2  # tiers 0, 0 against cut=0
+    assert facets["shares"]["reject"] == 0.5
+    assert facets["shares"]["keep"] == 0.5
+    assert facets["counts"]["t1"] == 1
     assert facets["counts"]["t2"] == 1
-    assert facets["counts"]["t3"] == 0
-    assert facets["counts"]["t4"] == 0
     assert facets["shares"]["unclassified"] == 0.0
     assert facets["warn_above"] == DISTRIBUTION_MAX_SHARE
 
@@ -206,7 +205,7 @@ def test_verdict_facet_shares_are_none_on_an_empty_archive():
 
 
 def test_verdict_facets_are_one_query_not_one_per_chip(make_photo):
-    index = _seed_tiers(make_photo, [0, 1, 2, 3])
+    index = _seed_tiers(make_photo, [0, 1, 2, 1])
     statements = []
     # Via the index, not `index._conn`: this read runs on the P1 read-only pool
     # now, so tracing the writer alone would see nothing and the "exactly one
@@ -233,7 +232,7 @@ def test_verdict_facets_ignore_the_source_filter(make_photo):
     rel_x, _ = make_photo(creator="mixed", name="x.jpg")
     index.upsert_photo(rel_ig, source="instagram")
     index.upsert_photo(rel_x, source="x")
-    index.set_verdict(rel_ig, creator="mixed", tier=4)
+    index.set_verdict(rel_ig, creator="mixed", tier=2)
     index.set_verdict(rel_x, creator="mixed", tier=0)
 
     facets = index.verdict_facet_counts()
@@ -249,7 +248,8 @@ def test_stats_route_carries_the_verdict_facets(api, make_photo):
     assert status == 200
     facets = payload["verdict_facets"]
     assert facets["total"] == 4
-    assert facets["counts"]["reject"] == 4
-    assert facets["shares"]["reject"] == 1.0
+    assert facets["counts"]["reject"] == 3
+    assert facets["shares"]["reject"] == 0.75
     assert facets["shares"]["unusable"] == 0.75
+    assert facets["shares"]["keep"] == 0.25
     assert facets["warn_above"] == DISTRIBUTION_MAX_SHARE

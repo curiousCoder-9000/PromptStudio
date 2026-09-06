@@ -432,12 +432,11 @@ CLASSIFY_RETRIES = int(os.environ.get("CLASSIFY_RETRIES", "2"))
 CLASSIFY_KEEP_ALIVE = os.environ.get("CLASSIFY_KEEP_ALIVE", "30m")
 # JSON-schema constrained decoding (Ollama `format`). Off => legacy regex scrape.
 CLASSIFY_STRUCTURED = _env_bool("CLASSIFY_STRUCTURED", "1")
-# Tiers 0..N are rejects; N+1..4 are keeps. The 0-4 tier is what gets persisted,
-# so moving this re-thresholds the whole archive with no re-classify. Default 1
-# = discard the unusable (tier 0) *and* the fully-modest (tier 1). Set to 0 for
-# a cleanup-only pass: the 1<->2 boundary has never been measured, and the one
-# boundary that was (2<->3) came back at 0.576 recall.
-CLASSIFY_REJECT_MAX_TIER = int(os.environ.get("CLASSIFY_REJECT_MAX_TIER", "1"))
+# Classifier exposure scale (v9): 0 reject, 1 revealing/tight, 2 swim/lingerie.
+# Keep/reject is derived at query time: tiers 0..N are rejects. Default 0 means
+# only the reject bucket is discarded; 1 and 2 are keeps.
+EXPOSURE_TIER_MAX = 2
+CLASSIFY_REJECT_MAX_TIER = int(os.environ.get("CLASSIFY_REJECT_MAX_TIER", "0"))
 # Reel contact sheets are kept on disk so the review UI can show what the model
 # actually looked at. `_classify` is in EXCLUDED_FOLDERS, so they stay out of
 # the gallery, the creator list and every rebuild.

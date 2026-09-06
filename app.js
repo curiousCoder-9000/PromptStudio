@@ -1569,7 +1569,7 @@ function updateBulkBar() {
         return;
     }
     // Show as soon as Select is on, even at 0 selected — otherwise there is
-    // no way to hit Select all on a T2/T3/T4 filter without clicking a card.
+    // no way to hit Select all on a T1/T2 filter without clicking a card.
     if (!state.selectMode) {
         elements.bulkBar.style.display = 'none';
         return;
@@ -1860,7 +1860,7 @@ function rejectPillHtml(creator, runningStatus) {
     // already riding along on /api/creators, so no extra request.
     const parts = [
         `${rejects} reject${rejects === 1 ? '' : 's'} to review`,
-        `${Number(creator.unusable_count) || 0} unusable · ${Number(creator.modest_count) || 0} modest`,
+        `${Number(creator.t1_count) || 0} revealing · ${Number(creator.t2_count) || 0} swim`,
         `${Number(creator.keep_count) || 0} keep`,
     ];
     const todo = Number(creator.unclassified_count) || 0;
@@ -1939,7 +1939,7 @@ function selectedCreatorMeta() {
 
 const VERDICT_COUNT_FIELDS = [
     'photo_count', 'keep_count', 'reject_count', 'unusable_count',
-    'modest_count', 't2_count', 't3_count', 't4_count',
+    't1_count', 't2_count',
     'unclassified_count', 'stale_count', 'error_count',
     'disagreement_count',
 ];
@@ -2159,12 +2159,10 @@ function galleryCountLabel() {
 // renderVerdictSelectPassRates() rewrites those to carry scoped counts.
 const VERDICT_FILTER_TITLES = {
     keep: 'Keeps',
-    t4: 'Swim / lingerie (T4)',
-    t3: 'Revealing (T3)',
-    t2: 'Fashion (T2)',
+    t2: 'Swim / lingerie (T2)',
+    t1: 'Revealing / tight (T1)',
     reject: 'Rejects',
-    unusable: 'Unusable (T0)',
-    modest: 'Modest (T1)',
+    unusable: 'Rejects (T0)',
     unclassified: 'Not classified',
     error: 'Classify errors',
     disagreement: 'Corrected (disagree)',
@@ -7262,22 +7260,20 @@ async function startBatchAnalyze() {
 // Keep/reject classification: sidebar section, job chip, review mode,
 // and the triage panel in the lightbox.
 //
-// The model reports a 0-4 exposure tier; the *server* decides which tiers
+// The model reports a 0-2 exposure tier; the *server* decides which tiers
 // are rejects (CLASSIFY_REJECT_MAX_TIER) and sends `verdict` alongside it.
 // Nothing here re-derives that — one threshold, one owner.
 // ─────────────────────────────────────────────────────────────────────
 
 const TIER_LABEL_FALLBACK = {
     '-1': 'Not classified',
-    '0': 'Unusable',
-    '1': 'Fully modest',
-    '2': 'Normal fashion',
-    '3': 'Revealing daywear',
-    '4': 'Swim / lingerie'
+    '0': 'Reject',
+    '1': 'Revealing / tight',
+    '2': 'Swim / lingerie'
 };
 
 // Order matters: it is the order of the chips in the review strip.
-const REVIEW_FILTERS = ['reject', 'unusable', 'modest', 'keep', 'unclassified'];
+const REVIEW_FILTERS = ['reject', 't1', 't2', 'keep', 'unclassified'];
 
 function tierLabel(tier) {
     const key = String(tier);
@@ -7366,12 +7362,9 @@ function verdictBadgeHtml(photo) {
     const isReject = v.verdict === 'reject';
     const shown = effectiveTier(v);
     const title = `${tierLabel(shown)}${v.corrected_tier != null ? ` (model T${Number(v.tier)})` : ''}${v.reason ? ' — ' + v.reason : ''}`;
-    // Rejects name *why* (unusable vs modest are acted on separately); keeps
-    // show the tier, where the number is the interesting part. "T0" on both
-    // told you nothing you could act on.
-    const face = isReject
-        ? (shown === 0 ? 'Unusable' : shown === 1 ? 'Modest' : 'Reject')
-        : `T${shown}`;
+    // Rejects are one pile (T0). Keeps show the tier — T1 revealing/tight vs
+    // T2 swim is the split the filter actually uses.
+    const face = isReject ? 'Reject' : `T${shown}`;
     const corrected = v.corrected_tier != null
         ? '<i class="fa-solid fa-pen verdict-pill-corrected" title="Corrected by hand"></i> '
         : '';
@@ -7992,12 +7985,10 @@ function renderVerdictPassRates() {
 
 const VERDICT_SELECT_COUNT = {
     keep: 'keep_count',
+    t1: 't1_count',
     t2: 't2_count',
-    t3: 't3_count',
-    t4: 't4_count',
     reject: 'reject_count',
     unusable: 'unusable_count',
-    modest: 'modest_count',
     unclassified: 'unclassified_count',
     error: 'error_count',
     disagreement: 'disagreement_count',
@@ -8083,7 +8074,7 @@ function updateReviewBar() {
             // U16 put Keep/Reject on the card, so "click a card to triage" is
             // now wrong in a new way: a click opens the inspector, and the
             // buttons on the tile are what decide.
-            : 'Keep or Reject on a card · K · R · 0–4 tier · X on a focused one · click to open it';
+            : 'Keep or Reject on a card · K · R · 0–2 tier · X on a focused one · click to open it';
     }
 
     // Archive-wide review used to show zeroes on every chip, because the counts
@@ -8091,8 +8082,8 @@ function updateReviewBar() {
     const scoped = scopedVerdictCounts();
     const counts = {
         reject: scoped.reject_count,
-        unusable: scoped.unusable_count,
-        modest: scoped.modest_count,
+        t1: scoped.t1_count,
+        t2: scoped.t2_count,
         keep: scoped.keep_count,
         unclassified: scoped.unclassified_count
     };
@@ -8193,7 +8184,7 @@ function selectNonFavourites() {
 /**
  * Select every path matching the current gallery filter, including items the
  * infinite scroll has not loaded. Favourites are still skipped. Used by
- * review mode and by browse Select on a T2/T3/T4 (or any) filter.
+ * review mode and by browse Select on a T1/T2 (or any) filter.
  */
 async function selectEntirePile() {
     setSelectMode(true);
@@ -8479,7 +8470,7 @@ async function applyCorrectedTier(photo, value) {
     }
 }
 
-/** Next gold value for a click/key on `want` (0–4). Active effective tier
+/** Next gold value for a click/key on `want` (0–2). Active effective tier
  *  clears a correction; the model's own uncorrected tier is a no-op. */
 function nextCorrectedTier(photo, want) {
     const v = photo && photo.verdict;
@@ -8581,7 +8572,7 @@ function handleGridTriageKey(e) {
         promptDeletePhoto(photo);
         return true;
     }
-    if (key >= '0' && key <= '4') {
+    if (key >= '0' && key <= '2') {
         const want = Number(key);
         const next = nextCorrectedTier(photo, want);
         if (next === undefined) return true;
@@ -8624,7 +8615,7 @@ function handleTriageKey(e) {
         return false;
     }
     const key = e.key.toLowerCase();
-    if (key >= '0' && key <= '4') {
+    if (key >= '0' && key <= '2') {
         const photo = currentTriagePhoto();
         if (!photo || !photo.verdict) return false;
         const next = nextCorrectedTier(photo, Number(key));

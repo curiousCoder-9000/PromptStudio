@@ -135,7 +135,7 @@ def test_unfiltered_count_joins_neither_verdicts_nor_labels(index, make_photo):
 
 def test_count_joins_verdicts_only_when_the_verdict_filter_needs_them(index, make_photo):
     rel, _ = make_photo(name="a.jpg")
-    index.set_verdict(rel, tier=4)
+    index.set_verdict(rel, tier=2)
     with sql_trace(index) as seen:
         index.query_photos(verdict="keep", limit=60)
     joined = _counts(seen)
@@ -195,7 +195,7 @@ def test_grid_verdict_carries_exactly_the_fields_a_card_or_triage_panel_reads(
     rel, _ = make_photo(name="a.jpg")
     index.set_verdict(
         rel,
-        tier=4,
+        tier=2,
         reason="strong",
         confidence=0.9,
         prompt_version="v2-structured",

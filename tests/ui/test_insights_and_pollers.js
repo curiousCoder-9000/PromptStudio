@@ -88,9 +88,9 @@ const { Session, Report, sleep } = require('./cdp');
   r.check('failure row has no bar', panel.bars === panel.rows - panel.errorRows,
     `${panel.bars} bars / ${panel.rows} rows`);
 
-  // Fixture cut is tier <= 1, so exactly T0 and T1 carry the reject tag.
+  // Default cut is tier <= 0, so only T0 carries the reject tag.
   r.check('reject tag marks exactly the tiers under the cut',
-    panel.rejectTags === 2, String(panel.rejectTags));
+    panel.rejectTags === 1, String(panel.rejectTags));
 
   const spread = await s.eval(`
     const body = document.getElementById('insightsBody');
@@ -100,9 +100,9 @@ const { Session, Report, sleep } = require('./cdp');
 
   const saturated = await s.eval(`
     document.getElementById('insightsBody').innerHTML = renderClassifyInsights({
-      classified: 100, errors: 0, reject_max_tier: 1,
+      classified: 100, errors: 0, reject_max_tier: 0,
       distribution: { '0': 5, '1': 90, '2': 5 },
-      labels: { '0': 'Unusable', '1': 'Fully modest', '2': 'Normal fashion' },
+      labels: { '0': 'Reject', '1': 'Revealing / tight', '2': 'Swim / lingerie' },
       reject_rate: 0.95, top_tier_share: 0.9, error_rate: 0
     });
     const body = document.getElementById('insightsBody');

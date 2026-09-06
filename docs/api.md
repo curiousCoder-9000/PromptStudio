@@ -36,7 +36,7 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/classify/start` | Background keep/reject classify — one creator, or the whole archive |
 | `GET` | `/api/classify/status` | Classify job progress + tier histogram |
 | `POST` | `/api/classify/cancel` | Cooperative cancel after the current item |
-| `POST` | `/api/classify/verdict` | Pin keep/reject and/or recode the exposure tier (`tier` 0–4) |
+| `POST` | `/api/classify/verdict` | Pin keep/reject and/or recode the exposure tier (`tier` 0–2) |
 | `GET` | `/api/labels` | Taste-label counts, or `?path=` for one row |
 | `PUT` | `/api/labels` | `{path, label}` where label is `1` keep / `-1` discard / `0` clear |
 | `POST` | `/api/labels/seed` | Copy favorites → keep and trash → discard without overwriting |
@@ -218,12 +218,12 @@ Two independent writes. At least one of `verdict` or `tier` is required.
 
 ```json
 { "rel_path": "someone/IMG_9.jpg", "verdict": "keep" }
-{ "rel_path": "someone/IMG_9.jpg", "tier": 3 }
+{ "rel_path": "someone/IMG_9.jpg", "tier": 1 }
 { "rel_path": "someone/IMG_9.jpg", "tier": null }
 ```
 
 - `verdict` is `keep`, `reject`, or `null`/`auto` (clear the keep/reject pin).
-- `tier` is `0`–`4` (human gold label) or `null` (clear it, hand the measurement
+- `tier` is `0`–`2` (human gold label) or `null` (clear it, hand the measurement
   back to the model). It never overwrites `media_verdicts.tier` — that column
   stays the model's call. Filters read `COALESCE(corrected_tier, tier)`.
 - Setting a gold label clears a stale keep/reject pin. A Keep/Reject in the
@@ -470,19 +470,17 @@ this object ([`review_gallery_performance.md`](review_gallery_performance.md)
 |-------|---------------|
 | `reject` | effective verdict is reject (`tier ≤ CLASSIFY_REJECT_MAX_TIER`, or `manual='reject'`) |
 | `keep` | effective verdict is keep |
-| `t2` | effective tier 2 — normal fashion |
-| `t3` | effective tier 3 — revealing daywear |
-| `t4` | effective tier 4 — swim / lingerie |
-| `unusable` | effective tier 0 — the quality gate |
-| `modest` | effective tier 1 — the taste call |
+| `t1` | effective tier 1 — revealing / tight daywear |
+| `t2` | effective tier 2 — swim / lingerie |
+| `unusable` | effective tier 0 — the reject measurement |
 | `error` | classify was attempted and failed; retryable |
 | `unclassified` | no verdict row at all |
 | `disagreement` | gold label set and different from the model's `tier` |
 
-Effective tier is `COALESCE(corrected_tier, tier)`. T0/T1 split `reject`;
-T2/T3/T4 split `keep`. A keep/reject pin is policy and does not move a photo
-out of its measurement chip. Recoding T2→T3 does. Insights/B4 keep grouping
-on the raw model `tier` so gold labels cannot hide a saturated prompt.
+Effective tier is `COALESCE(corrected_tier, tier)`. T0 is `reject`; T1/T2
+split `keep`. A keep/reject pin is policy and does not move a photo out of
+its measurement chip. Recoding T1→T2 does. Insights/B4 keep grouping on the
+raw model `tier` so gold labels cannot hide a saturated prompt.
 
 #### Post grouping
 

@@ -40,7 +40,7 @@ into a column, so every change of mind about where the line sat meant a
 full-archive rescore, and six prompt revisions produced six mutually
 incomparable archives.
 
-Here, **only the measurement is stored**. `media_verdicts.tier` holds the 0–4
+Here, **only the measurement is stored**. `media_verdicts.tier` holds the 0–2
 exposure tier; keep vs reject is derived at query time:
 
 ```sql
@@ -58,51 +58,40 @@ recall risk below survivable.
 
 ## 2. The ontology
 
-`v4-ordinal-frame-v8` (photos) / `v4-reel-sheet-v8` (reels). v8 redefines the
-`2↔3` cut — v7a treated any listed reveal (crop, cleavage, bodycon) as T3 and
-tied upward, which put covering cocktail dresses and award/OOTD shots in the
-keep-hot bucket. T0/T1/T4 garment rules are unchanged.
+`v4-ordinal-frame-v9` (photos) / `v4-reel-sheet-v9` (reels). v9 collapses the
+0–4 scale: T0 absorbs old unusable + modest + covering fashion; T1 is revealing
+*or* tight daywear; T2 is old T4 (swim / lingerie). Tightness counts as a keep.
 
 | Tier | Label | Meaning |
 |------|-------|---------|
-| 0 | Unusable | no woman as main subject · any man in frame · poster/flyer/graphic · unusable quality (blur, pixelation, distortion) |
-| 1 | Fully modest | opaque everyday clothes, skin only face/hands |
-| 2 | Normal fashion | cute/street/event wear, including tight covering dresses; not a sexual keep |
-| 3 | Revealing daywear | sexy daywear a horny viewer would keep: curvy/voluptuous figure AND body as the subject AND a real reveal (or painted-on bodycon on a voluptuous figure) |
-| 4 | Swim / lingerie | bikini, swimwear, lingerie, sheer over bare skin, near-nude |
+| 0 | Reject | no woman · any man in frame · poster/flyer/graphic · unusable quality · covering clothes that are not tight |
+| 1 | Revealing / tight | crop, plunging cleavage, short shorts, tight bodycon/mini, midriff — street/party clothes, not swim |
+| 2 | Swim / lingerie | bikini, swimwear, lingerie, sheer over bare skin, near-nude |
 
 Keep-policy is applied in code after the model returns, because the VLM
-contradicts itself (``brief_reason: bikini set`` with ``exposure_tier: 2``):
+contradicts itself (``brief_reason: bikini set`` with ``exposure_tier: 1``):
 
 - `is_graphic` → 0 (a bikini on an event flyer is still a flyer)
-- `undress_class` or a bikini/lingerie/swimsuit reason → 4
-- T2 + curvy + `body_focus` + (`bare_midriff` or a crop/midriff reason) → 3
-- T3 + `figure` not in `{curvy, voluptuous}` or `body_focus=false` → 2
+- `undress_class` or a bikini/lingerie/swimsuit reason → 2
+- claimed T2 without undress evidence → 1
+- T0 + crop/midriff/tight reason → 1
 
-Missing fields fail open. T4 is never capped by the figure gate.
-
-**Default cut: `tier ≤ 1` is a reject.**
+**Default cut: `tier ≤ 0` is a reject.**
 
 ### The known risk, stated plainly
 
-The `1↔2` boundary has never been measured. The only holdout numbers are for
-`2↔3`, and there recall was **0.576** — meaning a boundary this classifier is
-asked to judge got four in ten wrong in the direction of dropping keepers.
-Cutting at `≤1` will therefore reject some things worth keeping.
-
-v8 flips the `2↔3` error budget the other way on purpose: covering bodycon,
-award/product shots, and non-curvy figures were over-admitted as T3. The
-prompt now ties down when unsure, and `figure` / `body_focus` cap a T3 to 2
-in code. Expect T3 precision to rise and T3 recall to fall; check
-`top_tier_share` after the first rescore.
+The `0↔1` boundary (covering vs tight/revealing) is the new keep line and has
+not been measured on a labelled holdout. v8's measured error was the old
+`2↔3` cut. Check `top_tier_share` after the first v9 rescore — three buckets
+are easier to saturate than five.
 
 Three guards, none of which override the default:
 
-1. **The cut is a config knob, not a stored answer.** `CLASSIFY_REJECT_MAX_TIER=0`
-   narrows rejects to the unambiguous quality gate with no re-classify.
-2. **The review UI splits the pile.** `Unusable (T0)` and `Modest (T1)` are
-   separate chips with separate select-all, so a cautious pass can delete only
-   the tier nobody argues about.
+1. **The cut is a config knob, not a stored answer.** Raising
+   `CLASSIFY_REJECT_MAX_TIER` to 1 would treat revealing/tight as reject with
+   no re-classify.
+2. **The review UI splits keep.** Revealing (T1) and Swim (T2) are separate
+   chips with separate select-all.
 3. **Deletes are soft.** The existing `_trash` flow with Undo, and favourites are
    excluded from "select non-favourites" — the one signal that is unambiguously
    the user's own is never swept up by a machine verdict.
@@ -132,8 +121,8 @@ the auditable evidence; a single rollup number is not. When they disagree,
 
 **Why the confirm pass.** Panels are ~256px wide — enough for "how much skin",
 not for sheer vs opaque. The peak frame is re-read at full resolution when the
-tier lands on a decision boundary (1, 2, 3), when confidence is under 0.5, or
-when a high tier came from the final shot. The confirm supersedes the sheet
+tier lands on T1 (the keep/reject and T1/T2 cut), when confidence is under 0.5,
+or when a keep came from the final shot. The confirm supersedes the sheet
 *except* when it loses a subject the sheet clearly saw.
 
 **The sheet is kept on disk.** `_classify/<creator>/<stem>.sheet.jpg`, served by

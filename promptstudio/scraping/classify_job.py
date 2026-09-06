@@ -6,7 +6,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-from promptstudio.config import EXCLUDED_FOLDERS, MODEL_NAME
+from promptstudio.config import EXCLUDED_FOLDERS, EXPOSURE_TIER_MAX, MODEL_NAME
 from promptstudio.jobs import OLLAMA, BackgroundJob
 from promptstudio.logging_setup import get_logger
 from promptstudio.scraping.media_classifier import (
@@ -37,7 +37,7 @@ class ClassifyJobManager(BackgroundJob):
     @staticmethod
     def _empty_hist() -> Dict[str, int]:
         """Tier buckets. "-1" is the error bucket, not a tier."""
-        return {"-1": 0, "0": 0, "1": 0, "2": 0, "3": 0, "4": 0}
+        return {"-1": 0, **{str(t): 0 for t in range(EXPOSURE_TIER_MAX + 1)}}
 
     def _idle_status(self) -> Dict[str, Any]:
         return {
@@ -75,10 +75,10 @@ class ClassifyJobManager(BackgroundJob):
         if not isinstance(hist, dict):
             hist = self._empty_hist()
             self._status["tier_hist"] = hist
-        key = str(int(tier)) if 0 <= int(tier) <= 4 else "-1"
+        key = str(int(tier)) if 0 <= int(tier) <= EXPOSURE_TIER_MAX else "-1"
         hist[key] = int(hist.get(key, 0)) + 1
 
-        scored = [int(hist.get(str(t), 0)) for t in range(5)]
+        scored = [int(hist.get(str(t), 0)) for t in range(EXPOSURE_TIER_MAX + 1)]
         total_scored = sum(scored)
         errors = int(hist.get("-1", 0))
         total = total_scored + errors

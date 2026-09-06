@@ -217,22 +217,18 @@
                             <option value="photo">Photos</option>
                             <option value="video">Reels</option>
                         </select>
-                        <!-- Verdict as a browse axis. Reject already is T0+T1;
-                             T2/T3/T4 split keep. Labels show how many photos
-                             the filter currently selects in this view. A percent
-                             is appended only when that share of *this view* is
-                             past DISTRIBUTION_MAX_SHARE — never an archive-wide
-                             % next to a per-creator count. Review mode has its
-                             own strip and is unaffected. -->
+                        <!-- Verdict as a browse axis. T0 is reject; T1/T2 split
+                             keep. Labels show how many photos the filter currently
+                             selects in this view. A percent is appended only when
+                             that share of *this view* is past DISTRIBUTION_MAX_SHARE
+                             — never an archive-wide % next to a per-creator count.
+                             Review mode has its own strip and is unaffected. -->
                         <select id="verdictFilterSelect" class="sort-select" title="How many photos each verdict currently selects in this view">
                             <option value="">Any verdict</option>
                             <option value="keep">Keeps</option>
-                            <option value="t4">Swim / lingerie (T4)</option>
-                            <option value="t3">Revealing (T3)</option>
-                            <option value="t2">Fashion (T2)</option>
+                            <option value="t2">Swim / lingerie (T2)</option>
+                            <option value="t1">Revealing / tight (T1)</option>
                             <option value="reject">Rejects</option>
-                            <option value="unusable">Unusable (T0)</option>
-                            <option value="modest">Modest (T1)</option>
                             <option value="unclassified">Not classified</option>
                             <option value="error">Classify errors</option>
                             <option value="disagreement">Corrected (disagree)</option>
@@ -270,7 +266,7 @@
                         <!-- Rewritten per state by updateReviewBar(): the static
                              copy promised click-to-triage while select mode was
                              forced on and made that click impossible. -->
-                        <span class="review-bar-hint" id="reviewBarHint">Keep or Reject on a card · <kbd>K</kbd> keep <kbd>R</kbd> reject · <kbd>0</kbd>–<kbd>4</kbd> tier · <kbd>X</kbd> delete</span>
+                        <span class="review-bar-hint" id="reviewBarHint">Keep or Reject on a card · <kbd>K</kbd> keep <kbd>R</kbd> reject · <kbd>0</kbd>–<kbd>2</kbd> tier · <kbd>X</kbd> delete</span>
                     </div>
                     <!-- Each chip carries its pass rate (B4): the share of the
                          whole archive that filter admits, warning-styled once a
@@ -281,8 +277,8 @@
                          open. Filled by updateReviewBar() from /api/stats. -->
                     <div class="review-bar-filters" id="reviewBarFilters">
                         <button class="filter-chip review-chip active" type="button" data-verdict="reject">Rejects <span class="review-chip-n" data-count="reject">0</span><span class="review-chip-share" data-share="reject" hidden></span></button>
-                        <button class="filter-chip review-chip" type="button" data-verdict="unusable">Unusable <span class="review-chip-n" data-count="unusable">0</span><span class="review-chip-share" data-share="unusable" hidden></span></button>
-                        <button class="filter-chip review-chip" type="button" data-verdict="modest">Modest <span class="review-chip-n" data-count="modest">0</span><span class="review-chip-share" data-share="modest" hidden></span></button>
+                        <button class="filter-chip review-chip" type="button" data-verdict="t1">Revealing <span class="review-chip-n" data-count="t1">0</span><span class="review-chip-share" data-share="t1" hidden></span></button>
+                        <button class="filter-chip review-chip" type="button" data-verdict="t2">Swim <span class="review-chip-n" data-count="t2">0</span><span class="review-chip-share" data-share="t2" hidden></span></button>
                         <button class="filter-chip review-chip" type="button" data-verdict="keep">Keeps <span class="review-chip-n" data-count="keep">0</span><span class="review-chip-share" data-share="keep" hidden></span></button>
                         <button class="filter-chip review-chip" type="button" data-verdict="unclassified">Not classified <span class="review-chip-n" data-count="unclassified">0</span><span class="review-chip-share" data-share="unclassified" hidden></span></button>
                     </div>
@@ -447,11 +443,9 @@
                     <div class="triage-block" id="triageBlock" style="display:none;">
                         <div class="triage-head">
                             <div class="triage-tier-row" id="triageTierRow" role="group" aria-label="Exposure tier">
-                                <button type="button" class="tier-chip t0" data-tier="0" title="Unusable (T0). Wrong bucket — change the tier. Keep/Reject is only the keep line.">T0</button>
-                                <button type="button" class="tier-chip t1" data-tier="1" title="Fully modest (T1). Wrong bucket — change the tier. Keep/Reject is only the keep line.">T1</button>
-                                <button type="button" class="tier-chip t2" data-tier="2" title="Normal fashion (T2). Wrong bucket — change the tier. Keep/Reject is only the keep line.">T2</button>
-                                <button type="button" class="tier-chip t3" data-tier="3" title="Revealing daywear (T3). Wrong bucket — change the tier. Keep/Reject is only the keep line.">T3</button>
-                                <button type="button" class="tier-chip t4" data-tier="4" title="Swim / lingerie (T4). Wrong bucket — change the tier. Keep/Reject is only the keep line.">T4</button>
+                                <button type="button" class="tier-chip t0" data-tier="0" title="Reject (T0). Wrong bucket — change the tier. Keep/Reject is only the keep line.">T0</button>
+                                <button type="button" class="tier-chip t1" data-tier="1" title="Revealing / tight (T1). Wrong bucket — change the tier. Keep/Reject is only the keep line.">T1</button>
+                                <button type="button" class="tier-chip t2" data-tier="2" title="Swim / lingerie (T2). Wrong bucket — change the tier. Keep/Reject is only the keep line.">T2</button>
                             </div>
                             <span class="triage-meta" id="triageMeta"></span>
                         </div>

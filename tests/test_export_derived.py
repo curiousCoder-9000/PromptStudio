@@ -44,7 +44,7 @@ def populated(make_photo):
     PromptCache().set(rel, dict(PROMPT), push_history=False)
     FavoritesStore().set_favorite(rel, True)
     CreatorStyleStore().save({"nina": {"prefix": "shot on film", "n": 5}})
-    index.set_verdict(rel, creator="nina", tier=3, reason="looks good")
+    index.set_verdict(rel, creator="nina", tier=1, reason="looks good")
     index.set_phash(rel, 1234567890)
     index.set_label(rel, 1)
     return rel
@@ -103,7 +103,7 @@ def test_round_trip_restores_every_kind(populated, tmp_path):
     assert FavoritesStore().is_favorite(rel) is True
     assert CreatorStyleStore().load()["nina"]["prefix"] == "shot on film"
     verdict = index.get_verdict(rel)
-    assert verdict["tier"] == 3
+    assert verdict["tier"] == 1
     assert index.get_label(rel)["label"] == 1
 
 

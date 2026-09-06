@@ -41,13 +41,13 @@ const { Session, Report, sleep } = require('./cdp');
   const counts = await s.eval(`
     const c = state.creators[0] || {};
     return { keep: c.keep_count, reject: c.reject_count, unusable: c.unusable_count,
-             modest: c.modest_count, total: c.photo_count };
+             t1: c.t1_count, t2: c.t2_count, total: c.photo_count };
   `);
   r.check('creator carries verdict counters', counts.reject > 0 && counts.keep > 0,
     JSON.stringify(counts));
-  r.check('reject splits into unusable + modest',
-    counts.unusable + counts.modest === counts.reject,
-    `${counts.unusable}+${counts.modest} vs ${counts.reject}`);
+  r.check('keep splits into revealing + swim',
+    counts.t1 + counts.t2 === counts.keep,
+    `${counts.t1}+${counts.t2} vs ${counts.keep}`);
 
   await s.startRecordingFetches();
   await s.eval(`enterReviewMode(${JSON.stringify(creator)}); return true;`);
@@ -587,8 +587,8 @@ const { Session, Report, sleep } = require('./cdp');
     };
   `);
   r.check('triage block opens with the lightbox', triage.visible === 'flex', triage.visible);
-  r.check('stepper has five tiers', triage.buttons === 5, String(triage.buttons));
-  r.check('one tier is pressed', /^[0-4]$/.test(triage.pressed), triage.pressed);
+  r.check('stepper has three tiers', triage.buttons === 3, String(triage.buttons));
+  r.check('one tier is pressed', /^[0-2]$/.test(triage.pressed), triage.pressed);
   r.check('reason is shown', triage.reason.length > 0, triage.reason);
   r.check('no contact sheet for a photo', triage.sheet === 'none', triage.sheet);
 
@@ -597,7 +597,7 @@ const { Session, Report, sleep } = require('./cdp');
     const row = document.getElementById('triageTierRow');
     const on = row.querySelector('[aria-pressed="true"]');
     const current = on ? Number(on.dataset.tier) : 2;
-    const want = current === 3 ? 2 : 3;
+    const want = current === 1 ? 2 : 1;
     const photo = state.photos[state.lightboxIndex];
     const model = photo && photo.verdict ? Number(photo.verdict.tier) : null;
     row.querySelector('[data-tier="' + want + '"]').click();

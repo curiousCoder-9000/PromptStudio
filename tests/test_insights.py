@@ -69,13 +69,13 @@ def test_classify_insights_carry_the_saturation_verdict(store, make_photo, monke
     index = ArchiveIndex.get()
     for i in range(9):
         rel, _ = make_photo(name=f"m{i}.jpg")
-        index.set_verdict(rel, creator="test_creator", tier=3 if i else 0)
+        index.set_verdict(rel, creator="test_creator", tier=1 if i else 0)
 
     guard = compute_insights()["classify"]["saturation"]
     assert guard["measured"] is True
     assert guard["saturated"] is True
-    assert guard["top_bucket"] == "tier 3"
-    assert "tier 3" in guard["message"]
+    assert guard["top_bucket"] == "tier 1"
+    assert "tier 1" in guard["message"]
 
 
 def test_classify_saturation_is_not_judged_on_a_thin_archive(store, make_photo):
@@ -85,7 +85,7 @@ def test_classify_saturation_is_not_judged_on_a_thin_archive(store, make_photo):
     index = ArchiveIndex.get()
     for i in range(3):
         rel, _ = make_photo(name=f"m{i}.jpg")
-        index.set_verdict(rel, creator="test_creator", tier=3)
+        index.set_verdict(rel, creator="test_creator", tier=1)
 
     guard = compute_insights()["classify"]["saturation"]
     assert guard["measured"] is False
@@ -95,7 +95,7 @@ def test_classify_saturation_is_not_judged_on_a_thin_archive(store, make_photo):
 def test_classify_insights_report_gold_labels_without_moving_the_histogram(
     store, make_photo, monkeypatch
 ):
-    """A T2→T3 correction must not make the classifier look healthier."""
+    """A T1→T2 correction must not make the classifier look healthier."""
     from promptstudio import config
     from promptstudio.storage.db import ArchiveIndex
 
@@ -104,15 +104,15 @@ def test_classify_insights_report_gold_labels_without_moving_the_histogram(
     rels = []
     for i in range(8):
         rel, _ = make_photo(name=f"m{i}.jpg")
-        index.set_verdict(rel, creator="test_creator", tier=2)
+        index.set_verdict(rel, creator="test_creator", tier=1)
         rels.append(rel)
-    index.set_corrected_tier(rels[0], 3)
+    index.set_corrected_tier(rels[0], 2)
 
     c = compute_insights()["classify"]
-    assert c["distribution"] == {"2": 8}
+    assert c["distribution"] == {"1": 8}
     assert c["corrections"] == 1
     assert c["disagreements"] == 1
-    assert c["saturation"]["top_bucket"] == "tier 2"
+    assert c["saturation"]["top_bucket"] == "tier 1"
 
 
 def test_classify_saturation_ignores_failed_vision_calls(store, make_photo, monkeypatch):
@@ -124,7 +124,7 @@ def test_classify_saturation_ignores_failed_vision_calls(store, make_photo, monk
     index = ArchiveIndex.get()
     for i in range(4):
         rel, _ = make_photo(name=f"ok{i}.jpg")
-        index.set_verdict(rel, creator="test_creator", tier=3)
+        index.set_verdict(rel, creator="test_creator", tier=1)
     for i in range(6):
         rel, _ = make_photo(name=f"bad{i}.jpg")
         index.set_verdict(rel, creator="test_creator", tier=-1, error="timeout")
