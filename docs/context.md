@@ -12,7 +12,7 @@ Detail on demand: [api.md](api.md) · [instagram_downloader.md](instagram_downlo
 
 ## What it is
 
-Local **Instagram photo archive studio**: scrape creators → store under `~/Pictures/InstagramSaved` → Ollama vision reverse-engineers SD/Flux prompts → optional ComfyUI img2img. Vanilla web UI at `:5000`.
+Local **Instagram photo archive studio**: scrape creators → store under `~/Pictures/InstagramSaved` → smart gallery + keep/reject classifier (Ollama vision). Vanilla web UI at `:5000`. Optional prompt reverse-engineering still lives in the lightbox.
 
 | Layer | Tech | Entry |
 |-------|------|-------|
@@ -21,7 +21,6 @@ Local **Instagram photo archive studio**: scrape creators → store under `~/Pic
 | Vision prompts | Ollama (default `qwen2.5vl:7b`) | `promptstudio.prompts.engine` |
 | Instagram | Instaloader **or** gallery-dl (`IG_BACKEND`) | `promptstudio.scraping.*` |
 | Gallery index | SQLite `archive.db` | `promptstudio.storage.db` |
-| ComfyUI (optional) | HTTP API `:8188` | `promptstudio.comfy.client` |
 
 **Version:** package `2.0.0` · prompt pipeline `v2-structured` · Python **3.14+** on Windows.
 
@@ -35,7 +34,6 @@ pip install -r requirements.txt
 py server.py                          # http://localhost:5000
 py prompt_engine.py [image.jpg]       # smoke-test vision
 # Ollama: http://localhost:11434  ·  model from OLLAMA_VISION_MODEL
-# Comfy:  http://127.0.0.1:8188   ·  optional
 ```
 
 **Verify before claiming done** (`pip install -r requirements-dev.txt`):
@@ -56,7 +54,7 @@ Deps: `instaloader`, `opencv-python-headless`, `Pillow`, `python-dotenv` (`requi
 promptstudio/
   config.py              # ALL env defaults, paths, pacing, models
   logging_setup.py       # lazy logging config; handlers on the promptstudio logger
-  jobs.py                # LeaseRegistry — exclusive ollama/instagram/comfy leases
+  jobs.py                # LeaseRegistry — exclusive ollama / scrape-lane leases
   insights.py            # archive stats/aggregates behind /api/insights
   taste.py               # B2/C1/C3 embeddings, P(keep), semantic rank, kNN dups
   server/
@@ -78,7 +76,6 @@ promptstudio/
     cache.py             # prompts table in archive.db (JSON imported once) + history
     styles.py            # creator_styles.json style prefixes
     batch.py             # background BatchPromptManager
-    comfy_mode.py        # Mode E (outfit/scene only) rewrite
   scraping/
     session.py           # Instaloader + session load
     downloader.py        # saved / creator / following sync (Instagram)
@@ -95,11 +92,6 @@ promptstudio/
       __init__.py        # lazy registry: instagram | x | reddit
       instagram_source.py  # wraps InstagramDownloader; dispatches to gallery-dl when IG_BACKEND=gallery-dl
       gallery_dl_source.py # X + Reddit + InstagramGalleryDlSource (not a registry source)
-  comfy/
-    client.py            # ComfyJobManager (lease + status) · params · runner · batch
-    registry.py          # A4: workflows are data — slot map → injected graph
-    workflows/<name>/{graph.json,slots.json}   # built-ins: pro, txt2img
-                         # user entries: <archive>/_workflows/ (COMFY_WORKFLOWS_DIR)
 scripts/                 # thin CLIs only — logic stays in package
 server.py / prompt_engine.py   # shims
 tests/                   # one test_<concern>.py per module; `ls tests/` for the current set
@@ -113,7 +105,6 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
   #                     skips under DISTRIBUTION_MIN_*; fails a local run on saturation)
   # scraping:           test_filters, test_sources, test_source_dispatch,
   #                     test_source_identity, test_scrape_options
-  # comfy:              test_comfy_seed
   ui/                    # headless-Chrome suites over CDP (run.sh)
 ```
 
@@ -147,12 +138,10 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
 | `sync_state.json` | Per-creator last shortcode / counts |
 | `following_queue.json` | Multi-day following crawl budget |
 | `sync_status.json` | Last sync job status |
-| `generations_index.json` | Comfy outputs index |
 | `promptstudio.log` | Rotating app log (`PROMPTSTUDIO_LOG_FILE=` to disable) |
 | `_journal/<kind>.jsonl` | Append-only run history: `batch_prompt`, `classify`, `sync` |
 | `_classify/<creator>/*.sheet.jpg` | Reel contact sheets — the input a verdict was made from, shown in triage |
 | `_thumbs/` | JPEG thumbs |
-| `_generations/` | Comfy outputs |
 | `_trash/<entry_id>/` | Soft-deleted media + sidecar + `entry.json` manifest |
 | `_no_person_detected/` | Legacy exclude (do not resurrect filter UX) |
 
@@ -176,8 +165,6 @@ tests/                   # one test_<concern>.py per module; `ls tests/` for the
 | `OLLAMA_VISION_MODEL` | `qwen2.5vl:7b` | Vision model (**not** moondream) |
 | `OLLAMA_REWRITE_MODEL` | same as vision | Stage-2 rewrite model |
 | `OLLAMA_URL` | `…/api/generate` | Ollama generate |
-| `COMFYUI_URL` | `http://127.0.0.1:8188` | Comfy API |
-| `COMFYUI_CHECKPOINT` | `juggernautXL_ragnarok.safetensors` | Default ckpt |
 | `IG_*` | see config | Anti-ban delays, daily cap 8, catch-up streak 3, 72h cooldown after a bot warning |
 | `IG_INCLUDE_VIDEOS` | `0` | Creator/following download reels (off — videos trip Instagram) |
 | `IG_POST_RANK` | `1` | Rank feed posts by caption/reel signals |
@@ -201,8 +188,7 @@ Engine id string: `Ollama ({MODEL_NAME}) {PROMPT_PIPELINE_VERSION}` — used for
 1. **Structured vision** — Ollama image → JSON fields: face, hair, body, clothing, pose, expression, lighting, background.
 2. **Erotic rewrite** — text model + optional creator style prefix → positive paragraph.
 3. **Exports** — `flux` / `sdxl` / `pony` / `negative` via `build_export_variants`.
-4. **Mode E** (`comfy_mode.py`) — strip identity; outfit/scene only for IPAdapter ref generate.
-5. **Cache** — write-through JSON; max 3 history snapshots on save/regenerate.
+4. **Cache** — write-through JSON; max 3 history snapshots on save/regenerate.
 
 Stale when `vision_engine` or `pipeline_version` mismatch.
 
@@ -214,13 +200,12 @@ Base: `http://localhost:5000`. Full schemas → [api.md](api.md).
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/health` | Ollama + Comfy reachability |
+| GET | `/api/health` | Ollama reachability |
 | GET | `/api/stats` | photos, creators, `prompts_ready` |
 | GET | `/api/creators` | folders + sync badges |
 | GET | `/api/photos` | `creator`, `search` (prompts **+ caption**; `mode=semantic` for C1), `unanalyzed`, `favorite`, `media_type`, `verdict`, `sort` (incl. `tier`, `foryou`), `group=post`, `collection`, `offset`, `limit` |
 | GET/PUT | `/api/prompt` | get bundle / save edits |
 | POST | `/api/prompt/restore` | history index |
-| POST | `/api/prompt/mode-e` | Mode E rewrite; `apply` |
 | POST | `/api/prompt/batch` | background analyze |
 | GET | `/api/prompt/batch/status` | batch progress (snapshot; no archive scan) |
 | POST | `/api/prompt/batch/cancel` | cooperative cancel after current photo |
@@ -234,8 +219,6 @@ Base: `http://localhost:5000`. Full schemas → [api.md](api.md).
 | GET | `/api/following` | local following_list.json |
 | POST | `/api/sync/{saved,creator,following}` | background jobs |
 | GET | `/api/sync/status` | running + abort + queue |
-| POST | `/api/comfy/generate` | pro (default) or txt2img |
-| GET | `/api/comfy/status` · `/api/generations` | job + history |
 | GET | `/media/...` · `/media/thumb/...` | full / thumb |
 
 CORS: `*`. Methods: GET, POST, PUT, DELETE, OPTIONS. Server is **threaded**.
@@ -268,13 +251,12 @@ Idempotent: skip by `post_id`/`shortcode` in DB + meta. Catch-up stop after `IG_
 | Gallery feels slow | [`review_gallery_performance.md`](review_gallery_performance.md) — live 61k numbers; do not flip FTS5 |
 | Change env/paths/defaults | `promptstudio/config.py` |
 | Vision / rewrite / exports | `promptstudio/prompts/engine.py` |
-| Mode E / Comfy prompt shaping | `promptstudio/prompts/comfy_mode.py` |
 | Prompt cache schema | `promptstudio/prompts/cache.py` (+ `prompts` table in `storage/db.py`) |
 | Gallery query/sort/index | `promptstudio/storage/db.py`, `archive.py` |
+| Recode a classify tier | `media_verdicts.corrected_tier` · `applyCorrectedTier` in `app.js` · [`design_tier_correction.md`](design_tier_correction.md) |
 | Soft delete / restore / purge | `promptstudio/storage/trash.py` (+ `archive.delete_photo`) |
 | Download / rate-limit / filters | `scraping/downloader.py`, `filters.py`, `queue.py` |
 | Add or change a scrape source | `scraping/sources/` — see `docs/multi_source_scraping.md` §7 |
-| Comfy workflow wiring | `comfy/client.py`, `comfy/workflows/*.json` |
 | UI behavior | `app.js` |
 | UI chrome/theme | `style.css`, `index.html` |
 | New CLI | thin wrapper in `scripts/` calling package |
@@ -312,7 +294,6 @@ section drifted four rules behind.
 | [review_ui_product.md](review_ui_product.md) | UI/UX gaps (U1–U11), the loopback-bind correction, Stage-1 fix log |
 | [backlog_features.md](backlog_features.md) | F1–F8 in detail — captions, archive-wide classify, duplicates UI, activity view |
 | [backlog_engineering.md](backlog_engineering.md) | E1–E5 — pollers, `app.js` ownership, runtime reject-cut, verification gaps |
-| [design_generation_loop.md](design_generation_loop.md) | Theme A spec — generations table, rating, outputs gallery, batch, workflow registry |
 | [design_source_filter.md](design_source_filter.md) | Source as a view filter — `photos.source`, never the folder suffix |
 | [design_scrape_lanes.md](design_scrape_lanes.md) | Per-source scrape lanes — one job per platform, lane-scoped cancel/pause/pacing |
 | [scripts/README.md](../scripts/README.md) · [tests/ui/README.md](../tests/ui/README.md) | CLI examples · browser suites |

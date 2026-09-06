@@ -169,6 +169,97 @@ const { Session, Report, sleep } = require('./cdp');
   `);
   await sleep(600);
 
+  // ── select all on a browse filter (T2/T3/T4 piles) ─────────────────
+  r.section('select all on a browse filter');
+
+  const optionOrder = await s.eval(`
+    return [...document.getElementById('verdictFilterSelect').options].map((o) => o.value);
+  `);
+  const t4At = optionOrder.indexOf('t4');
+  const t3At = optionOrder.indexOf('t3');
+  const t2At = optionOrder.indexOf('t2');
+  r.check('T4 is listed before T3 and T2 — that is the keep-hot pile',
+    t4At > 0 && t4At < t3At && t3At < t2At,
+    JSON.stringify(optionOrder));
+
+  const barBefore = await s.eval(`
+    return getComputedStyle(document.getElementById('bulkBar')).display;
+  `);
+  r.check('bulk bar is hidden before Select is on', barBefore === 'none', barBefore);
+
+  const barOn = await s.eval(`
+    const sel = document.getElementById('verdictFilterSelect');
+    sel.value = 't2';
+    sel.dispatchEvent(new Event('change'));
+    setSelectMode(true);
+    const bar = document.getElementById('bulkBar');
+    const loaded = document.getElementById('bulkSelectLoadedBtn');
+    const pile = document.getElementById('bulkSelectPileBtn');
+    const del = document.getElementById('bulkDeleteBtn');
+    return {
+      display: getComputedStyle(bar).display,
+      count: document.getElementById('bulkCount').textContent.trim(),
+      loaded: loaded ? loaded.textContent.trim() : null,
+      pileDisplay: pile ? getComputedStyle(pile).display : null,
+      deleteDisabled: del ? del.disabled : null,
+      selectMode: state.selectMode,
+      browse: state.browseVerdict
+    };
+  `);
+  await sleep(400);
+  r.check('Select shows the bulk bar at 0 selected', barOn.display === 'flex',
+    JSON.stringify(barOn));
+  r.check('Select all is on the bar immediately',
+    /select all/i.test(barOn.loaded || ''), barOn.loaded);
+  r.check('Select all-of-pile is hidden when the page is the whole filter',
+    barOn.pileDisplay === 'none', barOn.pileDisplay);
+  r.check('Delete stays disabled until something is selected',
+    barOn.deleteDisabled === true, String(barOn.deleteDisabled));
+
+  const forced = await s.eval(`
+    state.photoHasMore = true;
+    state.photoTotal = 400;
+    updateBulkBar();
+    const pile = document.getElementById('bulkSelectPileBtn');
+    const loaded = document.getElementById('bulkSelectLoadedBtn');
+    return {
+      pileLabel: pile.textContent.trim(),
+      pileDisplay: getComputedStyle(pile).display,
+      loaded: loaded.textContent.trim(),
+      count: document.getElementById('bulkCount').textContent.trim()
+    };
+  `);
+  r.check('a large T2 pile offers Select all of the true total',
+    forced.pileDisplay !== 'none' && /Select all 400/.test(forced.pileLabel),
+    JSON.stringify(forced));
+  r.check('the loaded-page sweep is labelled as loaded, not as the pile',
+    /loaded/i.test(forced.loaded), forced.loaded);
+
+  await s.resetFetchLog();
+  const piled = await s.eval(`
+    return selectEntirePile().then(() => true);
+  `);
+  r.check('selectEntirePile runs outside review mode', piled === true, String(piled));
+  await sleep(600);
+  const pileLog = (await s.fetchLog()).calls.filter((u) => u.includes('/api/photos'));
+  r.check('browse Select all requests ids=1 with the T2 filter',
+    pileLog.some((u) => u.includes('ids=1') && u.includes('verdict=t2')),
+    pileLog[0] || '');
+
+  await s.eval(`
+    state.photoHasMore = false;
+    state.photoTotal = state.photos.length;
+    setSelectMode(false);
+    const sel = document.getElementById('verdictFilterSelect');
+    sel.value = '';
+    sel.dispatchEvent(new Event('change'));
+    return true;
+  `);
+  await sleep(500);
+  r.check('leaving Select hides the bulk bar', await s.eval(`
+    return getComputedStyle(document.getElementById('bulkBar')).display;
+  `) === 'none');
+
   // ── review mode replaces the view controls ─────────────────────────
   r.section('review mode vs browse filter');
 

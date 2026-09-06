@@ -10,8 +10,8 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | Method | Endpoint | Description |
 | :--- | :--- | :--- |
 | `GET` | `/api/stats` | Photos, creators, `prompts_ready` |
-| `GET` | `/api/insights` | Quality dashboard — prompt edit/regenerate rates, generation counts, classify tier distribution |
-| `GET` | `/api/health` | Ollama + Comfy reachability + models + job leases |
+| `GET` | `/api/insights` | Quality dashboard — prompt edit/regenerate rates, classify tier distribution |
+| `GET` | `/api/health` | Ollama reachability + models + job leases |
 | `GET` | `/api/journal` | Run history for a background job kind |
 | `GET` | `/api/creators` | Creator folders with counts + cover + sync meta + keep/reject counters. `?source=` scopes them |
 | `GET` | `/api/creator/style` | Learned style prefix for a creator |
@@ -29,7 +29,6 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `GET` | `/api/prompt` | Vision prompt bundle (`path`, optional `refresh`) — includes `history` |
 | `PUT` | `/api/prompt` | Save edited positive/negative prompts + tags |
 | `POST` | `/api/prompt/restore` | Restore a prior prompt from history |
-| `POST` | `/api/prompt/mode-e` | Mode E rewrite (outfit/scene; optional `apply`) |
 | `PUT` | `/api/favorite` | Toggle or set favorite flag |
 | `POST` | `/api/prompt/batch` | Background batch analyze (`creator`, `force`, `limit`, `paths`) |
 | `GET` | `/api/prompt/batch/status` | Batch job progress (cheap — snapshot, no archive scan) |
@@ -37,7 +36,7 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/classify/start` | Background keep/reject classify — one creator, or the whole archive |
 | `GET` | `/api/classify/status` | Classify job progress + tier histogram |
 | `POST` | `/api/classify/cancel` | Cooperative cancel after the current item |
-| `POST` | `/api/classify/verdict` | Pin one file — or `rel_paths[]` — to keep/reject by hand (or clear) |
+| `POST` | `/api/classify/verdict` | Pin keep/reject and/or recode the exposure tier (`tier` 0–4) |
 | `GET` | `/api/labels` | Taste-label counts, or `?path=` for one row |
 | `PUT` | `/api/labels` | `{path, label}` where label is `1` keep / `-1` discard / `0` clear |
 | `POST` | `/api/labels/seed` | Copy favorites → keep and trash → discard without overwriting |
@@ -59,16 +58,6 @@ Agent map: [context.md](context.md). Routes implemented in `promptstudio/server/
 | `POST` | `/api/scrape/cancel` | Cancel pending job or all pending (`scope`) |
 | `POST` | `/api/scrape/pause` | Pause drain. Optional `source` — omitted pauses every lane |
 | `POST` | `/api/scrape/resume` | Resume + try drain. Optional `source` |
-| `POST` | `/api/comfy/generate` | Queue ComfyUI Pro (ref) or txt2img |
-| `GET` | `/api/comfy/status` | ComfyUI job progress |
-| `POST` | `/api/comfy/batch` | Batch generate — `paths[]` or `/api/photos` filters |
-| `GET` | `/api/comfy/batch/status` | Batch generate progress |
-| `POST` | `/api/comfy/batch/cancel` | Cooperative cancel + in-flight interrupt |
-| `GET` | `/api/workflows` | ComfyUI workflow registry — `name`, `label`, `kind` |
-| `GET` | `/api/generations` | Saved generations for a source photo |
-| `GET` | `/api/generations/list` | Outputs gallery — filter, sort, paginate |
-| `PUT` | `/api/generation/rate` | Rate one output: `-1` discard · `0` unrated · `1` keep · `2` star |
-| `DELETE` | `/api/generation` | Delete one output — **permanent, no trash** |
 | `GET` | `/media/<path>` | Full-resolution image or video |
 | `GET` | `/media/thumb/<path>` | Generated JPEG thumbnail |
 
@@ -102,7 +91,7 @@ source filter. Reading the sidebar's per-creator `unclassified_count` instead (w
 was classified while another platform's backlog was untouched.
 
 `verdict_facets` is the **B4 pass rate** of every verdict filter: one grouped query for
-all nine buckets, from the same predicates `/api/photos?verdict=` filters with, so a
+all ten buckets, from the same predicates `/api/photos?verdict=` filters with, so a
 chip's badge can never describe a filter nobody is running. Rides on this route rather
 than getting its own because the refresh points already match — app init, and the end of
 a classify run. Archive-wide and never scoped for the same reason `unclassified_total`
@@ -121,7 +110,7 @@ every call — and `/api/stats` runs on every app init.
 ### `GET /api/insights`
 
 Phase 13 B1 quality dashboard. Read-only aggregates over data already on disk
-(prompt `manual_edit` / `history`, the `generations` table).
+(prompt `manual_edit` / `history`, classifier tiers, taste labels).
 No new scoring jobs.
 
 ```json
@@ -134,45 +123,9 @@ No new scoring jobs.
     "regenerate_rate": 0.1214,
     "avg_history_depth": 0.18,
     "by_pipeline_version": { "v2-structured": 420 }
-  },
-  "generations": {
-    "sources_with_gens": 12,
-    "total_outputs": 28,
-    "avg_per_source": 2.333,
-    "sources_with_multiple": 5,
-    "rated": 17,
-    "kept": 11,
-    "discarded": 6,
-    "starred": 3,
-    "keep_rate": 0.6471,
-    "unreproducible": 4,
-    "by_prompt_version": {
-      "Ollama (qwen2.5vl:7b) v2-structured": {
-        "total": 20, "rated": 14, "kept": 10, "keep_rate": 0.7143
-      }
-    },
-    "by_workflow":   { "pro": { "total": 24, "rated": 15, "kept": 11, "keep_rate": 0.7333 } },
-    "by_checkpoint": { "juggernautXL_ragnarok.safetensors": { "…": "…" } },
-    "by_mode_e":     { "on":  { "…": "…" }, "off": { "…": "…" } }
   }
 }
 ```
-
-`keep_rate = kept / rated`, **not** `kept / total` — an unrated output is not
-evidence either way, and dividing by the total would make the number drift
-toward zero as the archive grows instead of measuring anything. It is `null`
-until something is rated, because `0.0` would read as a damning score for an
-archive nobody has judged yet.
-
-The four cuts are what make it actionable: one archive-wide rate says the loop
-is or is not working, but not which half to change. `by_mode_e` is not in
-[design_generation_loop.md](design_generation_loop.md) §3.3's list of three,
-but §3.3 names "is Mode E worth it" as a question the cuts should answer and
-none of the named three splits on it.
-
-`unreproducible` counts rows with `seed < 0` — generations imported from the
-pre-A0 JSON index, whose seed was never recorded and cannot be recovered. It is
-the only measure of success criterion #1 ("100% of new rows reproducible").
 
 A `classify` block reports the tier distribution over everything classified:
 
@@ -202,12 +155,12 @@ discriminating whatever the prompt claims — the previous one shipped at 0.85 a
 nothing was reading it. See [design_media_classifier.md](design_media_classifier.md) §5.
 
 `saturation` is that number with the **B4 verdict** attached, from the one rule in
-`insights.saturation_report`. `generations` carries the same block over rated outputs
-only — `keep_rate`'s own denominator, because counting unrated rows as a bucket would
-fire on every archive nobody has judged yet. `measured` is `false` below `min_n`
-(`DISTRIBUTION_MIN_CLASSIFIED` / `DISTRIBUTION_MIN_RATED`), which is a different answer
-from "measured and fine"; `message` names the bucket, its share and the denominator, so
-the failing check in `tests/test_distribution_guard.py` tells you where to look.
+`insights.saturation_report`. Taste labels and P(keep) carry the same block over
+their own denominators. `measured` is `false` below `min_n`
+(`DISTRIBUTION_MIN_CLASSIFIED` / `DISTRIBUTION_MIN_RATED`), which is a different
+answer from "measured and fine"; `message` names the bucket, its share and the
+denominator, so the failing check in `tests/test_distribution_guard.py` tells
+you where to look.
 
 ### `POST /api/classify/start`
 
@@ -261,29 +214,40 @@ the item in flight, since a vision call is not interruptible.
 
 ### `POST /api/classify/verdict`
 
+Two independent writes. At least one of `verdict` or `tier` is required.
+
 ```json
 { "rel_path": "someone/IMG_9.jpg", "verdict": "keep" }
+{ "rel_path": "someone/IMG_9.jpg", "tier": 3 }
+{ "rel_path": "someone/IMG_9.jpg", "tier": null }
 ```
 
-`verdict` is `keep`, `reject`, or `null` (clear the override and fall back to the
-model's tier). Returns `{"status": "ok", "verdict": {…}}` with the refreshed
-block, or `404 {"status": "not_classified"}` when the file has no verdict row —
-there is no tier to override yet.
+- `verdict` is `keep`, `reject`, or `null`/`auto` (clear the keep/reject pin).
+- `tier` is `0`–`4` (human gold label) or `null` (clear it, hand the measurement
+  back to the model). It never overwrites `media_verdicts.tier` — that column
+  stays the model's call. Filters read `COALESCE(corrected_tier, tier)`.
+- Setting a gold label clears a stale keep/reject pin. A Keep/Reject in the
+  same body is applied after, so a deliberate pin still sticks.
+
+Returns `{"status": "ok", "verdict": {…}}` with the refreshed block, or
+`404 {"status": "not_classified"}` when the file has no verdict row — there is
+no measurement to override yet.
 
 Bulk form (U13 — rescue a reject pile without opening each card):
 
 ```json
 { "rel_paths": ["someone/a.jpg", "someone/b.jpg"], "verdict": "keep" }
+{ "rel_paths": ["someone/a.jpg", "someone/b.jpg"], "tier": 3 }
 ```
 
-Returns `{"status": "ok", "verdict": "keep", "updated": […], "missing": […],
-"verdicts": { "<rel>": {…} }}`. Unclassified paths land in `missing` and are
-not invented. Cap is `MAX_PHOTO_IDS_API` (default 10 000). Sending both
-`rel_path` and `rel_paths` prefers the list. A one-item `rel_paths` still uses
-the bulk shape, so existing single-path clients are unchanged.
+Returns `{"status": "ok", "updated": […], "missing": […], "verdicts": { "<rel>": {…} }}`
+plus `verdict` and/or `tier` echoing what was sent. Unclassified paths land in
+`missing` and are not invented. Cap is `MAX_PHOTO_IDS_API` (default 10 000).
+Sending both `rel_path` and `rel_paths` prefers the list. A one-item `rel_paths`
+still uses the bulk shape, so existing single-path clients are unchanged.
 
-The override is stored separately from the tier, so it survives a re-classify and
-a soft delete + Undo.
+Both the keep/reject pin and the gold label survive a re-classify and a soft
+delete + Undo.
 
 ### `GET /api/classify/sheet?rel_path=creator/reel.mp4`
 
@@ -347,13 +311,13 @@ Probes Ollama at `http://localhost:11434/api/tags` (1.5s timeout).
   "model": "qwen2.5vl:7b",
   "model_ready": true,
   "models": ["qwen2.5vl:7b", "moondream:latest"],
-  "leases": { "ollama": "batch_prompt", "instagram": null, "comfy": null },
+  "leases": { "ollama": "batch_prompt", "instagram": null },
   "instagram_backend": "instaloader",
   "instagram_cookies": { "mode": "none", "ready": false }
 }
 ```
 
-When Ollama is down: `{ "ollama": false, ... }`. Also includes `comfy` / `url` for ComfyUI reachability.
+When Ollama is down: `{ "ollama": false, ... }`.
 
 `instagram_backend` is `instaloader` or `gallery-dl` (`IG_BACKEND`).
 `instagram_cookies` is `{mode, ready}` plus `browser` when cookies come from
@@ -397,261 +361,6 @@ objects in a response. Read the raw lines at
 `<archive>/_journal/<kind>.jsonl` when per-item detail is needed.
 
 `outcome` is `ok` | `error` | `cancelled`.
-
-### `POST /api/prompt/mode-e`
-
-Rewrite prompts for Comfy **Mode E** (outfit/scene only; identity from reference image).
-
-```json
-{
-  "path": "creator/file.jpg",
-  "positive_prompt": "optional override",
-  "negative_prompt": "optional override",
-  "apply": false
-}
-```
-
-Returns `positive_prompt`, `negative_prompt`, `anti_terms`, `source` (`structured` | `stripped` | `fallback`). When `apply: true`, saves into the prompt cache.
-
-### `POST /api/comfy/generate`
-
-Requires ComfyUI at `COMFYUI_URL` (default `http://127.0.0.1:8188`). Defaults `use_mode_e: true`; also accepts `denoise`, `steps`, `cfg_scale`, `seed`.
-
-```json
-{
-  "path": "creator/file.jpg",
-  "workflow": "pro",
-  "variant": "pro",
-  "positive_prompt": "optional override",
-  "negative_prompt": "optional override",
-  "use_mode_e": true,
-  "denoise": 0.70,
-  "steps": 32,
-  "cfg_scale": 6.0,
-  "seed": null,
-  "checkpoint": null
-}
-```
-
-`workflow` is a **registry name** from [`GET /api/workflows`](#get-apiworkflows) — an
-unknown one is a `400` naming what is available, not a silent fall-through to txt2img.
-Two ship with the package:
-
-- **`workflow: "pro"`** (default) — `kind: img2img`. Uploads the archive photo to ComfyUI and runs the `modelToimage_pro` graph (IPAdapter face+body, OpenPose, img2img denoise, FaceDetailer) from `promptstudio/comfy/workflows/pro/`. Checkpoint defaults to `juggernautXL_ragnarok.safetensors`.
-- **`workflow: "txt2img"`** — `kind: txt2img`. Bare CheckpointLoader → EmptyLatent graph (what `variant` `sdxl` / `flux` / `pony` used to force).
-
-Which defaults apply — `steps` / `cfg` / `denoise`, and whether Mode E runs — follows the
-workflow's declared `kind`, not its name, so a third `img2img` entry behaves like `pro`
-without a code change.
-
-Outputs are saved under `_generations/<creator>/` and indexed in `generations_index.json`.
-
-### `GET /api/comfy/status`
-
-```json
-{ "running": true, "progress": "Generating…", "source_path": "…", "result": null }
-```
-
-### `POST /api/comfy/batch`
-
-Batch generate (A2). Selection is either `paths` — the gallery's multi-select —
-or the same filter vocabulary `/api/photos` accepts. Every other key is a
-generation override applied to all items, identical in meaning to
-`/api/comfy/generate`.
-
-```json
-{
-  "paths": ["creator/a.jpg", "creator/b.jpg"],
-  "creator": "nina",
-  "favorite": false,
-  "media_type": "photo",
-  "verdict": "keep",
-  "source": "instagram",
-  "limit": 50,
-  "workflow": "pro",
-  "seed": null
-}
-```
-
-```json
-{
-  "status": "started",
-  "batch_id": "9f2c1a7b40de",
-  "pending": 47,
-  "skipped_no_prompt": 3,
-  "skipped_video": 0,
-  "capped": false
-}
-```
-
-- `409` with `status: "busy"` when the `comfy` lease is held — the message names
-  the holder, whether that is a one-shot generate or another batch.
-- `503` with `status: "offline"` when ComfyUI is unreachable.
-- `200` with `status: "nothing_to_do"` when the selection resolved to nothing;
-  the skip counts still come back, so "why did nothing happen" is answerable.
-
-**Skips are counted, never fixed.** A photo with no prompt is reported, not
-auto-analyzed — chaining the two jobs is out of scope (design §9). Videos are
-skipped because img2img has no meaningful reference frame. `COMFY_BATCH_MAX`
-(default 200) caps one enqueue and sets `capped`.
-
-Every row written by the run carries `batch_id`, so
-`GET /api/generations/list?batch_id=…` is the contact sheet for it.
-
-### `GET /api/comfy/batch/status`
-
-```json
-{
-  "running": true, "batch_id": "9f2c1a7b40de", "total": 47,
-  "completed": 12, "failed": 1, "pending": 34, "current": "nina/x.jpg",
-  "cancelled": false, "cancel_requested": false,
-  "skipped_no_prompt": 3, "skipped_video": 0, "workflow": "pro"
-}
-```
-
-`pending` is snapshotted at start and decremented per item — never recomputed
-per poll, which would be a full archive scan every four seconds.
-
-### `POST /api/comfy/batch/cancel`
-
-```json
-{ "status": "cancelling", "running": true }
-```
-
-Two-level. The cooperative flag drains the remaining queue; the item already on
-the GPU is interrupted via ComfyUI's `/interrupt`, but **only** when our
-`prompt_id` is the head of `/queue` — otherwise cancelling a PromptStudio batch
-would kill an unrelated job started from the ComfyUI tab. The pending copy is
-dropped by id either way.
-
-This inverts `/api/prompt/batch/cancel`, which finishes the in-flight photo.
-Both are right: a half-written prompt poisons the cache, whereas nothing here is
-persisted until the image is downloaded.
-
-`{ "status": "idle" }` when no batch is running.
-
-### `GET /api/workflows`
-
-The A4 workflow registry, for the generate picker.
-
-```json
-{
-  "workflows": [
-    { "name": "pro",     "label": "Pro (reference)",       "kind": "img2img" },
-    { "name": "txt2img", "label": "Txt2img (no reference)", "kind": "txt2img" }
-  ],
-  "default": "pro"
-}
-```
-
-A workflow is a directory of two files — `graph.json` (a ComfyUI **Export (API)**
-dump, untouched) and `slots.json` (where this app's runtime values go). Built-ins
-live in `promptstudio/comfy/workflows/`; the user's own live in
-`COMFY_WORKFLOWS_DIR` (default `<archive>/_workflows`) and **shadow** a built-in
-of the same name.
-
-Node ids are deliberately not in the response: the client picks a name, the
-server owns the injection. A directory that fails validation is left out of the
-list and the reason logged — `pro` staying usable matters more than surfacing a
-broken import here.
-
-`default` is always one of `workflows`, so the picker can never preselect a name
-that is not offered.
-
-There is **no import route yet** (design §3.6's upload → propose → remap flow).
-Its gate needs a running ComfyUI for `/object_info` validation, so it is deferred;
-today a workflow is installed by dropping the two files into
-`COMFY_WORKFLOWS_DIR`, and E1's `workflows` kind backs them up.
-
-### `GET /api/generations?path=creator/file.jpg`
-
-```json
-{ "path": "…", "generations": [{ "primary_url": "/media/_generations/…", "files": [] }] }
-```
-
-Reads the legacy `generations_index.json`, unchanged for lightbox back-compat.
-The `generations` table in `archive.db` is the source of truth for everything
-added since A0 (full prompts, real seed, rating).
-
-### `GET /api/generations/list`
-
-The outputs gallery (A1). Mirrors `/api/photos`: same `offset` / `limit` /
-`has_more` / `total` contract, so the existing paging works unchanged.
-
-Query: `creator`, `workflow`, `checkpoint`, `batch_id`, `source` (a source
-`rel_path`), `rating` (`-1|0|1|2`), `rated_only=1`, `since` / `until` (ISO or
-`YYYY-MM-DD`; date-only `until` is inclusive of that day), `has_source=1|0`,
-`sort`, `offset`, `limit`.
-
-`rating=0` filters to the **unrated**; omitting the parameter means no filter.
-`rated_only=1` is the different question — everything judged either way.
-
-`sort` ∈ `newest` (default) · `oldest` · `rating` · `source`. An unrecognised
-value falls back to `newest` rather than erroring: it is whitelisted against an
-`ORDER BY` fragment, which cannot be parameterised, so a stale bookmark must not
-be able to reach SQL or 500.
-
-```json
-{
-  "generations": [{
-    "gen_id": "8f3c…", "rel_path": "_generations/nina/x_gen_1.png",
-    "url": "/media/_generations/…", "thumb_url": "/media/thumb/_generations/…",
-    "source_rel": "nina/photo.jpg", "creator": "nina",
-    "seed": 987654321, "seed_recorded": true,
-    "workflow": "pro", "checkpoint": "…", "steps": 32, "cfg": 6.0,
-    "denoise": 0.7, "mode_e": true, "prompt_version": "…",
-    "positive_prompt": "…", "negative_prompt": "…",
-    "rating": 2, "rated_at": "…", "batch_id": null, "created_at": "…",
-    "has_source": true, "source_thumb_url": "/media/thumb/…"
-  }],
-  "total": 412, "offset": 0, "limit": 200, "has_more": true,
-  "facets": { "creators": [], "workflows": [], "checkpoints": [] }
-}
-```
-
-`seed_recorded` is `false` for rows imported from the pre-A0 JSON index, whose
-seed was never written down (`seed = -1`). The UI must show "seed not recorded"
-and disable regenerate-same-seed for those rather than offering a button that
-cannot reproduce anything.
-
-`facets` lists the values actually present, so a checkpoint since removed from
-ComfyUI still appears as a filter for the outputs it produced.
-
-### `DELETE /api/generation?gen_id=…`
-
-**Permanent. Does not use `_trash/`** — the deliberate asymmetry with
-`DELETE /api/photo`. Archive media is unrecoverable; a generation carries its
-own seed, prompt and checkpoint and is reproducible by construction, so a
-restore path would be dead weight. Say so in the confirm copy.
-
-Row is dropped first, file second, and the file only through
-`ArchiveStore.resolve_path` — a row whose `rel_path` escapes the archive drops
-the row and unlinks nothing (`file_removed: false`). A row without its file is
-recoverable; the reverse is not.
-
-| Status | When |
-|--------|------|
-| `200` | `{"status":"deleted","gen_id":…,"rel_path":…,"file_removed":true}` |
-| `400` | missing `gen_id` |
-| `404` | unknown `gen_id` |
-
-### `PUT /api/generation/rate`
-
-```json
-{ "gen_id": "8f3c…", "rating": 2 }
-```
-
-`rating` is one ordinal: `-1` discard · `0` unrated · `1` keep · `2` star.
-Setting `0` clears `rated_at` — a withdrawn verdict must not keep counting as
-rated.
-
-| Status | When |
-|--------|------|
-| `200` | `{"status":"ok","gen_id":…,"rating":…}` |
-| `400` | missing `gen_id`, or a rating off the scale. A **string** `"2"` is also 400 — the value is not coerced, so a client bug surfaces instead of storing something the caller did not mean |
-| `404` | unknown `gen_id` |
-
-Feeds `keep_rate` on [`GET /api/insights`](#get-apiinsights).
 
 ### `GET /api/following`
 
@@ -707,6 +416,7 @@ Query: `creator`, `search`, `mode` (`text` | `semantic` — C1 cosine over taste
         "verdict": "reject",
         "tier": 1,
         "manual": null,
+        "corrected_tier": null,
         "reason": "crewneck sweater",
         "confidence": 0.82,
         "prompt_version": "v4-ordinal-frame-v7a",
@@ -738,7 +448,11 @@ this object ([`review_gallery_performance.md`](review_gallery_performance.md)
   still carries every slide. Paging by `photos.length` when grouped skips content.
 
 - `verdict` is **absent** on rows that have never been classified — its presence is the "has a verdict" test.
-- `verdict.verdict` is derived server-side from `tier` against `CLASSIFY_REJECT_MAX_TIER` (or from `manual` when set). Clients must not re-derive it; the threshold is configurable and would drift.
+- `verdict.verdict` is derived server-side from the **effective** tier
+  (`COALESCE(corrected_tier, tier)`) against `CLASSIFY_REJECT_MAX_TIER` (or from
+  `manual` when set). Clients must not re-derive it; the threshold is configurable
+  and would drift. `verdict.tier` is the **model** measurement. Display the
+  COALESCE; a non-null `corrected_tier` is the gold label.
 
 - `search` matches creator, filename, cached prompt text/tags, and the **post caption**
   (plus `author` on gallery-dl sources). The caption is the only human-written text in the
@@ -756,17 +470,19 @@ this object ([`review_gallery_performance.md`](review_gallery_performance.md)
 |-------|---------------|
 | `reject` | effective verdict is reject (`tier ≤ CLASSIFY_REJECT_MAX_TIER`, or `manual='reject'`) |
 | `keep` | effective verdict is keep |
-| `t2` | raw tier 2 only, no manual override — normal fashion |
-| `t3` | raw tier 3 only, no manual override — revealing daywear |
-| `t4` | raw tier 4 only, no manual override — swim / lingerie |
-| `unusable` | raw tier 0 only, no manual override — the quality gate |
-| `modest` | raw tier 1 only, no manual override — the taste call |
+| `t2` | effective tier 2 — normal fashion |
+| `t3` | effective tier 3 — revealing daywear |
+| `t4` | effective tier 4 — swim / lingerie |
+| `unusable` | effective tier 0 — the quality gate |
+| `modest` | effective tier 1 — the taste call |
 | `error` | classify was attempted and failed; retryable |
 | `unclassified` | no verdict row at all |
+| `disagreement` | gold label set and different from the model's `tier` |
 
-Raw-tier views (`unusable`/`modest`/`t2`/`t3`/`t4`) ignore a hand override on
-purpose: T0/T1 split `reject`, T2/T3/T4 split `keep`, and a manual keep/reject is
-not evidence about the classifier's bucket. A hand-kept file drops out of all five.
+Effective tier is `COALESCE(corrected_tier, tier)`. T0/T1 split `reject`;
+T2/T3/T4 split `keep`. A keep/reject pin is policy and does not move a photo
+out of its measurement chip. Recoding T2→T3 does. Insights/B4 keep grouping
+on the raw model `tier` so gold labels cannot hide a saturated prompt.
 
 #### Post grouping
 

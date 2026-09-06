@@ -170,7 +170,7 @@ const { Session, Report, sleep } = require('./cdp');
 
   const noPollWhileHidden = await s.eval(`
     return [
-      state.healthPollTimer, state.comfyPollTimer, state.scrapePollTimer,
+      state.healthPollTimer, state.scrapePollTimer,
       state.syncPollTimer, state.batchPollTimer, state.classifyPollTimer
     ].filter((t) => t !== null).length;
   `);

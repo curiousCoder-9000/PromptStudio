@@ -250,6 +250,79 @@ def test_unknown_path_has_no_hash():
     assert ArchiveIndex.get().get_phash("nobody/nothing.jpg") is None
 
 
+def _insert_raw_phash(index: ArchiveIndex, rel: str, value: int) -> None:
+    """Bypass canonicalize-on-write so a case-mismatched row can exist."""
+    from datetime import datetime, timezone
+
+    with index._lock:
+        index._conn.execute(
+            "INSERT INTO phashes(rel_path, phash, computed_at) VALUES (?, ?, ?)",
+            (rel, phash_hex(value), datetime.now(timezone.utc).isoformat()),
+        )
+        index._conn.commit()
+
+
+def test_set_phash_stores_the_catalog_path(make_photo):
+    rel, _ = make_photo(creator="nina", name="a.jpg")
+    index = ArchiveIndex.get()
+    index.set_phash("Nina/a.jpg", 7)
+    assert index.get_phash(rel) == 7
+    assert index.get_phash("Nina/a.jpg") == 7
+    assert rel in index.all_phashes()
+    assert "Nina/a.jpg" not in index.all_phashes()
+
+
+def test_missing_phash_treats_case_mismatch_as_present(make_photo):
+    rel, _ = make_photo(creator="nina", name="a.jpg")
+    index = ArchiveIndex.get()
+    _insert_raw_phash(index, "Nina/a.jpg", 1)
+    assert rel not in index.paths_missing_phash()
+
+
+def test_remap_phash_paths_to_photos_rewrites_casing(make_photo):
+    rel, _ = make_photo(creator="nina", name="a.jpg")
+    index = ArchiveIndex.get()
+    _insert_raw_phash(index, "Nina/a.jpg", 11)
+    assert index.remap_phash_paths_to_photos() == 1
+    assert index.remap_phash_paths_to_photos() == 0
+    assert index.get_phash(rel) == 11
+    with index._read() as conn:
+        stored = [
+            r["rel_path"]
+            for r in conn.execute("SELECT rel_path FROM phashes").fetchall()
+        ]
+    assert stored == [rel]
+
+
+def test_remap_drops_duplicate_when_canonical_row_exists(make_photo):
+    rel, _ = make_photo(creator="nina", name="a.jpg")
+    index = ArchiveIndex.get()
+    index.set_phash(rel, 1)
+    _insert_raw_phash(index, "Nina/a.jpg", 2)
+    assert index.remap_phash_paths_to_photos() == 1
+    assert index.get_phash(rel) == 1
+    with index._read() as conn:
+        n = conn.execute("SELECT COUNT(*) AS c FROM phashes").fetchone()["c"]
+    assert int(n) == 1
+
+
+def test_hash_indexed_photos_fills_gaps_and_aligns_casing(make_photo):
+    from promptstudio.config import SAVED_DIR
+    from promptstudio.storage.dedupe import hash_indexed_photos
+
+    rel_a, full_a = make_photo(creator="nina", name="a.jpg")
+    rel_b, full_b = make_photo(creator="nina", name="b.jpg")
+    index = ArchiveIndex.get()
+    _insert_raw_phash(index, "Nina/a.jpg", compute_phash(full_a))
+    hashed, failed, remapped = hash_indexed_photos(index, base_dir=SAVED_DIR)
+    assert remapped == 1
+    assert hashed == 1
+    assert failed == 0
+    assert not index.paths_missing_phash()
+    assert rel_a in index.all_phashes()
+    assert rel_b in index.all_phashes()
+
+
 # ── scanning ─────────────────────────────────────────────────────────
 
 

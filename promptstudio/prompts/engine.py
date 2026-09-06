@@ -26,7 +26,6 @@ from promptstudio.config import (
 )
 from promptstudio.logging_setup import get_logger
 from promptstudio.prompts.cache import PromptCache
-from promptstudio.prompts.comfy_mode import enrich_exports
 from promptstudio.prompts.styles import CreatorStyleStore
 
 log = get_logger(__name__)
@@ -342,9 +341,10 @@ def get_image_aspect_ratio(image_path: str) -> str:
 def build_export_variants(
     positive: str,
     negative: str,
-    structured: Optional[Dict[str, Any]] = None,
+    structured: Optional[Dict[str, Any]] = None,  # kept: callers pass vision JSON
 ) -> Dict[str, str]:
-    """Target-specific prompt strings for Flux / SDXL / Pony / Comfy Mode E."""
+    """Target-specific prompt strings for Flux / SDXL / Pony."""
+    _ = structured
     flux = positive
     sdxl = f"{positive}, <lora:none>"
     pony_rating = "rating_safe" if _intensity_rank() != "high" else "rating_explicit"
@@ -355,9 +355,7 @@ def build_export_variants(
         "pony": pony,
         "negative": negative,
     }
-    return enrich_exports(
-        base, positive=positive, negative=negative, structured=structured
-    )
+    return base
 
 
 def generate_prompt_for_image(image_path: str, creator_name: str = "") -> Dict[str, Any]:
@@ -463,8 +461,7 @@ def get_prompt_for_image(
         and cached.get("parameters", {}).get("pipeline_version") == PROMPT_PIPELINE_VERSION
     ):
         structured = cached.get("structured_vision")
-        exports = cached.get("exports") or {}
-        if "exports" not in cached or not exports.get("comfy_ref"):
+        if "exports" not in cached:
             cached["exports"] = build_export_variants(
                 cached.get("positive_prompt", ""),
                 cached.get("negative_prompt", ""),

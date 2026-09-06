@@ -314,6 +314,62 @@ def pick_keeper(group: Sequence[str], base_dir: str = "") -> str:
     return max(sorted(group), key=size)
 
 
+def hash_indexed_photos(
+    index: Any,
+    *,
+    base_dir: str = "",
+    limit: int = 0,
+    rehash: bool = False,
+    creator: str = "",
+) -> Tuple[int, int, int]:
+    """Hash indexed media. Returns ``(hashed, failed, remapped)``.
+
+    Walks the catalog, not the disk: on-disk folder casing on Windows is not
+    the join key the duplicates UI uses. Aligns existing rows first.
+    """
+    from promptstudio.config import SAVED_DIR
+
+    base = base_dir or SAVED_DIR
+    remapped = 0
+    remap = getattr(index, "remap_phash_paths_to_photos", None)
+    if callable(remap):
+        remapped = int(remap() or 0)
+
+    if rehash:
+        todo = list(index.all_photo_paths())
+    else:
+        todo = list(index.paths_missing_phash())
+    prefix = (creator or "").strip().lstrip("@")
+    if prefix:
+        needle = prefix.lower() + "/"
+        todo = [rel for rel in todo if rel.lower().startswith(needle)]
+    if limit:
+        todo = todo[: int(limit)]
+    if not todo:
+        return 0, 0, remapped
+
+    batch: List[Tuple[str, int]] = []
+    hashed = 0
+    failed = 0
+    for i, rel in enumerate(todo, start=1):
+        full = os.path.join(base, *rel.split("/"))
+        value = compute_phash(full)
+        if value is None:
+            failed += 1
+            log.debug("phash skipped %s", rel)
+        else:
+            batch.append((rel, value))
+            hashed += 1
+        if len(batch) >= 200:
+            index.set_phashes(batch)
+            batch = []
+        if i % 250 == 0:
+            log.info("phash %s/%s", i, len(todo))
+    if batch:
+        index.set_phashes(batch)
+    return hashed, failed, remapped
+
+
 def iter_media_paths(base_dir: str, excluded: Iterable[str] = ()) -> List[str]:
     """Archive-relative media paths, skipping the underscore-prefixed folders."""
     from promptstudio.storage.db import is_media_file, normalize_rel_path

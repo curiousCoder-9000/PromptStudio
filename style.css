@@ -546,20 +546,8 @@ body {
     min-height: 650px;
 }
 
-/* Outputs brings its own creator, workflow, checkpoint, rating and date
-   filters. Saved views, Boards and the creator list filter none of them. */
-body.outputs-view .sidebar {
-    display: none;
-}
-
-body.outputs-view .workspace {
-    grid-template-columns: 1fr;
-}
-
-/* The document's single <main>, holding both gallery views. There used to be
-   two <main> elements, and this grid placed the second one at row 2 column 1 --
-   the sidebar's column. It only ever looked right because the outputs view is
-   display:none until you open it. */
+/* The document's single <main>. There used to be two <main> elements, and
+   this grid placed the second one at row 2 column 1 -- the sidebar's column. */
 .workspace-views {
     display: flex;
     flex-direction: column;
@@ -1488,10 +1476,6 @@ body.outputs-view .workspace {
     justify-content: center;
 }
 
-.media-compare.compare-on {
-    gap: 8px;
-}
-
 .media-pane {
     position: relative;
     display: flex;
@@ -1500,263 +1484,6 @@ body.outputs-view .workspace {
     flex: 1;
     min-width: 0;
     height: 100%;
-}
-
-.media-pane-label {
-    position: absolute;
-    top: 8px;
-    left: 8px;
-    z-index: 2;
-    font-size: 0.68rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    padding: 4px 9px;
-    border-radius: 8px;
-    background: rgba(15, 23, 42, 0.8);
-    border: 1px solid var(--border-glass);
-    color: var(--text-secondary);
-    backdrop-filter: blur(8px);
-}
-
-/* ── outputs gallery (A1) ─────────────────────────────────────────── */
-
-.photo-badge.keep-rate {
-    background: rgba(6, 182, 212, 0.16);
-    border-color: rgba(6, 182, 212, 0.35);
-    color: #22d3ee;
-}
-
-/* One batch shown as a contact sheet (A2). Purple rather than the cyan
-   keep-rate badge: this one is a *filter that is on*, not a measurement, and
-   an unexplained empty grid is the failure it exists to prevent. */
-.photo-badge.batch-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: rgba(139, 92, 246, 0.16);
-    border-color: rgba(139, 92, 246, 0.4);
-    color: #c4b5fd;
-}
-
-.photo-badge.batch-badge .badge-clear {
-    background: none;
-    border: none;
-    padding: 0 0 0 2px;
-    color: inherit;
-    opacity: 0.7;
-    cursor: pointer;
-    font-size: 0.85em;
-    line-height: 1;
-}
-
-.photo-badge.batch-badge .badge-clear:hover {
-    opacity: 1;
-}
-
-.output-card .photo-thumb-wrap {
-    position: relative;
-}
-
-.output-card.is-focused {
-    outline: 2px solid rgba(139, 92, 246, 0.85);
-    outline-offset: 2px;
-}
-
-.output-source-badge {
-    position: absolute;
-    top: 6px;
-    left: 6px;
-    z-index: 2;
-    width: 36px;
-    height: 36px;
-    object-fit: cover;
-    border-radius: 8px;
-    border: 1px solid var(--border-glass);
-    background: rgba(15, 23, 42, 0.85);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
-}
-
-.output-card .gen-rating {
-    bottom: 8px;
-    opacity: 0;
-}
-
-.output-card:hover .gen-rating,
-.output-card.is-focused .gen-rating,
-.output-card .gen-rating.has-rating,
-.output-card .gen-rating:focus-within {
-    opacity: 1;
-}
-
-.gen-rating.in-detail {
-    position: static;
-    transform: none;
-    opacity: 1;
-    margin-right: auto;
-}
-
-/* Legacy rows whose seed was never written down. Flagged on the card so the
-   disabled regenerate button in the detail view is not a surprise. */
-.output-flag {
-    position: absolute;
-    top: 6px;
-    right: 6px;
-    z-index: 2;
-    padding: 2px 7px;
-    border-radius: 6px;
-    font-size: 0.62rem;
-    text-transform: uppercase;
-    letter-spacing: 0.4px;
-    background: rgba(15, 23, 42, 0.85);
-    border: 1px solid rgba(248, 113, 113, 0.4);
-    color: #f87171;
-}
-
-.output-detail {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-}
-
-.output-compare {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-}
-
-.output-compare.no-source {
-    grid-template-columns: 1fr;
-}
-
-.output-compare-pane {
-    margin: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-
-.output-compare-pane figcaption {
-    font-size: 0.68rem;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    color: var(--text-secondary);
-}
-
-.output-compare-pane img {
-    width: 100%;
-    max-height: 340px;
-    object-fit: contain;
-    border-radius: var(--radius-sm);
-    background: rgba(15, 23, 42, 0.5);
-}
-
-.output-meta {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-    gap: 6px 14px;
-}
-
-.output-meta-row {
-    display: flex;
-    justify-content: space-between;
-    gap: 10px;
-    padding: 5px 9px;
-    border-radius: 7px;
-    background: rgba(148, 163, 184, 0.08);
-    font-size: 0.76rem;
-}
-
-.output-meta-row span { color: var(--text-secondary); }
-.output-meta-row strong {
-    color: var(--text-primary);
-    font-weight: 600;
-    overflow-wrap: anywhere;
-    text-align: right;
-}
-
-.output-prompt-text {
-    margin: 4px 0 10px;
-    padding: 9px 11px;
-    max-height: 150px;
-    overflow: auto;
-    border-radius: var(--radius-sm);
-    background: rgba(15, 23, 42, 0.55);
-    border: 1px solid var(--border-glass);
-    color: var(--text-primary);
-    font-size: 0.76rem;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-}
-
-.output-detail-actions {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    align-items: center;
-}
-
-.output-detail-actions .btn-danger { margin-left: auto; }
-
-.outputs-container input[type="date"].sort-select {
-    min-width: 9.5rem;
-    color-scheme: dark;
-}
-
-/* Rating on the generated pane. Bottom-centre rather than beside the label:
-   the verdict is the action, the label is a caption. */
-.gen-rating {
-    position: absolute;
-    bottom: 10px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 3;
-    display: flex;
-    gap: 4px;
-    padding: 4px;
-    border-radius: 10px;
-    background: rgba(15, 23, 42, 0.82);
-    border: 1px solid var(--border-glass);
-    backdrop-filter: blur(8px);
-    opacity: 0.55;
-    transition: opacity var(--transition-fast);
-}
-
-.media-pane.generated:hover .gen-rating,
-.gen-rating:focus-within,
-.gen-rating.has-rating {
-    opacity: 1;
-}
-
-.gen-rate-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    border: 1px solid transparent;
-    border-radius: 7px;
-    background: transparent;
-    color: var(--text-secondary);
-    font-size: 0.78rem;
-    cursor: pointer;
-    transition: background var(--transition-fast), color var(--transition-fast);
-}
-
-.gen-rate-btn:hover {
-    background: rgba(148, 163, 184, 0.16);
-    color: var(--text-primary);
-}
-
-.gen-rate-btn.active.discard { background: rgba(239, 68, 68, 0.22); color: #f87171; }
-.gen-rate-btn.active.clear   { background: rgba(148, 163, 184, 0.22); color: var(--text-primary); }
-.gen-rate-btn.active.keep    { background: rgba(6, 182, 212, 0.22); color: #22d3ee; }
-.gen-rate-btn.active.star    { background: rgba(236, 72, 153, 0.22); color: #f472b6; }
-
-.gen-rate-btn:disabled {
-    opacity: 0.4;
-    cursor: default;
 }
 
 .inspector-media img,
@@ -1781,90 +1508,6 @@ body.outputs-view .workspace {
     transition: none !important;
 }
 
-.media-badge.compare-toggle {
-    cursor: pointer;
-    border: 1px solid var(--accent-cyan);
-    color: var(--accent-cyan);
-    background: rgba(6, 182, 212, 0.15);
-}
-
-.media-badge.compare-toggle.active {
-    background: var(--accent-cyan);
-    color: #0f172a;
-}
-
-.comfy-status {
-    margin-top: 8px;
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    min-height: 1em;
-    text-align: left;
-}
-
-.comfy-pro-controls {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 10px 14px;
-    margin: 8px 0 6px;
-    padding: 10px 12px;
-    background: rgba(15, 23, 42, 0.45);
-    border: 1px solid var(--border-glass);
-    border-radius: var(--radius-md);
-}
-
-.comfy-denoise-label {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 0.75rem;
-    color: var(--text-muted);
-}
-
-.comfy-denoise-input {
-    width: 72px;
-    padding: 5px 8px;
-    border-radius: 8px;
-    border: 1px solid var(--border-glass);
-    background: rgba(15, 23, 42, 0.7);
-    color: var(--text-primary);
-    font-family: inherit;
-    font-size: 0.8rem;
-    transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
-}
-
-.comfy-denoise-input:focus {
-    outline: none;
-    border-color: var(--accent-purple);
-    box-shadow: var(--focus-ring);
-}
-
-.comfy-seed-input {
-    width: 110px;
-}
-
-.comfy-check {
-    accent-color: #8b5cf6;
-    width: 14px;
-    height: 14px;
-}
-
-/* A4 workflow picker. Labels come from a user-written slots.json, so the width
-   is capped and the text ellipsised rather than letting one verbose label
-   reflow the whole control row. */
-.comfy-workflow-select,
-#bulkWorkflowSelect {
-    max-width: 190px;
-    padding: 5px 8px;
-    border-radius: 8px;
-    text-overflow: ellipsis;
-}
-
-#comfyProBtn {
-    background: rgba(139, 92, 246, 0.28);
-    border-color: rgba(139, 92, 246, 0.5);
-}
-
 .media-badge-group {
     position: absolute;
     bottom: 20px;
@@ -1879,7 +1522,6 @@ body.outputs-view .workspace {
     pointer-events: none;
 }
 
-.media-badge-group .compare-toggle,
 .media-badge-group button {
     pointer-events: auto;
 }
@@ -2892,6 +2534,10 @@ button.tag-pill.tag-clickable:hover {
     flex-shrink: 0;
 }
 
+#duplicatesModal .modal-actions .btn {
+    flex: 1 1 140px;
+}
+
 .duplicates-body {
     flex: 1 1 auto;
     min-height: 0;
@@ -2956,7 +2602,8 @@ button.tag-pill.tag-clickable:hover {
     flex: 0 0 auto;
 }
 
-.dup-select-btn[aria-pressed="true"] {
+.dup-select-btn[aria-pressed="true"],
+#duplicatesSelectAllBtn[aria-pressed="true"] {
     border-color: rgba(239, 68, 68, 0.55);
     color: #fca5a5;
 }
@@ -3870,7 +3517,7 @@ button.tag-pill.tag-clickable:hover {
 /* Not a scroller. `flex: 1` + `overflow-y: auto` here, against a metadata
    block that would not shrink, meant the panel never overflowed: the prompt
    absorbed the loss instead and showed the tags, both prompt boxes, the
-   parameter grid, the export variants and every ComfyUI control through a
+   parameter grid and the export variants through a
    ~190px porthole, with its own scrollbar nested inside the panel's. The panel
    scrolls; this sizes to its content. */
 .prompt-content {
@@ -5017,6 +4664,7 @@ button.tag-pill.tag-clickable:hover {
 }
 
 .verdict-pill-manual { font-size: 0.6rem; opacity: 0.85; }
+.verdict-pill-corrected { font-size: 0.6rem; opacity: 0.85; }
 
 /* Reject cards are dimmed so the pile reads at a glance without labels.
    Hover restores full fidelity — you still have to judge the image. */
@@ -5230,6 +4878,35 @@ body.label-mode .view-controls {
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
+}
+
+.triage-tier-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.triage-tier-row .tier-chip {
+    cursor: pointer;
+    padding: 4px 9px;
+    background-clip: padding-box;
+}
+
+.triage-tier-row .tier-chip[aria-pressed="true"] {
+    outline: 2px solid currentColor;
+    outline-offset: 1px;
+    font-weight: 800;
+}
+
+.triage-tier-row .tier-chip:focus-visible {
+    outline: 2px solid var(--accent, #8b5cf6);
+    outline-offset: 2px;
+}
+
+body:not(.review-mode) .triage-verdict-row,
+body:not(.review-mode) .triage-keys-review {
+    display: none;
 }
 
 .tier-chip {

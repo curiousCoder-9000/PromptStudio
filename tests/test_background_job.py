@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from promptstudio.jobs import COMFY, LEASES, OLLAMA, BackgroundJob
+from promptstudio.jobs import INSTAGRAM, LEASES, OLLAMA, BackgroundJob
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +41,7 @@ class Toy(BackgroundJob):
 
 
 class OtherToy(BackgroundJob):
-    resources = (COMFY,)
+    resources = (INSTAGRAM,)
     owner = "other_toy"
 
 

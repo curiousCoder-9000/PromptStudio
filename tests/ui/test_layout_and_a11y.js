@@ -606,37 +606,6 @@ async function tab(s) {
 
   await s.load();
   await sleep(600);
-  const before = await s.eval(`
-    const side = document.querySelector('.sidebar');
-    const gal = document.querySelector('.gallery-container:not(.outputs-container)');
-    return { sidebarWidth: Math.round(side.getBoundingClientRect().width),
-             galleryWidth: Math.round(gal.getBoundingClientRect().width) };
-  `);
-  await s.eval(`document.getElementById('outputsBtn').click(); return true;`);
-  await sleep(1200);
-  const outputs = await s.eval(`
-    const side = document.querySelector('.sidebar');
-    const cs = getComputedStyle(side);
-    const view = document.getElementById('outputsView');
-    return {
-      sidebarShown: cs.display !== 'none',
-      columns: getComputedStyle(document.querySelector('.workspace')).gridTemplateColumns,
-      outputsWidth: Math.round(view.getBoundingClientRect().width),
-      // Its own filters, which is why the creator sidebar is redundant here.
-      ownFilters: ['outputsCreator', 'outputsWorkflow', 'outputsRating', 'outputsCheckpoint']
-        .filter((id) => document.getElementById(id)).length,
-    };
-  `);
-  r.check('the Outputs view has its own creator/workflow/rating filters',
-    outputs.ownFilters === 4, String(outputs.ownFilters));
-  r.check('so it drops the photo gallery sidebar', !outputs.sidebarShown,
-    JSON.stringify(outputs));
-  r.check('and the outputs grid takes the width back',
-    outputs.outputsWidth > before.galleryWidth + before.sidebarWidth - 40,
-    `${before.galleryWidth} + ${before.sidebarWidth} sidebar -> ${outputs.outputsWidth}`);
-
-  await s.eval(`document.getElementById('outputsBtn').click(); return true;`);
-  await sleep(900);
 
   await s.eval(`
     const input = document.getElementById('searchInput');
@@ -663,7 +632,7 @@ async function tab(s) {
       filters: ['mediaTypeSelect', 'verdictFilterSelect', 'favoritesFilterBtn', 'unanalyzedFilterBtn']
         .filter(vis),
       headerHeight: Math.round(
-        document.querySelector('.gallery-container:not(.outputs-container) .gallery-header')
+        document.querySelector('.gallery-container .gallery-header')
           .getBoundingClientRect().height),
     };
   `);
@@ -713,7 +682,7 @@ async function tab(s) {
 
   const rechecked = await s.eval(`
     document.getElementById('ollamaBadge').click();
-    await new Promise((res) => setTimeout(res, 1500));
+    await new Promise((res) => setTimeout(res, 2500));
     const toast = document.querySelector('.toast');
     return toast ? toast.textContent.replace(/\\s+/g, ' ').trim() : null;
   `);
@@ -796,16 +765,6 @@ async function tab(s) {
       buttonBg: getComputedStyle(file, '::file-selector-button').backgroundColor,
       buttonFont: getComputedStyle(file, '::file-selector-button')
         .fontFamily.split(',')[0].replace(/["']/g, ''),
-      // getComputedStyle cannot see into a UA shadow pseudo-element like
-      // ::-webkit-calendar-picker-indicator -- it answers with the host
-      // element's own style, so asking about the glyph here returns
-      // "filter: none" whatever the stylesheet says. The rule is asserted at
-      // source level in tests/test_markup_structure.py instead. What *is*
-      // observable, and what makes the native widget draw dark, is this:
-      dateColorScheme: (() => {
-        const d = document.getElementById('outputsSince');
-        return d ? getComputedStyle(d).colorScheme : null;
-      })(),
     };
   `);
   r.check('the field matches the select beside it',
@@ -816,8 +775,6 @@ async function tab(s) {
       && native.buttonBg !== 'rgb(255, 255, 255)'
       && native.buttonFont === native.refFont,
     JSON.stringify({ bg: native.buttonBg, font: native.buttonFont }));
-  r.check('the date inputs ask the platform for dark widgets',
-    native.dateColorScheme === 'dark', String(native.dateColorScheme));
   await s.key('Escape');
   await sleep(300);
 

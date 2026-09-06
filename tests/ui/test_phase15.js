@@ -26,6 +26,7 @@ const { Session, Report, sleep } = require('./cdp');
       openActivity: typeof openActivityModal === 'function',
       openDups: typeof openDuplicatesModal === 'function',
       saveViewFn: typeof saveCurrentView === 'function',
+      selectAll: Boolean(document.getElementById('duplicatesSelectAllBtn')),
     };
   `);
   r.check('Activity button exists', wired.activity === true);
@@ -42,6 +43,7 @@ const { Session, Report, sleep } = require('./cdp');
   r.check('openActivityModal is wired', wired.openActivity === true);
   r.check('openDuplicatesModal is wired', wired.openDups === true);
   r.check('saveCurrentView is wired', wired.saveViewFn === true);
+  r.check('Select all copies button exists', wired.selectAll === true);
 
   r.section('activity modal');
   const activity = await s.eval(`
@@ -190,6 +192,122 @@ const { Session, Report, sleep } = require('./cdp');
   r.check('clicking a copy opens the full-res viewer', dups.viewerOpen === true);
   r.check('filenames are text, not HTML', dups.injectedImgs === 2 && (dups.pathText || '').includes('<img'),
     JSON.stringify({ injectedImgs: dups.injectedImgs, pathText: dups.pathText }));
+
+  r.section('select all copies across groups');
+  const selectAll = await s.eval(`
+    const groupA = ${JSON.stringify(dupGroup)};
+    const groupB = {
+      kind: 'phash',
+      size: 2,
+      keeper: 'cara/c.jpg',
+      members: [
+        {
+          rel_path: 'cara/c.jpg', filename: 'c.jpg', creator: 'cara',
+          url: '', thumb_url: '', favorite: false, file_size: 900000,
+          keeper: true, preselected: false,
+        },
+        {
+          rel_path: 'dana/d.jpg', filename: 'd.jpg', creator: 'dana',
+          url: '', thumb_url: '', favorite: false, file_size: 300000,
+          keeper: false, preselected: true,
+        },
+      ],
+    };
+    const modal = document.getElementById('duplicatesModal');
+    modal.style.display = 'flex';
+    renderDuplicateGroups([groupA, groupB]);
+    const selectAllBtn = document.getElementById('duplicatesSelectAllBtn');
+    const selectAllLabel = document.getElementById('duplicatesSelectAllLabel');
+    const sweepLabel = document.getElementById('duplicatesSweepLabel');
+    const extraChecks = Array.from(modal.querySelectorAll('.dup-card:not(.is-keeper) input[type="checkbox"]:not(:disabled)'));
+    const keeperChecks = Array.from(modal.querySelectorAll('.is-keeper input[type="checkbox"]'));
+    const favCheck = modal.querySelector('.is-favorite input[type="checkbox"]');
+    const rowBtns = Array.from(modal.querySelectorAll('.dup-select-btn')).map((b) => b.textContent);
+    const before = {
+      disabled: Boolean(selectAllBtn && selectAllBtn.disabled),
+      pressed: selectAllBtn ? selectAllBtn.getAttribute('aria-pressed') : null,
+      label: selectAllLabel ? selectAllLabel.textContent : '',
+      extras: extraChecks.map((c) => c.checked),
+    };
+    selectAllBtn.click();
+    const afterSelect = {
+      extras: extraChecks.map((c) => c.checked),
+      keepers: keeperChecks.map((c) => c.checked),
+      fav: Boolean(favCheck && favCheck.checked),
+      queued: state.duplicatesSelected.size,
+      sweep: sweepLabel ? sweepLabel.textContent : '',
+      label: selectAllLabel ? selectAllLabel.textContent : '',
+      pressed: selectAllBtn ? selectAllBtn.getAttribute('aria-pressed') : null,
+      rowBtns: Array.from(modal.querySelectorAll('.dup-select-btn')).map((b) => b.textContent),
+    };
+    selectAllBtn.click();
+    const afterClear = {
+      extras: extraChecks.map((c) => c.checked),
+      queued: state.duplicatesSelected.size,
+      label: selectAllLabel ? selectAllLabel.textContent : '',
+      pressed: selectAllBtn ? selectAllBtn.getAttribute('aria-pressed') : null,
+    };
+    const firstRow = modal.querySelector('.dup-select-btn');
+    firstRow.click();
+    const mixed = {
+      queued: state.duplicatesSelected.size,
+      label: selectAllLabel ? selectAllLabel.textContent : '',
+      pressed: selectAllBtn ? selectAllBtn.getAttribute('aria-pressed') : null,
+    };
+    selectAllBtn.click();
+    const filled = {
+      extras: extraChecks.map((c) => c.checked),
+      queued: state.duplicatesSelected.size,
+      label: selectAllLabel ? selectAllLabel.textContent : '',
+    };
+    closeDuplicatesModal();
+    return { before, afterSelect, afterClear, mixed, filled, rowBtns };
+  `);
+  r.check('Select all starts enabled and unpressed',
+    selectAll.before && selectAll.before.disabled === false
+      && selectAll.before.pressed === 'false',
+    JSON.stringify(selectAll.before));
+  r.check('Select all label counts every extra copy',
+    /Select all 2 cop/.test(selectAll.before.label || ''),
+    selectAll.before.label);
+  r.check('Select all does not pre-check on render',
+    selectAll.before.extras && selectAll.before.extras.every((on) => on === false),
+    JSON.stringify(selectAll.before.extras));
+  r.check('Select all queues extras in every group',
+    selectAll.afterSelect
+      && selectAll.afterSelect.extras.every((on) => on === true)
+      && selectAll.afterSelect.keepers.every((on) => on === false)
+      && selectAll.afterSelect.fav === false
+      && selectAll.afterSelect.queued === 2,
+    JSON.stringify(selectAll.afterSelect));
+  r.check('Select all flips to Clear all once everything is queued',
+    (selectAll.afterSelect.label || '').includes('Clear')
+      && selectAll.afterSelect.pressed === 'true',
+    selectAll.afterSelect.label);
+  r.check('Select all also flips each row button to Clear selection',
+    selectAll.afterSelect.rowBtns
+      && selectAll.afterSelect.rowBtns.every((t) => /Clear/.test(t)),
+    JSON.stringify(selectAll.afterSelect.rowBtns));
+  r.check('sweep label counts extras from every group',
+    (selectAll.afterSelect.sweep || '').includes('2'),
+    selectAll.afterSelect.sweep);
+  r.check('Clear all unchecks every extra',
+    selectAll.afterClear
+      && selectAll.afterClear.extras.every((on) => on === false)
+      && selectAll.afterClear.queued === 0
+      && selectAll.afterClear.pressed === 'false',
+    JSON.stringify(selectAll.afterClear));
+  r.check('a single-row select leaves Select all unpressed',
+    selectAll.mixed && selectAll.mixed.queued === 1
+      && selectAll.mixed.pressed === 'false'
+      && /Select all 2 cop/.test(selectAll.mixed.label || ''),
+    JSON.stringify(selectAll.mixed));
+  r.check('Select all then fills in the remaining extras',
+    selectAll.filled
+      && selectAll.filled.extras.every((on) => on === true)
+      && selectAll.filled.queued === 2
+      && (selectAll.filled.label || '').includes('Clear'),
+    JSON.stringify(selectAll.filled));
 
   await s.send('Emulation.setDeviceMetricsOverride', {
     width: 390, height: 844, deviceScaleFactor: 2, mobile: true,

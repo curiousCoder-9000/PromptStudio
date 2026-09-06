@@ -460,11 +460,9 @@ DISTRIBUTION_MAX_SHARE = _env_num("DISTRIBUTION_MAX_SHARE", 0.6)
 # the classifier being wrong. 100 spans several creators, and puts the 60% line
 # about ±10 points outside sampling noise instead of ±25.
 DISTRIBUTION_MIN_CLASSIFIED = _env_num("DISTRIBUTION_MIN_CLASSIFIED", 100, int)
-# Rated generations: these are entered by hand, one keypress at a time, so the
-# classified threshold would keep the generation half of the rule inert for
-# months — which is how a guard quietly becomes decorative. 30 is roughly one
-# rating sitting, and on the 3-value scale (discard / keep / star) a uniform
-# rater trips 60% about 0.2% of the time.
+# Taste labels and P(keep) scores: entered by hand, so the classified
+# threshold would keep this half of the rule inert for months. 30 is roughly
+# one labelling sitting.
 DISTRIBUTION_MIN_RATED = _env_num("DISTRIBUTION_MIN_RATED", 30, int)
 
 # Video frame selection — used by `scraping/video_frames.py` for the classifier,
@@ -502,6 +500,8 @@ MEDIA_EXTENSIONS = IMAGE_EXTENSIONS + VIDEO_EXTENSIONS
 EXCLUDED_FOLDERS = {
     "_no_person_detected",
     "_thumbs",
+    # Leftover ComfyUI output / workflow dirs from older checkouts. Still
+    # excluded so they never re-enter the gallery, creator list, or rebuild.
     "_generations",
     "_classify",
     "_trash",
@@ -602,36 +602,4 @@ REALISM_BIAS = os.environ.get("PROMPT_REALISM_BIAS", "strong").strip().lower()
 PROMPT_PIPELINE_VERSION = "v2-structured"
 CREATOR_STYLE_MIN_PROMPTS = int(os.environ.get("CREATOR_STYLE_MIN", "5"))
 
-# ComfyUI (optional)
-COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188").rstrip("/")
-COMFYUI_CHECKPOINT = os.environ.get(
-    "COMFYUI_CHECKPOINT", "juggernautXL_ragnarok.safetensors"
-)
-_COMFY_PKG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "comfy")
-# A4 workflow registry (see comfy/registry.py). `pro` and `txt2img` ship in the
-# package so a fresh checkout can generate with an empty archive; the user's own
-# ComfyUI exports live beside the archive, where E1 backs them up and a checkout
-# cannot lose them. A user entry shadows a built-in of the same name.
-COMFY_BUILTIN_WORKFLOWS_DIR = os.path.join(_COMFY_PKG_DIR, "workflows")
-# `or`, not a two-arg get: a set-but-empty COMFY_WORKFLOWS_DIR would otherwise
-# resolve to "" and point the registry at the process CWD (hard rule 14's trap,
-# applied to a path instead of a host).
-COMFY_WORKFLOWS_DIR = (
-    os.environ.get("COMFY_WORKFLOWS_DIR", "").strip() or os.path.join(SAVED_DIR, "_workflows")
-)
-COMFYUI_DEFAULT_DENOISE = float(os.environ.get("COMFYUI_DENOISE", "0.70"))
-COMFYUI_DEFAULT_STEPS = int(os.environ.get("COMFYUI_STEPS", "32"))
-COMFYUI_DEFAULT_CFG = float(os.environ.get("COMFYUI_CFG", "6.0"))
-GENERATIONS_DIR = os.path.join(SAVED_DIR, "_generations")
-GENERATIONS_INDEX_FILE = os.path.join(SAVED_DIR, "generations_index.json")
-# How many generations to keep per source photo in the legacy JSON index.
-# 0 = unbounded, and it is the default: the old hardcoded 20 silently discarded
-# history that nothing had yet rendered. The SQLite table is never capped by
-# this — it exists only to bound the rollback file while it is still written.
-GENERATIONS_KEEP_PER_SOURCE = int(os.environ.get("GENERATIONS_KEEP_PER_SOURCE", "0"))
-# A2 batch generate. The cap is a guard against a mis-clicked "select all" on a
-# 4,000-photo archive turning into a week of GPU time, not a capacity limit.
-COMFY_BATCH_MAX = int(os.environ.get("COMFY_BATCH_MAX", "200"))
-# Per-item ceiling. Was hardcoded at 900 in _run_pro; a batch needs it
-# configurable because one wedged item should not eat the whole run's evening.
-COMFY_BATCH_ITEM_TIMEOUT = int(os.environ.get("COMFY_BATCH_ITEM_TIMEOUT", "900"))
+

@@ -189,7 +189,9 @@ def test_grid_verdict_carries_exactly_the_fields_a_card_or_triage_panel_reads(
 ):
     """`renderTriageBlock` reads the *grid* row, not `/api/media/detail`, so
     confidence / prompt_version / sheet_path have to survive the slimming.
-    `media_kind`, `verdict_source` and `classified_at` are read by nothing."""
+    `corrected_tier` too — the pill shows COALESCE(gold, model) and the pen
+    mark. `media_kind`, `verdict_source`, `classified_at` and `corrected_at`
+    are read by nothing on the card."""
     rel, _ = make_photo(name="a.jpg")
     index.set_verdict(
         rel,
@@ -206,12 +208,14 @@ def test_grid_verdict_carries_exactly_the_fields_a_card_or_triage_panel_reads(
         "verdict",
         "tier",
         "manual",
+        "corrected_tier",
         "reason",
         "confidence",
         "prompt_version",
         "sheet_path",
         "error",
     }
+    assert photo["verdict"]["corrected_tier"] is None
 
 
 def test_slimming_keeps_every_column_row_to_photo_publishes(index, make_photo):

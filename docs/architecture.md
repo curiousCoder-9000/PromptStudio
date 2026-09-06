@@ -13,14 +13,11 @@ graph TD
     Handler --> Archive[storage.archive + db]
     Handler --> Prompts[prompts.engine + cache]
     Handler --> Scraping[scraping.downloader]
-    Handler --> Comfy[comfy.client]
     Scraping --> IG[Instagram via Instaloader]
     Archive --> Disk["~/Pictures/InstagramSaved"]
     Archive --> SQLite["archive.db<br/>photos · prompts · phashes · deleted_posts"]
     Prompts --> Ollama[Ollama :11434]
     Prompts --> SQLite
-    Comfy --> ComfyUI[ComfyUI :8188]
-    Comfy --> Gens["_generations/ + generations_index.json"]
 ```
 
 Entrypoints: `server.py`, `prompt_engine.py` (shims). Logic: `promptstudio/`.
@@ -40,7 +37,6 @@ Entrypoints: `server.py`, `prompt_engine.py` (shims). Logic: `promptstudio/`.
 image → base64 → Ollama vision JSON (STRUCTURED_FIELDS)
       → rewrite model (+ creator style_prefix)
       → positive/negative + visual_tags + exports{flux,sdxl,pony}
-      → optional Mode E strip for Comfy IPAdapter
 ```
 
 Engine id: `Ollama ({MODEL_NAME}) v2-structured`. Stale if engine/pipeline mismatch.
@@ -57,17 +53,15 @@ Instaloader session → download to <creator>/
 
 Background: one `SyncManager` job at a time (saved / creator / following /
 **creator_queue** drain); `CreatorScrapeQueue` persists multi-handle FIFO and
-never starts a second IG session. One `BatchPromptManager` / `ComfyJobManager`
-similarly.
+never starts a second IG session. One `BatchPromptManager` similarly.
 
 Cross-job exclusion is a **lease**, not pairwise `is_running()` checks
-(`promptstudio/jobs.py`). Three exclusive resources:
+(`promptstudio/jobs.py`). Exclusive resources:
 
 | Resource | Held by |
 |----------|---------|
-| `ollama` | `BatchPromptManager` |
-| `instagram` | `SyncManager` (covers the creator-queue drain) |
-| `comfy` | `ComfyJobManager` — declared, *not* exclusive with `ollama` |
+| `ollama` | `BatchPromptManager`, `ClassifyJobManager` |
+| `scrape:<source>` | `SyncManager` / creator queue for that lane |
 
 All of a job's resources are acquired under one lock, so a job either holds
 everything it needs or nothing. Two requests arriving together can no longer
@@ -89,9 +83,8 @@ the next run, so history has to live somewhere else.
 | `storage.atomic` | `atomic_write_json` — every derived-state file goes through it |
 | `storage.journal` | Append-only JSONL run history per job kind |
 | `storage.dedupe` | Perceptual hashing + near-duplicate grouping |
-| `prompts` | Vision, cache, batch, styles, Mode E |
+| `prompts` | Vision, cache, batch, styles |
 | `scraping` | IG session, download, filters, queue, organize |
-| `comfy` | Queue jobs, upload ref image, poll history, save gens |
 
 ## Scale notes
 

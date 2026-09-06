@@ -9,16 +9,14 @@ advisory — and the person who needs to see a warning banner is exactly the
 person who stopped opening that panel. This module makes it fail.
 
 It is a **platform** rule, not a classifier one-off (product_review.md B4), so
-the same check runs over generation ratings: if one rating bucket dominates
-`keep_rate`'s denominator, the keep rate has stopped measuring anything for
-the same reason.
+the same check runs over taste labels and P(keep) scores.
 
 Three layers, because a guard that can only pass is not a guard:
 
 1. `saturation_report` — the rule itself. Pure, fast, always runs.
 2. The proof: a saturated fixture, asserted to be *caught* — both as a plain
-   distribution and end-to-end through `tier_histogram()` /
-   `generation_rating_summary()`, the aggregates the app actually serves.
+   distribution and end-to-end through `tier_histogram()`, the aggregates the
+   app actually serves.
 3. The gate over the real archive, skipped below a minimum N so it is inert in
    CI (which has no archive) and on a fresh checkout.
 """
@@ -55,11 +53,6 @@ GUARD_DB = archive_db_file(GUARD_ARCHIVE)
 # Classified means scored: tier -1 is a failed vision call, which `error_rate`
 # reports separately and which must not dilute the distribution.
 TIER_SQL = "SELECT tier, COUNT(*) FROM media_verdicts WHERE tier >= 0 GROUP BY tier"
-# Rated means judged: rating 0 is "not looked at yet", and it is exactly the
-# denominator `keep_rate = kept / rated` uses. Counting unrated rows as a
-# bucket would fire on an archive nobody has judged — the false alarm that
-# gets a guard switched off.
-RATING_SQL = "SELECT rating, COUNT(*) FROM generations WHERE rating != 0 GROUP BY rating"
 LABEL_SQL = "SELECT label, COUNT(*) FROM labels GROUP BY label"
 PKEEP_SQL = (
     "SELECT CASE "
@@ -69,7 +62,6 @@ PKEEP_SQL = (
     "ELSE 'drop' END, COUNT(*) FROM photos WHERE p_keep IS NOT NULL GROUP BY 1"
 )
 
-RATING_LABELS = {"-1": "discard", "1": "keep", "2": "star"}
 LABEL_NAMES = {"-1": "discard", "1": "keep"}
 
 
@@ -77,9 +69,9 @@ def _read_only_counts(db_path: str, sql: str) -> Dict[str, int]:
     """`{bucket: count}` from a database this process must not touch.
 
     `ArchiveIndex` is the obvious reader and the wrong one: its constructor
-    creates tables, runs migrations and imports the legacy generations JSON.
-    A test that reaches for the developer's real archive must not be able to
-    write to it, so this opens `mode=ro` and nothing else.
+    creates tables and runs migrations. A test that reaches for the
+    developer's real archive must not be able to write to it, so this opens
+    `mode=ro` and nothing else.
 
     A missing file or a pre-classifier schema is "nothing measured", not a
     failure — the caller turns that into a skip.
@@ -112,13 +104,6 @@ def assert_not_saturated(counts: Dict[str, int], *, what: str, min_n: int) -> No
 
 def tier_buckets(db_path: str) -> Dict[str, int]:
     return {f"tier {t}": n for t, n in _read_only_counts(db_path, TIER_SQL).items()}
-
-
-def rating_buckets(db_path: str) -> Dict[str, int]:
-    return {
-        RATING_LABELS.get(r, f"rating {r}"): n
-        for r, n in _read_only_counts(db_path, RATING_SQL).items()
-    }
 
 
 def label_buckets(db_path: str) -> Dict[str, int]:
@@ -269,78 +254,17 @@ def test_failed_vision_calls_do_not_dilute_the_distribution(make_photo):
     assert report["saturated"] is True
 
 
-def _seed_generation(index, i, rating):
-    gen_id = index.record_generation(
-        rel_path=f"_generations/nina/g{i}.png",
-        source_rel="nina/photo.jpg",
-        creator="nina",
-        workflow="pro",
-        seed=1000 + i,
-        positive_prompt="a portrait",
-    )
-    if rating:
-        index.rate_generation(gen_id, rating)
-    return gen_id
-
-
-def test_generation_ratings_are_judged_over_the_rated_denominator(make_photo):
-    """`keep_rate = kept / rated`. The guard must use the same denominator:
-    counting the unrated as a bucket would fire on every archive that has not
-    been judged yet, which is how a guard gets switched off."""
-    index = ArchiveIndex.get()
-    for i in range(30):
-        _seed_generation(index, i, 0)  # generated, never looked at
-    for i in range(30, 42):
-        _seed_generation(index, i, 1)  # every judgement is "keep"
-
-    summary = index.generation_rating_summary()
-    assert summary["total_outputs"] == 42
-    assert summary["rated"] == 12
-
-    counts = rating_buckets(ARCHIVE_DB_FILE)
-    assert counts == {"keep": 12}, counts
-    with pytest.raises(AssertionError) as caught:
-        assert_not_saturated(counts, what="generation rating", min_n=10)
-    assert "keep" in str(caught.value)
-
-
-def test_an_unjudged_generation_pile_is_skipped_not_failed(make_photo):
-    index = ArchiveIndex.get()
-    for i in range(40):
-        _seed_generation(index, i, 0)
-
-    with pytest.raises(pytest.skip.Exception):
-        assert_not_saturated(
-            rating_buckets(ARCHIVE_DB_FILE), what="generation rating", min_n=10
-        )
-
-
-def test_a_spread_of_ratings_passes(make_photo):
-    index = ArchiveIndex.get()
-    for i, rating in enumerate(([-1] * 5) + ([1] * 5) + ([2] * 5)):
-        _seed_generation(index, i, rating)
-
-    assert_not_saturated(
-        rating_buckets(ARCHIVE_DB_FILE), what="generation rating", min_n=10
-    )
-
-
 def test_the_guards_own_sql_agrees_with_the_index_aggregates(make_photo):
     """The gate reads the DB read-only rather than through `ArchiveIndex`
     (whose constructor writes). Pin the two definitions together so the guard
     cannot quietly start measuring something else."""
     index = _seed_tiers(make_photo, [0, 0, 1, 2, 3, 3, 4, -1])
-    for i, rating in enumerate([0, 1, 1, -1, 2]):
-        _seed_generation(index, i, rating)
 
     tiers = tier_buckets(ARCHIVE_DB_FILE)
     assert tiers, "read-only reader found nothing — check the WAL/ro open"
     assert tiers == {
         f"tier {t}": n for t, n in index.tier_histogram().items() if int(t) >= 0
     }
-    assert sum(rating_buckets(ARCHIVE_DB_FILE).values()) == (
-        index.generation_rating_summary()["rated"]
-    )
 
 
 # ── 4. the gate, over the real archive ───────────────────────────────
@@ -354,14 +278,6 @@ def test_archive_tier_distribution_is_not_saturated():
         tier_buckets(GUARD_DB),
         what=f"classified tier ({GUARD_DB})",
         min_n=DISTRIBUTION_MIN_CLASSIFIED,
-    )
-
-
-def test_generation_rating_distribution_is_not_saturated():
-    assert_not_saturated(
-        rating_buckets(GUARD_DB),
-        what=f"generation rating ({GUARD_DB})",
-        min_n=DISTRIBUTION_MIN_RATED,
     )
 
 
@@ -432,3 +348,40 @@ def test_keep_tier_filters_are_judged_over_classified_keep_tiers(make_photo):
     with pytest.raises(AssertionError) as caught:
         assert_not_saturated(counts, what="keep-tier filter", min_n=10)
     assert "t2" in str(caught.value)
+
+
+def test_disagreement_filter_is_judged_over_corrections(make_photo):
+    """Gold-vs-model. Uncorrected rows are not in the denominator — counting
+    them as 'agreement' would fire on every archive nobody has labelled yet.
+    """
+    index = ArchiveIndex.get()
+    rels = []
+    for i in range(20):
+        rel, _ = make_photo(name=f"dg_{i:03d}.jpg")
+        index.set_verdict(rel, creator="tester", tier=2)
+        rels.append(rel)
+    for i in range(5):
+        make_photo(name=f"unseen_dg_{i}.jpg")
+    # 12 corrections, all mismatches. 8 classified but unlabelled.
+    for rel in rels[:12]:
+        index.set_corrected_tier(rel, 3)
+
+    gold = index.correction_counts()
+    disagree = index.query_photos(verdict="disagreement")[1]
+    assert gold["corrections"] == 12
+    assert gold["disagreements"] == 12
+    assert disagree == 12
+    counts = {
+        "disagreement": disagree,
+        "agreement": gold["corrections"] - gold["disagreements"],
+    }
+    assert counts == {"disagreement": 12, "agreement": 0}
+    with pytest.raises(AssertionError) as caught:
+        assert_not_saturated(counts, what="tier correction", min_n=10)
+    assert "disagreement" in str(caught.value)
+
+    # Histogram is still the model's distribution — gold must not paper over it.
+    hist = {
+        f"tier {t}": n for t, n in index.tier_histogram().items() if int(t) >= 0
+    }
+    assert hist == {"tier 2": 20}

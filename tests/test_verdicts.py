@@ -205,12 +205,20 @@ def test_bad_override_value_raises(index, make_photo):
         index.set_manual_verdict(rels["a.jpg"], "maybe")
 
 
-def test_overridden_rows_leave_the_unusable_bucket(index, make_photo):
-    """`unusable`/`modest` are raw-tier views, so a hand-kept file must drop out."""
+def test_a_keep_pin_does_not_leave_the_unusable_bucket(index, make_photo):
+    """Tier chips are the effective measurement, not 'model output minus pins'.
+
+    A keep-pin on a T0 is policy (I still want this). It is still unusable.
+    Recoding it to T2 is what moves the bucket.
+    """
     rels = _seed(index, make_photo, [("t0.jpg", 0)])
     assert index.query_photos(verdict="unusable")[1] == 1
     index.set_manual_verdict(rels["t0.jpg"], "keep")
+    assert index.query_photos(verdict="unusable")[1] == 1
+    assert index.query_photos(verdict="keep")[1] == 1
+    index.set_corrected_tier(rels["t0.jpg"], 2)
     assert index.query_photos(verdict="unusable")[1] == 0
+    assert index.query_photos(verdict="t2")[1] == 1
 
 
 def test_bulk_override_is_one_transaction(index, make_photo):
@@ -464,3 +472,144 @@ def test_verdicts_for_bulk_fetch_matches_single_reads(index, make_photo):
     for rel in rels.values():
         assert bulk[rel]["verdict"] == index.get_verdict(rel)["verdict"]
     assert index.verdicts_for([]) == {}
+
+
+# ── human gold labels (corrected_tier) ────────────────────────────────
+
+
+def test_correcting_t2_to_t3_moves_the_fashion_chip(index, make_photo):
+    """The whole point of the feature: T2 and T3 are both keep, so Keep is a
+    no-op. Recoding the measurement is what makes Fashion/Revealing honest."""
+    rels = _seed(index, make_photo, [("fashion.jpg", 2)])
+    assert index.query_photos(verdict="t2")[1] == 1
+    assert index.query_photos(verdict="t3")[1] == 0
+    assert index.query_photos(verdict="keep")[1] == 1
+
+    assert index.set_corrected_tier(rels["fashion.jpg"], 3) is True
+    v = index.get_verdict(rels["fashion.jpg"])
+    assert v["tier"] == 2
+    assert v["corrected_tier"] == 3
+    assert v["verdict"] == "keep"
+    assert v["manual"] is None
+
+    photos, total = index.query_photos(verdict="t3")
+    assert total == 1
+    assert photos[0]["rel_path"] == rels["fashion.jpg"]
+    assert photos[0]["verdict"]["tier"] == 2
+    assert photos[0]["verdict"]["corrected_tier"] == 3
+    assert index.query_photos(verdict="t2")[1] == 0
+    assert index.query_photos(verdict="keep")[1] == 1
+
+
+def test_correcting_t3_to_t1_crosses_the_keep_line(index, make_photo):
+    rels = _seed(index, make_photo, [("revealing.jpg", 3)])
+    assert index.query_photos(verdict="keep")[1] == 1
+    index.set_corrected_tier(rels["revealing.jpg"], 1)
+    assert index.get_verdict(rels["revealing.jpg"])["tier"] == 3
+    assert index.query_photos(verdict="keep")[1] == 0
+    assert index.query_photos(verdict="reject")[1] == 1
+    assert index.query_photos(verdict="modest")[1] == 1
+    assert index.query_photos(verdict="t3")[1] == 0
+
+
+def test_reclassify_overwrites_the_model_tier_and_keeps_the_gold(index, make_photo):
+    rels = _seed(index, make_photo, [("a.jpg", 2)])
+    index.set_corrected_tier(rels["a.jpg"], 3)
+    index.set_verdict(rels["a.jpg"], creator="test_creator", tier=4, reason="again")
+    v = index.get_verdict(rels["a.jpg"])
+    assert v["tier"] == 4
+    assert v["corrected_tier"] == 3
+    assert v["verdict"] == "keep"
+    assert index.query_photos(verdict="t3")[1] == 1
+    assert index.query_photos(verdict="t4")[1] == 0
+
+
+def test_clearing_the_gold_label_returns_to_the_model_bucket(index, make_photo):
+    rels = _seed(index, make_photo, [("a.jpg", 2)])
+    index.set_corrected_tier(rels["a.jpg"], 3)
+    index.set_corrected_tier(rels["a.jpg"], None)
+    v = index.get_verdict(rels["a.jpg"])
+    assert v["corrected_tier"] is None
+    assert v["corrected_at"] is None
+    assert index.query_photos(verdict="t2")[1] == 1
+    assert index.query_photos(verdict="t3")[1] == 0
+
+
+def test_gold_label_on_an_unclassified_file_is_refused(index, make_photo):
+    rel, _full = make_photo(name="a.jpg")
+    assert index.set_corrected_tier(rel, 3) is False
+
+
+def test_gold_label_on_a_failed_attempt_is_accepted(index, make_photo):
+    rels = _seed(index, make_photo, [("bad.jpg", -1)])
+    assert index.set_corrected_tier(rels["bad.jpg"], 3) is True
+    v = index.get_verdict(rels["bad.jpg"])
+    assert v["tier"] == -1
+    assert v["corrected_tier"] == 3
+    assert v["verdict"] == "keep"
+    assert index.query_photos(verdict="error")[1] == 0
+    assert index.query_photos(verdict="t3")[1] == 1
+
+
+def test_bad_gold_label_raises(index, make_photo):
+    rels = _seed(index, make_photo, [("a.jpg", 2)])
+    with pytest.raises(ValueError):
+        index.set_corrected_tier(rels["a.jpg"], 5)
+    with pytest.raises(ValueError):
+        index.set_corrected_tier(rels["a.jpg"], -1)
+    with pytest.raises(ValueError):
+        index.set_corrected_tier(rels["a.jpg"], "hot")
+
+
+def test_setting_a_gold_label_clears_the_keep_pin(index, make_photo):
+    rels = _seed(index, make_photo, [("t0.jpg", 0)])
+    index.set_manual_verdict(rels["t0.jpg"], "keep")
+    index.set_corrected_tier(rels["t0.jpg"], 3)
+    v = index.get_verdict(rels["t0.jpg"])
+    assert v["manual"] is None
+    assert v["corrected_tier"] == 3
+    assert v["verdict"] == "keep"
+    # A Keep after the recode still sticks — the two writes are independent.
+    index.set_manual_verdict(rels["t0.jpg"], "reject")
+    assert index.get_verdict(rels["t0.jpg"])["verdict"] == "reject"
+    assert index.get_verdict(rels["t0.jpg"])["corrected_tier"] == 3
+    assert index.query_photos(verdict="t3")[1] == 1
+
+
+def test_histogram_stays_on_the_model_tier_after_a_correction(index, make_photo):
+    rels = _seed(index, make_photo, [("a.jpg", 2), ("b.jpg", 2)])
+    index.set_corrected_tier(rels["a.jpg"], 3)
+    assert index.tier_histogram() == {"2": 2}
+    gold = index.correction_counts()
+    assert gold == {"corrections": 1, "disagreements": 1}
+
+
+def test_disagreement_filter_selects_only_mismatches(index, make_photo):
+    rels = _seed(index, make_photo, [("miss.jpg", 2), ("hit.jpg", 3), ("plain.jpg", 2)])
+    index.set_corrected_tier(rels["miss.jpg"], 3)
+    index.set_corrected_tier(rels["hit.jpg"], 3)  # agrees with the model
+    photos, total = index.query_photos(verdict="disagreement")
+    assert total == 1
+    assert photos[0]["rel_path"] == rels["miss.jpg"]
+
+
+def test_sidebar_counts_follow_the_effective_tier(index, make_photo):
+    rels = _seed(index, make_photo, [("a.jpg", 2)])
+    counts = index.creator_verdict_counts()["test_creator"]
+    assert counts["t2_count"] == 1
+    assert counts["t3_count"] == 0
+    assert counts["disagreement_count"] == 0
+    index.set_corrected_tier(rels["a.jpg"], 3)
+    counts = index.creator_verdict_counts()["test_creator"]
+    assert counts["t2_count"] == 0
+    assert counts["t3_count"] == 1
+    assert counts["disagreement_count"] == 1
+    assert counts["keep_count"] == 1
+
+
+def test_tier_sort_uses_the_effective_tier(index, make_photo):
+    rels = _seed(index, make_photo, [("was_harsh.jpg", 0), ("mild.jpg", 3)])
+    index.set_corrected_tier(rels["was_harsh.jpg"], 4)
+    photos, _total = index.query_photos(sort="tier")
+    order = [os.path.basename(p["rel_path"]) for p in photos]
+    assert order == ["mild.jpg", "was_harsh.jpg"]

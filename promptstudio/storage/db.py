@@ -11,7 +11,6 @@ import sqlite3
 import threading
 import time
 import urllib.parse
-import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -22,7 +21,6 @@ from promptstudio.config import (
     DISTRIBUTION_MAX_SHARE,
     EXCLUDED_FOLDERS,
     FTS_SEARCH,
-    GENERATIONS_INDEX_FILE,
     IMAGE_EXTENSIONS,
     MEDIA_EXTENSIONS,
     PROMPT_PIPELINE_VERSION,
@@ -136,6 +134,11 @@ CREATE INDEX IF NOT EXISTS idx_phashes_hash ON phashes(phash);
 # What is NOT here: the keep/reject string. Only `tier` is stored, and the
 # verdict is derived at query time against CLASSIFY_REJECT_MAX_TIER — so moving
 # the threshold re-thresholds the whole archive without re-running the model.
+#
+# `corrected_tier` is the human gold label. It never overwrites `tier` (that is
+# the model's measurement, and training later needs both). Reclassify must not
+# touch it, same as `manual`. Existing archives get the columns via
+# `_migrate_verdict_corrections` — CREATE TABLE IF NOT EXISTS will not ALTER.
 _VERDICT_SCHEMA = """
 CREATE TABLE IF NOT EXISTS media_verdicts (
   rel_path       TEXT PRIMARY KEY,
@@ -150,22 +153,28 @@ CREATE TABLE IF NOT EXISTS media_verdicts (
   sheet_path     TEXT,
   error          TEXT,
   classified_at  TEXT,
-  duration_ms    INTEGER
+  duration_ms    INTEGER,
+  corrected_tier INTEGER,
+  corrected_at   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_verdicts_creator ON media_verdicts(creator);
 CREATE INDEX IF NOT EXISTS idx_verdicts_tier ON media_verdicts(tier);
 CREATE INDEX IF NOT EXISTS idx_verdicts_version ON media_verdicts(prompt_version);
 """
 
+# Human gold, else the model's call. Filters, sort, and derived keep/reject
+# all read this; insights/B4 keep grouping on the raw `tier` column.
+_EFFECTIVE_TIER = "COALESCE(v.corrected_tier, v.tier)"
+
 # Effective verdict: a manual override always wins, a failed attempt is its own
 # state (so it is retryable and not silently counted as a keep), and everything
-# else falls out of the tier. Written once here and formatted into every query
-# that needs it — two copies of this CASE would drift.
+# else falls out of the *effective* tier. Written once here and formatted into
+# every query that needs it — two copies of this CASE would drift.
 _VERDICT_CASE = (
     "CASE WHEN v.manual IS NOT NULL THEN v.manual "
     "WHEN v.rel_path IS NULL THEN 'unclassified' "
-    "WHEN v.tier < 0 THEN 'error' "
-    "WHEN v.tier <= {cut} THEN 'reject' "
+    "WHEN " + _EFFECTIVE_TIER + " < 0 THEN 'error' "
+    "WHEN " + _EFFECTIVE_TIER + " <= {cut} THEN 'reject' "
     "ELSE 'keep' END"
 )
 
@@ -190,6 +199,7 @@ VERDICT_FILTERS = (
     "modest",
     "unclassified",
     "error",
+    "disagreement",
 )
 LABEL_FILTERS = ("unlabeled", "keep", "discard")
 SEARCH_MODES = ("text", "semantic")
@@ -238,10 +248,13 @@ _PHOTO_COLUMNS = (
 # from what `p.*` used to drag along: `media_kind`, `verdict_source` and
 # `classified_at` — nothing in app.js or the API touches them, and
 # /api/media/detail serves the full row from get_verdict() for the inspector.
+# `corrected_tier` stays: the pill shows COALESCE(corrected, model) and the
+# pen mark needs to know a gold label is set. `corrected_at` does not.
 _VERDICT_COLUMNS = (
     "v.tier AS v_tier, v.manual AS v_manual, v.reason AS v_reason, "
     "v.confidence AS v_confidence, v.prompt_version AS v_prompt_version, "
-    "v.sheet_path AS v_sheet_path, v.error AS v_error"
+    "v.sheet_path AS v_sheet_path, v.error AS v_error, "
+    "v.corrected_tier AS v_corrected_tier"
 )
 
 _VERDICT_JOIN = " LEFT JOIN media_verdicts v ON v.rel_path = p.rel_path"
@@ -303,18 +316,25 @@ def _verdict_predicate(name: str, cut: int) -> Tuple[str, List[Any]]:
     Shared by `query_photos` and `verdict_facet_counts` so a chip's pass-rate
     badge cannot end up describing a different filter than the chip runs.
 
-    Raw-tier names (`unusable`/`modest`/`t2`/`t3`/`t4`) ignore rows the user
-    has overridden by hand — a manual verdict is not the classifier's output
-    and must not be counted as evidence about it. T0/T1 split `reject` (quality
-    gate vs taste call); T2/T3/T4 split `keep`, because `reject` already
-    captures the first two and "Keeps" otherwise collapses three distinct
-    outfits into one chip.
+    Raw-tier names (`unusable`/`modest`/`t2`/`t3`/`t4`) are the *effective*
+    bucket: COALESCE(corrected_tier, tier). A keep/reject pin is policy and
+    does not move the photo out of its measurement chip; a human gold label
+    does. T0/T1 split `reject` (quality gate vs taste call); T2/T3/T4 split
+    `keep`, because `reject` already captures the first two and "Keeps"
+    otherwise collapses three distinct outfits into one chip.
+
+    `disagreement` is gold-vs-model. Uncorrected rows are not in it.
     """
     case = _VERDICT_CASE.format(cut=cut)
     if name in ("keep", "reject", "unclassified", "error"):
         return f"{case} = ?", [name]
     if name in _TIER_FILTERS:
-        return "v.manual IS NULL AND v.tier = ?", [_TIER_FILTERS[name]]
+        return f"{_EFFECTIVE_TIER} = ?", [_TIER_FILTERS[name]]
+    if name == "disagreement":
+        return (
+            "v.corrected_tier IS NOT NULL AND v.corrected_tier != v.tier",
+            [],
+        )
     return "", []
 
 # Creators with no verdict row at all still need every key present, or the
@@ -329,6 +349,7 @@ _EMPTY_VERDICT_COUNTS: Dict[str, int] = {
     "t2_count": 0,
     "t3_count": 0,
     "t4_count": 0,
+    "disagreement_count": 0,
     "stale_count": 0,
 }
 
@@ -483,12 +504,6 @@ _PROMPTS_IMPORTED_KEY = "prompts_imported_from_json"
 # One-shot: added_at/mtime coalesced and media_kind filled in. See
 # _migrate_sort_columns.
 _SORT_COLUMNS_KEY = "sort_columns_coalesced"
-_GENERATIONS_IMPORTED_KEY = "generations_imported_from_json"
-
-# -1 discard · 0 unrated · 1 keep · 2 star. Deliberately cheap to press: an
-# expensive rating UI collects no data, and no data is the whole problem A3
-# exists to fix.
-GENERATION_RATINGS = (-1, 0, 1, 2)
 _FTS_TOKEN = re.compile(r"[A-Za-z0-9_]+")
 
 
@@ -693,15 +708,8 @@ class ArchiveIndex:
             self._migrate_taste_columns()
             # After _migrate_added_at, which is what it cleans up behind.
             self._migrate_sort_columns()
+            self._migrate_verdict_corrections()
             self._conn.commit()
-        # After the schema commit, not inside it: the import writes rows, and a
-        # failure here must leave a usable index rather than an app that will
-        # not start. Best-effort for the same reason `_init_fts` is.
-        try:
-            self.import_generations_from_json()
-        except Exception:
-            log.exception("legacy generations import failed; continuing")
-
     def _apply_pragmas(self) -> None:
         """Connection tuning. Best-effort — an old SQLite must not stop startup.
 
@@ -1021,259 +1029,6 @@ class ArchiveIndex:
                     )
             self._conn.commit()
         return len(rows)
-
-    # ── generations ──────────────────────────────────────────────────
-
-    def record_generation(
-        self,
-        *,
-        rel_path: str,
-        source_rel: str,
-        creator: str,
-        workflow: str,
-        seed: int,
-        positive_prompt: str,
-        negative_prompt: str = "",
-        gen_id: Optional[str] = None,
-        created_at: Optional[str] = None,
-        batch_id: Optional[str] = None,
-        checkpoint: Optional[str] = None,
-        steps: Optional[int] = None,
-        cfg: Optional[float] = None,
-        denoise: Optional[float] = None,
-        mode_e: bool = False,
-        prompt_version: Optional[str] = None,
-        rating: int = 0,
-        error: Optional[str] = None,
-    ) -> str:
-        """Record one output file. Returns its `gen_id`.
-
-        `seed` is required and stored as an integer — passing None raises here
-        rather than writing an unreproducible row (design_generation_loop.md
-        §2.1). Use -1 to mean "never recorded", which is what the legacy JSON
-        import writes.
-
-        Re-recording the same `rel_path` overwrites: a regenerate that lands on
-        the same filename is a correction, not a second output. `rating` is
-        deliberately *not* overwritten on conflict — the user's verdict outlives
-        a metadata rewrite.
-        """
-        if seed is None:
-            raise ValueError("record_generation requires a resolved seed")
-        rel = normalize_rel_path(rel_path)
-        gid = gen_id or uuid.uuid4().hex
-        stamp = created_at or datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            self._conn.execute(
-                "INSERT INTO generations("
-                "gen_id, rel_path, source_rel, creator, created_at, batch_id, "
-                "workflow, checkpoint, seed, steps, cfg, denoise, mode_e, "
-                "positive_prompt, negative_prompt, prompt_version, rating, error"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(rel_path) DO UPDATE SET "
-                "source_rel=excluded.source_rel, creator=excluded.creator, "
-                "created_at=excluded.created_at, batch_id=excluded.batch_id, "
-                "workflow=excluded.workflow, checkpoint=excluded.checkpoint, "
-                "seed=excluded.seed, steps=excluded.steps, cfg=excluded.cfg, "
-                "denoise=excluded.denoise, mode_e=excluded.mode_e, "
-                "positive_prompt=excluded.positive_prompt, "
-                "negative_prompt=excluded.negative_prompt, "
-                "prompt_version=excluded.prompt_version, error=excluded.error",
-                (
-                    gid,
-                    rel,
-                    normalize_rel_path(source_rel),
-                    creator,
-                    stamp,
-                    batch_id,
-                    workflow,
-                    checkpoint,
-                    int(seed),
-                    None if steps is None else int(steps),
-                    None if cfg is None else float(cfg),
-                    None if denoise is None else float(denoise),
-                    1 if mode_e else 0,
-                    positive_prompt or "",
-                    negative_prompt or "",
-                    prompt_version,
-                    int(rating),
-                    error,
-                ),
-            )
-            self._conn.commit()
-        return gid
-
-    def rate_generation(self, gen_id: str, rating: int) -> bool:
-        """Set the user's verdict on one output. False if `gen_id` is unknown.
-
-        One ordinal rather than a keep flag plus a star flag: the two would let
-        "starred but not kept" exist, which means nothing.
-
-        Returning to 0 clears `rated_at` — a timestamp beside "unrated" claims a
-        judgement that was explicitly withdrawn, and `rated` counts key off
-        `rating != 0`.
-        """
-        if isinstance(rating, bool) or not isinstance(rating, int):
-            raise ValueError(f"rating must be an int in {GENERATION_RATINGS}")
-        if rating not in GENERATION_RATINGS:
-            raise ValueError(f"rating must be one of {GENERATION_RATINGS}")
-        stamp = None if rating == 0 else datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            cur = self._conn.execute(
-                "UPDATE generations SET rating = ?, rated_at = ? WHERE gen_id = ?",
-                (rating, stamp, gen_id),
-            )
-            self._conn.commit()
-            return cur.rowcount > 0
-
-    # Whitelist, because `sort` arrives from a query string and goes into an
-    # ORDER BY, which cannot be parameterised. An unknown value falls back to
-    # newest rather than erroring — a stale bookmark should not 500.
-    _GEN_SORTS = {
-        "newest": "created_at DESC, id DESC",
-        "oldest": "created_at ASC, id ASC",
-        "rating": "rating DESC, created_at DESC",
-        "source": "source_rel ASC, created_at DESC",
-    }
-
-    @staticmethod
-    def _iso_day_bound(value: str, *, end: bool) -> str:
-        """Date-only values are inclusive of that calendar day.
-
-        `until=2026-08-10` must not exclude `2026-08-10T15:00:00` just because
-        the timestamp is lexicographically greater than the date. A full ISO
-        string is used as-is.
-        """
-        text = (value or "").strip()
-        if "T" in text:
-            return text
-        return text + ("T23:59:59.999999" if end else "T00:00:00")
-
-    def _generations_where(
-        self,
-        *,
-        creator: Optional[str],
-        workflow: Optional[str],
-        checkpoint: Optional[str],
-        batch_id: Optional[str],
-        source_rel: Optional[str],
-        rating: Optional[int],
-        rated_only: bool,
-        since: Optional[str],
-        until: Optional[str] = None,
-        has_source: Optional[bool] = None,
-    ) -> Tuple[str, List[Any]]:
-        where: List[str] = []
-        params: List[Any] = []
-        for column, value in (
-            ("creator", creator),
-            ("workflow", workflow),
-            ("checkpoint", checkpoint),
-            ("batch_id", batch_id),
-        ):
-            if value:
-                where.append(f"{column} = ?")
-                params.append(value)
-        if source_rel:
-            where.append("source_rel = ?")
-            params.append(normalize_rel_path(source_rel))
-        # `rating=0` means "the unrated"; `rated_only` means "everything I have
-        # judged". Two different questions, so `rating is not None` rather than
-        # a truthiness test — `if rating:` would silently drop the 0 case.
-        if rating is not None:
-            where.append("rating = ?")
-            params.append(int(rating))
-        if rated_only:
-            where.append("rating != 0")
-        if since:
-            where.append("created_at >= ?")
-            params.append(self._iso_day_bound(since, end=False))
-        if until:
-            where.append("created_at <= ?")
-            params.append(self._iso_day_bound(until, end=True))
-        # Empty source_rel is how a future pure-txt2img run is stored; the
-        # column is NOT NULL so this cannot be an IS NULL test.
-        if has_source is True:
-            where.append("source_rel != ''")
-        elif has_source is False:
-            where.append("source_rel = ''")
-        return (" WHERE " + " AND ".join(where)) if where else "", params
-
-    def list_generations(
-        self,
-        *,
-        creator: Optional[str] = None,
-        workflow: Optional[str] = None,
-        checkpoint: Optional[str] = None,
-        batch_id: Optional[str] = None,
-        source_rel: Optional[str] = None,
-        rating: Optional[int] = None,
-        rated_only: bool = False,
-        since: Optional[str] = None,
-        until: Optional[str] = None,
-        has_source: Optional[bool] = None,
-        sort: str = "newest",
-        limit: Optional[int] = None,
-        offset: int = 0,
-    ) -> Tuple[List[Dict[str, Any]], int]:
-        """Outputs for the A1 gallery. Returns `(rows, total)`.
-
-        `total` is the count *before* paging, matching `query_photos` — the
-        frontend derives `has_more` from it, so a page-sized total would stop
-        infinite scroll after the first page.
-        """
-        where_sql, params = self._generations_where(
-            creator=creator,
-            workflow=workflow,
-            checkpoint=checkpoint,
-            batch_id=batch_id,
-            source_rel=source_rel,
-            rating=rating,
-            rated_only=rated_only,
-            since=since,
-            until=until,
-            has_source=has_source,
-        )
-        order = self._GEN_SORTS.get(sort or "newest", self._GEN_SORTS["newest"])
-        sql = f"SELECT * FROM generations{where_sql} ORDER BY {order}"
-        page_params = list(params)
-        if limit is not None:
-            sql += " LIMIT ? OFFSET ?"
-            page_params.extend([int(limit), max(0, int(offset))])
-        with self._lock:
-            total = self._conn.execute(
-                f"SELECT COUNT(*) AS c FROM generations{where_sql}", params
-            ).fetchone()["c"]
-            rows = self._conn.execute(sql, page_params).fetchall()
-        return [dict(r) for r in rows], int(total)
-
-    def explain_generations_query(self, sort: str = "newest") -> str:
-        """Query plan for the default gallery page — the §4 pagination gate is
-        a claim about the plan, so it is checkable as one."""
-        order = self._GEN_SORTS.get(sort or "newest", self._GEN_SORTS["newest"])
-        with self._lock:
-            rows = self._conn.execute(
-                f"EXPLAIN QUERY PLAN SELECT * FROM generations "
-                f"ORDER BY {order} LIMIT 50 OFFSET 900"
-            ).fetchall()
-        return " | ".join(str(r["detail"]) for r in rows)
-
-    def delete_generation(self, gen_id: str) -> Optional[str]:
-        """Drop one generation row. Returns its `rel_path`, or None if unknown.
-
-        The row only — unlinking the file is the caller's job, because the
-        containment check for "is this path inside the archive" lives in
-        `ArchiveStore` and must not be duplicated here (the A0 lesson).
-        """
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT rel_path FROM generations WHERE gen_id = ?", (gen_id,)
-            ).fetchone()
-            if not row:
-                return None
-            self._conn.execute("DELETE FROM generations WHERE gen_id = ?", (gen_id,))
-            self._conn.commit()
-            return str(row["rel_path"])
 
     # ── B3 taste labels ───────────────────────────────────────────────
 
@@ -1715,7 +1470,7 @@ class ArchiveIndex:
     # name: the value reaches an unparameterisable position in the SQL, and
     # `photos` is deliberately absent — it is rebuilt from the media on disk,
     # so restoring it would resurrect rows for files that are not there.
-    EXPORTABLE_TABLES = ("prompts", "media_verdicts", "phashes", "generations", "labels")
+    EXPORTABLE_TABLES = ("prompts", "media_verdicts", "phashes", "labels")
 
     def dump_table(self, table: str) -> List[Dict[str, Any]]:
         """Every row of one derived table, as plain dicts."""
@@ -1731,7 +1486,7 @@ class ArchiveIndex:
         """Upsert rows into one derived table. Returns the number applied.
 
         Idempotent by construction — every exportable table has a natural key
-        (`rel_path`, or `gen_id` for generations), so a re-run of a half-finished
+        (`rel_path`), so a re-run of a half-finished
         restore overwrites rather than duplicating.
         """
         if table not in self.EXPORTABLE_TABLES:
@@ -1781,204 +1536,64 @@ class ArchiveIndex:
                 self._reindex_prompt(str(row["rel_path"]), entry)
             self._conn.commit()
 
-    def generation_facets(self) -> Dict[str, List[str]]:
-        """Distinct workflows / checkpoints / creators present, for filter UI.
+    # ── perceptual hashes ────────────────────────────────────────────
 
-        Built from the data rather than the registry: a checkpoint the user has
-        since removed from ComfyUI still has outputs worth filtering to.
+    def _photo_rel_by_lower(self, conn: sqlite3.Connection) -> Dict[str, str]:
+        """lower(rel_path) → photos.rel_path. Catalog casing is the join key."""
+        rows = conn.execute("SELECT rel_path FROM photos").fetchall()
+        return {str(r["rel_path"]).lower(): r["rel_path"] for r in rows}
+
+    def _canonical_photo_rel(self, rel_path: str, photo_lower: Dict[str, str]) -> str:
+        rel = normalize_rel_path(rel_path)
+        return photo_lower.get(rel.lower(), rel)
+
+    def remap_phash_paths_to_photos(self) -> int:
+        """Rewrite phash rows that differ from photos.rel_path only by case.
+
+        `find_duplicates.py` used to walk the disk, so Windows stored the
+        folder's on-disk casing. The catalog stores Instagram handles in the
+        casing `upsert_photo` saw. SQLite compares TEXT case-sensitively, so
+        those hashes never joined and vanished from the duplicates UI.
         """
-        out: Dict[str, List[str]] = {}
-        with self._lock:
-            for key, column in (
-                ("creators", "creator"),
-                ("workflows", "workflow"),
-                ("checkpoints", "checkpoint"),
-            ):
-                rows = self._conn.execute(
-                    f"SELECT DISTINCT {column} AS v FROM generations "
-                    f"WHERE {column} IS NOT NULL AND {column} != '' ORDER BY v"
-                ).fetchall()
-                out[key] = [str(r["v"]) for r in rows]
-        return out
-
-    def generation_rating_summary(self) -> Dict[str, Any]:
-        """Volume + keep-rate aggregates for `GET /api/insights` (B1).
-
-        One pass for the totals, then one grouped pass per cut. The cuts are
-        what make the number actionable: a single archive-wide keep rate says
-        the loop is or is not working, but not which half to change.
-        """
-        def _slice(rows: Sequence[sqlite3.Row]) -> Dict[str, Dict[str, Any]]:
-            out: Dict[str, Dict[str, Any]] = {}
-            for row in rows:
-                rated = int(row["rated"] or 0)
-                kept = int(row["kept"] or 0)
-                out[str(row["k"])] = {
-                    "total": int(row["total"] or 0),
-                    "rated": rated,
-                    "kept": kept,
-                    "keep_rate": _ratio(kept, rated),
-                }
-            return out
-
-        # `rated` counts a withdrawn verdict (0) as unrated, matching
-        # rate_generation clearing rated_at when it returns to 0.
-        agg = (
-            "COUNT(*) AS total, "
-            "SUM(CASE WHEN rating != 0 THEN 1 ELSE 0 END) AS rated, "
-            "SUM(CASE WHEN rating >= 1 THEN 1 ELSE 0 END) AS kept"
-        )
-        with self._lock:
-            totals = self._conn.execute(
-                f"SELECT {agg}, "
-                "SUM(CASE WHEN rating = -1 THEN 1 ELSE 0 END) AS discarded, "
-                "SUM(CASE WHEN rating = 2 THEN 1 ELSE 0 END) AS starred, "
-                "SUM(CASE WHEN seed < 0 THEN 1 ELSE 0 END) AS unreproducible, "
-                "COUNT(DISTINCT source_rel) AS sources "
-                "FROM generations"
-            ).fetchone()
-            multi = self._conn.execute(
-                "SELECT COUNT(*) AS c FROM ("
-                "SELECT source_rel FROM generations "
-                "GROUP BY source_rel HAVING COUNT(*) > 1)"
-            ).fetchone()
-            cuts = {}
-            for name, expr in (
-                ("by_prompt_version", "COALESCE(prompt_version, 'unknown')"),
-                ("by_workflow", "COALESCE(workflow, 'unknown')"),
-                ("by_checkpoint", "COALESCE(checkpoint, 'unknown')"),
-                ("by_mode_e", "CASE WHEN mode_e = 1 THEN 'on' ELSE 'off' END"),
-            ):
-                cuts[name] = _slice(
-                    self._conn.execute(
-                        f"SELECT {expr} AS k, {agg} FROM generations GROUP BY k"
-                    ).fetchall()
-                )
-
-        total = int(totals["total"] or 0)
-        rated = int(totals["rated"] or 0)
-        kept = int(totals["kept"] or 0)
-        sources = int(totals["sources"] or 0)
-        return {
-            "total_outputs": total,
-            "sources_with_gens": sources,
-            "sources_with_multiple": int(multi["c"] or 0),
-            "avg_per_source": round(total / sources, 3) if sources else 0.0,
-            "rated": rated,
-            "kept": kept,
-            "discarded": int(totals["discarded"] or 0),
-            "starred": int(totals["starred"] or 0),
-            "keep_rate": _ratio(kept, rated),
-            # Legacy rows imported with seed = -1. Success criterion #1 is
-            # "100% of new rows reproducible" and nothing else measures it.
-            "unreproducible": int(totals["unreproducible"] or 0),
-            **cuts,
-        }
-
-    def import_generations_from_json(
-        self, path: str = GENERATIONS_INDEX_FILE
-    ) -> int:
-        """One-time import of the pre-A0 `generations_index.json`.
-
-        Returns the number of output files imported. Guarded by a meta key, the
-        same shape as the prompts import — `ArchiveIndex` is constructed per
-        process and this would otherwise re-run on every start.
-
-        Legacy records carry `seed: null` because the seed was resolved inside
-        the graph builder and never returned (§2.1). That value is gone and
-        cannot be recovered, so those rows get **-1**: an honest "never
-        recorded" that A1 can render as "seed not recorded" and refuse to
-        regenerate from. Inventing a plausible seed would make the
-        regenerate button confidently wrong.
-
-        A malformed record is skipped, not fatal — the file is hand-editable
-        and was written by a path that could die mid-run, and abandoning the
-        import would lose the well-formed records after it.
-        """
-        if self._meta_get(_GENERATIONS_IMPORTED_KEY) == "1":
-            return 0
-        if not os.path.isfile(path):
-            return 0
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError) as e:
-            log.warning("generations index unreadable, skipping import: %s", e)
-            return 0
-        if not isinstance(data, dict):
-            return 0
-
-        imported = 0
-        for source_rel, records in data.items():
-            if not isinstance(records, list):
-                continue
-            for rec in records:
-                if not isinstance(rec, dict):
-                    continue
-                files = rec.get("files")
-                if not isinstance(files, list):
-                    continue
-                raw_seed = rec.get("seed")
-                seed = -1 if raw_seed is None else int(raw_seed)
-                for item in files:
-                    if not isinstance(item, dict):
-                        continue
-                    rel = item.get("rel_path")
-                    if not rel:
-                        continue
-                    rel = normalize_rel_path(str(rel))
-                    # _generations/<creator>/<file> — fall back to the source's
-                    # first segment for records written before that layout.
-                    parts = rel.split("/")
-                    creator = parts[1] if len(parts) > 2 else (
-                        normalize_rel_path(source_rel).split("/", 1)[0]
-                    )
-                    try:
-                        self.record_generation(
-                            rel_path=rel,
-                            source_rel=source_rel,
-                            creator=creator,
-                            workflow=str(rec.get("workflow") or "pro"),
-                            seed=seed,
-                            positive_prompt=rec.get("positive_prompt") or "",
-                            negative_prompt=rec.get("negative_prompt") or "",
-                            created_at=rec.get("created_at"),
-                            checkpoint=rec.get("checkpoint"),
-                            steps=rec.get("steps"),
-                            cfg=rec.get("cfg"),
-                            denoise=rec.get("denoise"),
-                        )
-                        imported += 1
-                    except (ValueError, sqlite3.DatabaseError) as e:
-                        log.warning("skipping legacy generation %s: %s", rel, e)
-
-        self._meta_set(_GENERATIONS_IMPORTED_KEY, "1")
-        log.info("imported %d generation(s) from %s", imported, path)
-        return imported
-
-    def list_generations_for(self, source_rel: str) -> List[Dict[str, Any]]:
-        """Every generation from one source photo, newest first — unbounded.
-
-        The JSON index it replaces kept `items[:20]` and dropped the rest
-        silently, which is data loss that only becomes visible once something
-        renders the history.
-        """
-        rel = normalize_rel_path(source_rel)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM generations WHERE source_rel = ? "
-                "ORDER BY created_at DESC, id DESC",
-                (rel,),
+                "SELECT h.rel_path AS hash_path, p.rel_path AS photo_path "
+                "FROM phashes h "
+                "JOIN photos p ON lower(h.rel_path) = lower(p.rel_path) "
+                "WHERE h.rel_path != p.rel_path"
             ).fetchall()
-        return [dict(r) for r in rows]
-
-    # ── perceptual hashes ────────────────────────────────────────────
+            if not rows:
+                return 0
+            n = 0
+            for row in rows:
+                hash_path = row["hash_path"]
+                photo_path = row["photo_path"]
+                taken = self._conn.execute(
+                    "SELECT 1 FROM phashes WHERE rel_path = ?",
+                    (photo_path,),
+                ).fetchone()
+                if taken:
+                    self._conn.execute(
+                        "DELETE FROM phashes WHERE rel_path = ?",
+                        (hash_path,),
+                    )
+                else:
+                    self._conn.execute(
+                        "UPDATE phashes SET rel_path = ? WHERE rel_path = ?",
+                        (photo_path, hash_path),
+                    )
+                n += 1
+            self._conn.commit()
+        if n:
+            log.info("aligned %s phash path(s) to catalog casing", n)
+        return n
 
     def set_phash(self, rel_path: str, value: int) -> None:
         from promptstudio.storage.dedupe import phash_hex
 
-        rel = normalize_rel_path(rel_path)
         with self._lock:
+            photo_lower = self._photo_rel_by_lower(self._conn)
+            rel = self._canonical_photo_rel(rel_path, photo_lower)
             self._conn.execute(
                 "INSERT INTO phashes(rel_path, phash, computed_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(rel_path) DO UPDATE SET "
@@ -1992,10 +1607,18 @@ class ArchiveIndex:
         from promptstudio.storage.dedupe import phash_hex
 
         now = datetime.now(timezone.utc).isoformat()
-        rows = [(normalize_rel_path(rel), phash_hex(value), now) for rel, value in items]
-        if not rows:
+        if not items:
             return 0
         with self._lock:
+            photo_lower = self._photo_rel_by_lower(self._conn)
+            rows = [
+                (
+                    self._canonical_photo_rel(rel, photo_lower),
+                    phash_hex(value),
+                    now,
+                )
+                for rel, value in items
+            ]
             self._conn.executemany(
                 "INSERT INTO phashes(rel_path, phash, computed_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(rel_path) DO UPDATE SET "
@@ -2008,40 +1631,55 @@ class ArchiveIndex:
     def get_phash(self, rel_path: str) -> Optional[int]:
         from promptstudio.storage.dedupe import phash_from_hex
 
-        with self._lock:
-            row = self._conn.execute(
+        rel = normalize_rel_path(rel_path)
+        with self._read() as conn:
+            row = conn.execute(
                 "SELECT phash FROM phashes WHERE rel_path = ?",
-                (normalize_rel_path(rel_path),),
+                (rel,),
             ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    "SELECT phash FROM phashes WHERE lower(rel_path) = lower(?) LIMIT 1",
+                    (rel,),
+                ).fetchone()
         return phash_from_hex(row["phash"]) if row else None
 
     def all_phashes(self) -> Dict[str, int]:
         from promptstudio.storage.dedupe import phash_from_hex
 
-        with self._lock:
-            rows = self._conn.execute("SELECT rel_path, phash FROM phashes").fetchall()
+        with self._read() as conn:
+            hash_rows = conn.execute("SELECT rel_path, phash FROM phashes").fetchall()
+            photo_lower = self._photo_rel_by_lower(conn)
         out: Dict[str, int] = {}
-        for row in rows:
+        for row in hash_rows:
             value = phash_from_hex(row["phash"])
-            if value is not None:
-                out[row["rel_path"]] = value
+            if value is None:
+                continue
+            key = photo_lower.get(str(row["rel_path"]).lower(), row["rel_path"])
+            out[key] = value
         return out
 
     def paths_missing_phash(self) -> List[str]:
-        """Indexed media with no hash yet, so a pass can resume."""
-        with self._lock:
-            rows = self._conn.execute(
+        """Indexed media with no hash yet, so a pass can resume.
+
+        The join is case-insensitive: a hash stored under on-disk folder
+        casing still counts, so a Windows walk cannot leave a creator
+        looking unscanned.
+        """
+        with self._read() as conn:
+            rows = conn.execute(
                 "SELECT p.rel_path FROM photos p "
-                "LEFT JOIN phashes h ON h.rel_path = p.rel_path "
+                "LEFT JOIN phashes h ON lower(h.rel_path) = lower(p.rel_path) "
                 "WHERE h.rel_path IS NULL ORDER BY p.rel_path"
             ).fetchall()
         return [row["rel_path"] for row in rows]
 
     def delete_phash(self, rel_path: str) -> None:
+        rel = normalize_rel_path(rel_path)
         with self._lock:
             self._conn.execute(
-                "DELETE FROM phashes WHERE rel_path = ?",
-                (normalize_rel_path(rel_path),),
+                "DELETE FROM phashes WHERE lower(rel_path) = lower(?)",
+                (rel,),
             )
             self._conn.commit()
 
@@ -2063,17 +1701,22 @@ class ArchiveIndex:
             return {}
         tier = int(row["tier"] if row["tier"] is not None else -1)
         manual = row["manual"]
+        keys = row.keys()
+        corrected_raw = row["corrected_tier"] if "corrected_tier" in keys else None
+        corrected_tier = int(corrected_raw) if corrected_raw is not None else None
+        effective = corrected_tier if corrected_tier is not None else tier
         if manual:
             verdict = str(manual)
-        elif tier < 0:
+        elif effective < 0:
             verdict = "error"
         else:
-            verdict = "reject" if tier <= cut else "keep"
-        return {
+            verdict = "reject" if effective <= cut else "keep"
+        out = {
             "rel_path": row["rel_path"],
             "tier": tier,
             "verdict": verdict,
             "manual": manual or None,
+            "corrected_tier": corrected_tier,
             "reason": row["reason"] or "",
             "media_kind": row["media_kind"] or "",
             "verdict_source": row["verdict_source"] or "",
@@ -2084,6 +1727,9 @@ class ArchiveIndex:
             "classified_at": row["classified_at"] or "",
             "duration_ms": row["duration_ms"],
         }
+        if "corrected_at" in keys:
+            out["corrected_at"] = row["corrected_at"] or None
+        return out
 
     def set_verdict(
         self,
@@ -2100,7 +1746,7 @@ class ArchiveIndex:
         error: Optional[str] = None,
         duration_ms: Optional[int] = None,
     ) -> None:
-        """Record one classify attempt. Upsert; the manual override survives.
+        """Record one classify attempt. Upsert; manual and corrected_tier survive.
 
         A failed attempt is written too, with tier -1 and the reason in `error`.
         Without that a timeout is indistinguishable from "never attempted", which
@@ -2157,6 +1803,11 @@ class ArchiveIndex:
         result = self.set_manual_verdicts([rel_path], value)
         return bool(result["updated"])
 
+    def set_corrected_tier(self, rel_path: str, value: Optional[int]) -> bool:
+        """Pin one file to a human exposure tier, or clear back to the model."""
+        result = self.set_corrected_tiers([rel_path], value)
+        return bool(result["updated"])
+
     def set_manual_verdicts(
         self, rel_paths: Sequence[str], value: Optional[str]
     ) -> Dict[str, List[str]]:
@@ -2198,6 +1849,69 @@ class ArchiveIndex:
                     f"WHERE rel_path IN ({found_ph})",
                     [value, *chunk_found],
                 )
+            self._conn.commit()
+        updated = [rel for rel in uniq if rel in found]
+        missing = [rel for rel in uniq if rel not in found]
+        return {"updated": updated, "missing": missing}
+
+    def set_corrected_tiers(
+        self, rel_paths: Sequence[str], value: Optional[int]
+    ) -> Dict[str, List[str]]:
+        """Pin many files to a human exposure tier, or clear back to the model.
+
+        Same unclassified-is-missing contract as `set_manual_verdicts`. A new
+        gold label clears `manual` — the pin was about the old derived verdict.
+        Clearing the label leaves `manual` alone.
+
+        `tier` (the model measurement) is never written here.
+        """
+        if value is not None:
+            try:
+                value = int(value)
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"bad corrected tier: {value!r}") from e
+            if value < 0 or value > 4:
+                raise ValueError(f"bad corrected tier: {value!r}")
+        seen: set[str] = set()
+        uniq: List[str] = []
+        for raw in rel_paths:
+            rel = normalize_rel_path(str(raw)) if raw else ""
+            if not rel or rel in seen:
+                continue
+            seen.add(rel)
+            uniq.append(rel)
+        if not uniq:
+            return {"updated": [], "missing": []}
+        found: set[str] = set()
+        stamp = datetime.now(timezone.utc).isoformat() if value is not None else None
+        with self._lock:
+            for start in range(0, len(uniq), 400):
+                chunk = uniq[start : start + 400]
+                placeholders = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"SELECT rel_path FROM media_verdicts "
+                    f"WHERE rel_path IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                chunk_found = [r["rel_path"] for r in rows]
+                if not chunk_found:
+                    continue
+                found.update(chunk_found)
+                found_ph = ",".join("?" * len(chunk_found))
+                if value is None:
+                    self._conn.execute(
+                        f"UPDATE media_verdicts "
+                        f"SET corrected_tier = NULL, corrected_at = NULL "
+                        f"WHERE rel_path IN ({found_ph})",
+                        chunk_found,
+                    )
+                else:
+                    self._conn.execute(
+                        f"UPDATE media_verdicts "
+                        f"SET corrected_tier = ?, corrected_at = ?, manual = NULL "
+                        f"WHERE rel_path IN ({found_ph})",
+                        [value, stamp, *chunk_found],
+                    )
             self._conn.commit()
         updated = [rel for rel in uniq if rel in found]
         missing = [rel for rel in uniq if rel not in found]
@@ -2296,18 +2010,20 @@ class ArchiveIndex:
             f"SUM(CASE WHEN {verdict} = 'keep' THEN 1 ELSE 0 END) AS keep_count",
             f"SUM(CASE WHEN {verdict} = 'reject' THEN 1 ELSE 0 END) AS reject_count",
             "SUM(CASE WHEN v.rel_path IS NULL THEN 1 ELSE 0 END) AS unclassified_count",
-            "SUM(CASE WHEN v.rel_path IS NOT NULL AND v.tier < 0 "
-            "AND v.manual IS NULL THEN 1 ELSE 0 END) AS error_count",
-            "SUM(CASE WHEN v.tier = 0 AND v.manual IS NULL THEN 1 ELSE 0 END) "
+            f"SUM(CASE WHEN {verdict} = 'error' THEN 1 ELSE 0 END) AS error_count",
+            f"SUM(CASE WHEN {_EFFECTIVE_TIER} = 0 THEN 1 ELSE 0 END) "
             "AS unusable_count",
-            "SUM(CASE WHEN v.tier = 1 AND v.manual IS NULL THEN 1 ELSE 0 END) "
+            f"SUM(CASE WHEN {_EFFECTIVE_TIER} = 1 THEN 1 ELSE 0 END) "
             "AS modest_count",
-            "SUM(CASE WHEN v.tier = 2 AND v.manual IS NULL THEN 1 ELSE 0 END) "
+            f"SUM(CASE WHEN {_EFFECTIVE_TIER} = 2 THEN 1 ELSE 0 END) "
             "AS t2_count",
-            "SUM(CASE WHEN v.tier = 3 AND v.manual IS NULL THEN 1 ELSE 0 END) "
+            f"SUM(CASE WHEN {_EFFECTIVE_TIER} = 3 THEN 1 ELSE 0 END) "
             "AS t3_count",
-            "SUM(CASE WHEN v.tier = 4 AND v.manual IS NULL THEN 1 ELSE 0 END) "
+            f"SUM(CASE WHEN {_EFFECTIVE_TIER} = 4 THEN 1 ELSE 0 END) "
             "AS t4_count",
+            "SUM(CASE WHEN v.corrected_tier IS NOT NULL "
+            "AND v.corrected_tier != v.tier THEN 1 ELSE 0 END) "
+            "AS disagreement_count",
             f"SUM({stale_expr}) AS stale_count",
         )
         sql = (
@@ -2321,7 +2037,7 @@ class ArchiveIndex:
         """Share of the archive each verdict filter selects — the B4 pass rate.
 
         One grouped pass over `photos` for every filter, not one COUNT per
-        chip: the review strip has five and the browse dropdown ten, and a
+        chip: the review strip has five and the browse dropdown eleven, and a
         round trip each is how a badge meant to be glanced at turns into a
         reason not to render it. The predicates come from
         `_verdict_predicate`, the same source `query_photos` filters with.
@@ -2461,6 +2177,28 @@ class ArchiveIndex:
                 "SELECT tier, COUNT(*) AS c FROM media_verdicts GROUP BY tier"
             ).fetchall()
         return {str(int(row["tier"])): int(row["c"]) for row in rows}
+
+    def correction_counts(self) -> Dict[str, int]:
+        """Gold-label volume for /api/insights. Not mixed into tier_histogram.
+
+        `corrections` is every human tier, including ones that agree with the
+        model. `disagreements` is the training-interesting slice. Unclassified
+        files cannot have a gold label (the setter refuses to invent a row).
+        """
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT "
+                "SUM(CASE WHEN corrected_tier IS NOT NULL THEN 1 ELSE 0 END) "
+                "AS corrections, "
+                "SUM(CASE WHEN corrected_tier IS NOT NULL "
+                "AND corrected_tier != tier THEN 1 ELSE 0 END) "
+                "AS disagreements "
+                "FROM media_verdicts"
+            ).fetchone()
+        return {
+            "corrections": int(row["corrections"] or 0),
+            "disagreements": int(row["disagreements"] or 0),
+        }
 
     def prompt_import_done(self) -> bool:
         return self._meta_get(_PROMPTS_IMPORTED_KEY) == "1"
@@ -2669,6 +2407,23 @@ class ArchiveIndex:
         # not worth it) but stop paying for the indexes.
         for facet in ("setting", "outfit", "pose", "lighting"):
             self._conn.execute(f"DROP INDEX IF EXISTS idx_photos_facet_{facet}")
+
+    def _migrate_verdict_corrections(self) -> None:
+        """Human gold-label columns on existing media_verdicts tables."""
+        cols = {
+            row[1]
+            for row in self._conn.execute(
+                "PRAGMA table_info(media_verdicts)"
+            ).fetchall()
+        }
+        if "corrected_tier" not in cols:
+            self._conn.execute(
+                "ALTER TABLE media_verdicts ADD COLUMN corrected_tier INTEGER"
+            )
+        if "corrected_at" not in cols:
+            self._conn.execute(
+                "ALTER TABLE media_verdicts ADD COLUMN corrected_at TEXT"
+            )
 
     @classmethod
     def get(cls) -> "ArchiveIndex":
@@ -3304,10 +3059,16 @@ class ArchiveIndex:
         # the inspector gets the whole row from `get_verdict()`. A 60-row page
         # was 52.8 KB of JSON, most of it this object.
         if "v_verdict" in keys and row["v_verdict"] != "unclassified":
+            corrected_raw = (
+                row["v_corrected_tier"] if "v_corrected_tier" in keys else None
+            )
             photo["verdict"] = {
                 "verdict": row["v_verdict"],
                 "tier": int(row["v_tier"] if row["v_tier"] is not None else -1),
                 "manual": row["v_manual"] or None,
+                "corrected_tier": (
+                    int(corrected_raw) if corrected_raw is not None else None
+                ),
                 "reason": row["v_reason"] or "",
                 "confidence": row["v_confidence"],
                 "prompt_version": row["v_prompt_version"] or "",
@@ -3627,8 +3388,9 @@ class ArchiveIndex:
             # sort after tier 0 rather than before it — an unreadable file is a
             # retry, not a verdict.
             order = (
-                "ORDER BY CASE WHEN v.tier IS NULL THEN 9 WHEN v.tier < 0 THEN 8 "
-                "ELSE v.tier END ASC, p.filename ASC"
+                "ORDER BY CASE WHEN " + _EFFECTIVE_TIER + " IS NULL THEN 9 "
+                "WHEN " + _EFFECTIVE_TIER + " < 0 THEN 8 "
+                "ELSE " + _EFFECTIVE_TIER + " END ASC, p.filename ASC"
             )
         elif sort == "foryou":
             # Unscored rows (no p_keep yet) sink; among scored, highest first.

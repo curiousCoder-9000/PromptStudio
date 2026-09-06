@@ -12,3 +12,4 @@ For current behavior use [../context.md](../context.md) and the reference docs i
 | `design_creator_sync_ux.md` | Implemented 2026-08-08 | current UI in `app.js` |
 | `design_creator_scrape_queue.md` | Shipped (was "Draft rev 2") | [../instagram_downloader.md](../instagram_downloader.md), `scraping/creator_queue.py` |
 | `research_multi_source_scraping.md` | Research, pre-implementation | [../multi_source_scraping.md](../multi_source_scraping.md) |
+| `design_generation_loop.md` | Shipped then removed — ComfyUI generate loop | — |

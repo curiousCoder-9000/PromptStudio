@@ -126,6 +126,38 @@ def test_duplicates_exclude_carousel_and_never_preselect_favorite(api, make_phot
     assert group["keeper"] == a
 
 
+def test_duplicates_join_when_phash_path_casing_differs(api, make_photo):
+    """Windows disk casing must not hide a hashed pair from the review UI."""
+    from datetime import datetime, timezone
+
+    from promptstudio.storage.dedupe import phash_hex
+
+    a, full_a = make_photo(creator="alexann", name="a.jpg", meta={"post_id": "111"})
+    b, full_b = make_photo(creator="alexann", name="b.jpg", meta={"post_id": "222"})
+    from PIL import Image
+
+    Image.new("RGB", (64, 80), (12, 40, 90)).save(full_a, "JPEG")
+    Image.new("RGB", (64, 80), (12, 40, 90)).save(full_b, "JPEG")
+    index = ArchiveIndex.get()
+    now = datetime.now(timezone.utc).isoformat()
+    with index._lock:
+        index._conn.executemany(
+            "INSERT INTO phashes(rel_path, phash, computed_at) VALUES (?, ?, ?)",
+            [
+                ("AlexAnn/a.jpg", phash_hex(compute_phash(full_a)), now),
+                ("AlexAnn/b.jpg", phash_hex(compute_phash(full_b)), now),
+            ],
+        )
+        index._conn.commit()
+
+    status, payload = api("GET", "/api/duplicates?kind=phash")
+    assert status == 200
+    assert payload["total_groups"] >= 1
+    members = {m["rel_path"] for g in payload["groups"] for m in g["members"]}
+    assert a in members
+    assert b in members
+
+
 def test_carousel_siblings_are_not_duplicates(api, make_photo):
     a, full_a = make_photo(name="c1.jpg", meta={"post_id": "samepost"})
     b, full_b = make_photo(name="c2.jpg", meta={"post_id": "samepost"})

@@ -147,6 +147,11 @@ gallery, the creator list and every rebuild for free.
 
 ## 4. Storage
 
+Human gold labels live in `corrected_tier` on the same row and never overwrite
+`tier`. Filters and derived keep/reject read `COALESCE(corrected_tier, tier)`;
+insights and the distribution guard stay on the model number. See
+[`design_tier_correction.md`](design_tier_correction.md).
+
 `media_verdicts` is its own table, not columns on `photos` — the same reasoning
 as `phashes`: written by a separate background pass, absent until it runs, and
 it would otherwise widen the row every gallery query reads. It also keeps a

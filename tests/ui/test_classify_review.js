@@ -574,17 +574,62 @@ const { Session, Report, sleep } = require('./cdp');
   await sleep(500);
 
   const triage = await s.eval(`
+    const row = document.getElementById('triageTierRow');
+    const pressed = row
+      ? [...row.querySelectorAll('[data-tier][aria-pressed="true"]')].map((b) => b.dataset.tier)
+      : [];
     return {
       visible: getComputedStyle(document.getElementById('triageBlock')).display,
-      tier: document.getElementById('triageTierChip').textContent.trim(),
+      buttons: row ? row.querySelectorAll('[data-tier]').length : 0,
+      pressed: pressed.join(','),
       reason: document.getElementById('triageReason').textContent.trim(),
       sheet: getComputedStyle(document.getElementById('triageSheetWrap')).display
     };
   `);
   r.check('triage block opens with the lightbox', triage.visible === 'flex', triage.visible);
-  r.check('tier chip names the tier', /^Tier \d · \w/.test(triage.tier), triage.tier);
+  r.check('stepper has five tiers', triage.buttons === 5, String(triage.buttons));
+  r.check('one tier is pressed', /^[0-4]$/.test(triage.pressed), triage.pressed);
   r.check('reason is shown', triage.reason.length > 0, triage.reason);
   r.check('no contact sheet for a photo', triage.sheet === 'none', triage.sheet);
+
+  await s.resetFetchLog();
+  const recode = await s.eval(`
+    const row = document.getElementById('triageTierRow');
+    const on = row.querySelector('[aria-pressed="true"]');
+    const current = on ? Number(on.dataset.tier) : 2;
+    const want = current === 3 ? 2 : 3;
+    const photo = state.photos[state.lightboxIndex];
+    const model = photo && photo.verdict ? Number(photo.verdict.tier) : null;
+    row.querySelector('[data-tier="' + want + '"]').click();
+    return { want, model, rel: photo && photo.rel_path };
+  `);
+  await sleep(700);
+  const recodeLog = (await s.fetchLog()).calls;
+  const recodePosts = recodeLog.filter((u) => u.includes('/api/classify/verdict'));
+  const recodeRefetch = recodeLog.filter((u) => u.includes('/api/photos'));
+  r.check('changing tier POSTs the verdict endpoint', recodePosts.length === 1,
+    recodeLog.join(' | '));
+  r.check('changing tier does not refetch the gallery', recodeRefetch.length === 0,
+    recodeRefetch.join(' | '));
+  const recoded = await s.eval(`
+    const p = state.photos[state.lightboxIndex];
+    const v = p && p.verdict;
+    const row = document.getElementById('triageTierRow');
+    const pressed = row
+      ? [...row.querySelectorAll('[aria-pressed="true"]')].map((b) => b.dataset.tier)
+      : [];
+    return {
+      corrected: v && v.corrected_tier,
+      model: v && v.tier,
+      pressed: pressed.join(',')
+    };
+  `);
+  r.check('corrected_tier matches the click', recoded.corrected === recode.want,
+    JSON.stringify({ recode, recoded }));
+  r.check('model tier is unchanged', recoded.model === recode.model,
+    JSON.stringify({ recode, recoded }));
+  r.check('stepper presses the gold label', recoded.pressed === String(recode.want),
+    recoded.pressed);
 
   await s.resetFetchLog();
   const before = await s.eval(`return state.photos[state.lightboxIndex].rel_path;`);

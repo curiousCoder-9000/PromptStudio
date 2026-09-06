@@ -90,11 +90,6 @@ const HELPERS = `
       h1Text: h1s.map((h) => h.textContent.replace(/\\s+/g, ' ').trim()),
       mainCount: document.querySelectorAll('main').length,
       navNames: navs.map((n) => window.__accName(n).name),
-      // The outputs view used to be a second <main>, which this grid placed
-      // into the sidebar's own column at row 2.
-      outputsTag: document.getElementById('outputsView')?.tagName,
-      outputsIsInsideMain: Boolean(
-        document.getElementById('outputsView')?.parentElement?.closest('main')),
     };
   `);
   r.check('the document has exactly one h1', landmarks.h1Count === 1,
@@ -103,9 +98,6 @@ const HELPERS = `
     JSON.stringify(landmarks.h1Text));
   r.check('exactly one <main>, not one per view', landmarks.mainCount === 1,
     `found ${landmarks.mainCount}`);
-  r.check('both gallery views live inside it, and neither is its own <main>',
-    landmarks.outputsIsInsideMain && landmarks.outputsTag !== 'MAIN',
-    JSON.stringify({ tag: landmarks.outputsTag, inside: landmarks.outputsIsInsideMain }));
   r.check('a named <nav> exists',
     landmarks.navNames.length >= 1 && landmarks.navNames.every(Boolean),
     JSON.stringify(landmarks.navNames));

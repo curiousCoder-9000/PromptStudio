@@ -24,13 +24,12 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from promptstudio.config import EXCLUDED_FOLDERS, SAVED_DIR
+from promptstudio.config import SAVED_DIR
 from promptstudio.storage.db import ArchiveIndex
 from promptstudio.storage.dedupe import (
     DEFAULT_MAX_DISTANCE,
-    compute_phash,
     find_near_duplicate_groups,
-    iter_media_paths,
+    hash_indexed_photos,
     pick_keeper,
 )
 
@@ -60,36 +59,19 @@ def main() -> None:
     index = ArchiveIndex.get()
     index.ensure_ready()
 
-    known = index.all_phashes()
-    todo = iter_media_paths(SAVED_DIR, EXCLUDED_FOLDERS)
-    if args.creator:
-        prefix = args.creator.strip().lstrip("@") + "/"
-        todo = [r for r in todo if r.startswith(prefix)]
-    if not args.rehash:
-        todo = [r for r in todo if r not in known]
-    if args.limit:
-        todo = todo[: args.limit]
-
-    if todo:
-        print(f"Hashing {len(todo)} file(s)...")
-        started = time.perf_counter()
-        batch, failed = [], 0
-        for i, rel in enumerate(todo, start=1):
-            full = os.path.join(SAVED_DIR, *rel.split("/"))
-            value = compute_phash(full)
-            if value is None:
-                failed += 1
-            else:
-                batch.append((rel, value))
-            if len(batch) >= 200:
-                index.set_phashes(batch)
-                batch = []
-            if i % 250 == 0:
-                print(f"  {i}/{len(todo)}")
-        if batch:
-            index.set_phashes(batch)
+    started = time.perf_counter()
+    hashed, failed, remapped = hash_indexed_photos(
+        index,
+        base_dir=SAVED_DIR,
+        limit=args.limit,
+        rehash=args.rehash,
+        creator=args.creator,
+    )
+    if remapped:
+        print(f"Aligned {remapped} hash path(s) to the catalog.")
+    if hashed or failed:
         print(
-            f"Hashed {len(todo) - failed} in {time.perf_counter() - started:.1f}s"
+            f"Hashed {hashed} in {time.perf_counter() - started:.1f}s"
             + (f" ({failed} unreadable)" if failed else "")
         )
 

@@ -10,7 +10,6 @@ Agent map: [context.md](context.md).
 | Python | 3.10+ (tested 3.14) |
 | Deps | `instaloader`, `opencv-python-headless` (`requirements.txt`); Pillow optional for thumbs |
 | Ollama | `http://localhost:11434` · default model **`qwen2.5vl:7b`** |
-| ComfyUI | optional `http://127.0.0.1:8188` |
 | Archive | `~/Pictures/InstagramSaved` |
 
 ```powershell
@@ -128,18 +127,6 @@ Instaloader’s first call is `Profile.from_username()` →
   with catch-up + `IG_POSTS_HARD_CAP` (80). Do not scrape while the cooldown
   is active.
 - See [instagram_downloader.md](instagram_downloader.md).
-
-### Comfy generate fails
-
-- ComfyUI running; `GET /api/health` → `comfy: true`.
-- Checkpoint `COMFYUI_CHECKPOINT` must exist in Comfy models.
-- Pro workflow: `promptstudio/comfy/workflows/pro/` — `graph.json` (ComfyUI API export)
-  plus `slots.json` (where the prompt, seed and parameters are injected).
-- `GET /api/workflows` lists what the picker offers. A workflow missing from it failed
-  validation — `<archive>/promptstudio.log` has the line, naming the slot or node id.
-- To use your own graph: export it from ComfyUI with **Export (API)**, drop it and a
-  `slots.json` into `<archive>/_workflows/<name>/`. A user entry shadows a built-in of
-  the same name, so `<archive>/_workflows/pro/` overrides the shipped Pro graph.
 
 ### Thumbs broken
 

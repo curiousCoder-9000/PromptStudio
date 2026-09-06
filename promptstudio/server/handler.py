@@ -8,10 +8,6 @@ import socketserver
 import urllib.parse
 from typing import Any, Dict, List, Optional
 
-from promptstudio.comfy.batch import ComfyBatchManager
-from promptstudio.comfy.client import ComfyJobManager, check_comfy_health
-from promptstudio.comfy.params import NoPromptError, resolve_generation_params
-from promptstudio.comfy.registry import WorkflowError
 from promptstudio.config import (
     CLASSIFY_REJECT_MAX_TIER,
     CREATOR_SCRAPE_QUEUE_ENABLED,
@@ -56,8 +52,6 @@ _sync = SyncManager.get()
 _batch = BatchPromptManager.get()
 _styles = CreatorStyleStore()
 _trash = TrashStore()
-_comfy = ComfyJobManager.get()
-_comfy_batch = ComfyBatchManager.get()
 _classify = ClassifyJobManager.get()
 _scrape_queue = CreatorScrapeQueue.get() if CREATOR_SCRAPE_QUEUE_ENABLED else None
 
@@ -71,7 +65,6 @@ OLLAMA_TAGS_URL = os.environ.get(
 _following_cache: Dict[str, Any] = {"mtime": None, "accounts": []}
 
 _TRUTHY = ("1", "true", "yes")
-_FALSY = ("0", "false", "no")
 _TASTE_JOB = None
 
 
@@ -113,52 +106,6 @@ def _as_bool(value: Any, *, default: bool = False) -> bool:
     return bool(value)
 
 
-# Keys A2 accepts. An allowlist rather than `**data`: `plan()` forwards every
-# unrecognised key into the generation parameters, so a typo in the request
-# body would silently become a workflow override instead of a 400.
-_BATCH_SELECTION_KEYS = (
-    "creator",
-    "media_type",
-    "verdict",
-    "source",
-)
-_BATCH_OVERRIDE_KEYS = (
-    "variant",
-    "workflow",
-    "positive_prompt",
-    "negative_prompt",
-    "use_mode_e",
-    "aspect_ratio",
-    "steps",
-    "cfg_scale",
-    "denoise",
-    "checkpoint",
-    "seed",
-)
-
-
-def _batch_generate_args(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Request body → `ComfyBatchManager.start()` kwargs."""
-    args: Dict[str, Any] = {}
-    raw_paths = data.get("paths")
-    if isinstance(raw_paths, list):
-        paths = [str(p).strip() for p in raw_paths if str(p).strip()]
-        if paths:
-            args["paths"] = paths
-    for key in _BATCH_SELECTION_KEYS:
-        value = data.get(key)
-        if value:
-            args[key] = str(value).strip()
-    if data.get("favorite") is not None:
-        args["favorite"] = _as_bool(data.get("favorite"))
-    if data.get("limit") is not None:
-        args["limit"] = int(data["limit"])
-    for key in _BATCH_OVERRIDE_KEYS:
-        if data.get(key) is not None:
-            args[key] = data[key]
-    return args
-
-
 class _BadSource(ValueError):
     """An unrecognised ?source= value. Carries its own 400 message."""
 
@@ -196,22 +143,6 @@ def _parse_source_filter(query: Dict[str, List[str]]) -> Optional[str]:
             f"Unknown source '{raw}'. Known: {', '.join(sorted(known_sources()))}, all"
         )
     return name
-
-
-def _parse_has_source(query: Dict[str, List[str]]) -> Optional[bool]:
-    """Tri-state: True / False filter, or None for "any".
-
-    Empty is unfiltered. `has_source=0` is a real filter (pure txt2img rows),
-    so this cannot collapse to `_as_bool` — that treats missing as False.
-    """
-    raw = (query.get("has_source", [""])[0] or "").strip().lower()
-    if not raw:
-        return None
-    if raw in _TRUTHY:
-        return True
-    if raw in _FALSY:
-        return False
-    return None
 
 
 def _expand_post_groups(reps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -350,7 +281,6 @@ def _check_ollama_health(timeout: float = 1.5) -> Dict[str, Any]:
         )
     except Exception:
         pass
-    result.update(check_comfy_health(timeout=timeout))
     # Who holds each exclusive resource — the first thing to look at when
     # a job reports busy and nothing appears to be running.
     result["leases"] = LEASES.snapshot()
@@ -802,52 +732,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"status": "ok", "removed": removed})
             return
 
-        if parsed.path == "/api/generation":
-            from promptstudio.storage.db import ArchiveIndex
-
-            query = urllib.parse.parse_qs(parsed.query)
-            gen_id = (query.get("gen_id", [""])[0] or "").strip()
-            if not gen_id:
-                self.send_error(400, "gen_id required")
-                return
-            index = ArchiveIndex.get()
-            # Permanent, no trash — unlike DELETE /api/photo. Archive media is
-            # unrecoverable; a generation carries its own seed, prompt and
-            # checkpoint, so it is reproducible by construction and a restore
-            # path would be dead weight. The confirm copy says so.
-            rel = index.delete_generation(gen_id)
-            if rel is None:
-                self.send_error(404, "Generation not found")
-                return
-            # Row first, file second, and the file only through the shared
-            # containment check: the row is ours but it is still data, and a
-            # hand-edited or migrated rel_path must not become an arbitrary
-            # unlink. A row without its file is recoverable; the reverse is not.
-            full_path = _archive.resolve_path(rel)
-            removed = False
-            if full_path:
-                try:
-                    os.remove(full_path)
-                    removed = True
-                    from promptstudio.storage.thumbs import resolve_thumb_file
-
-                    thumb = resolve_thumb_file(rel)
-                    if thumb and os.path.isfile(thumb):
-                        os.remove(thumb)
-                except OSError as e:
-                    log.warning("removing generation %s: %s", rel, e)
-            else:
-                log.warning("generation %s is outside the archive; row only", rel)
-            self._send_json(
-                {
-                    "status": "deleted",
-                    "gen_id": gen_id,
-                    "rel_path": rel,
-                    "file_removed": removed,
-                }
-            )
-            return
-
         # Not super().do_DELETE() — SimpleHTTPRequestHandler has no such method,
         # so the AttributeError hit the error boundary and reported a mistyped
         # URL as a server fault. GET and PUT already answered 404 here.
@@ -944,33 +828,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 fav = _favorites.toggle(rel_path)
             self._send_json({"status": "ok", "path": rel_path, "favorite": fav})
-            return
-
-        if parsed.path == "/api/generation/rate":
-            try:
-                data = self._read_json_body()
-            except json.JSONDecodeError:
-                self.send_error(400, "Invalid JSON body")
-                return
-            gen_id = (data.get("gen_id") or "").strip()
-            if not gen_id:
-                self.send_error(400, "gen_id required")
-                return
-            from promptstudio.storage.db import ArchiveIndex
-
-            try:
-                # Passed through unconverted on purpose: int("2") would quietly
-                # accept a string and int(1.9) would round a nonsense value into
-                # range. rate_generation is the one place the scale is defined.
-                rating = data.get("rating")
-                ok = ArchiveIndex.get().rate_generation(gen_id, rating)
-            except ValueError as e:
-                self.send_error(400, str(e))
-                return
-            if not ok:
-                self.send_error(404, "Generation not found")
-                return
-            self._send_json({"status": "ok", "gen_id": gen_id, "rating": rating})
             return
 
         if parsed.path == "/api/labels":
@@ -1699,10 +1556,13 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path == "/api/classify/verdict":
-            # Manual override: pins a file to keep/reject regardless of tier, and
-            # survives re-classify. `verdict: null` hands it back to the model.
+            # Two independent writes on the same row:
+            #   verdict — policy pin (keep/reject/auto), survives re-classify
+            #   tier    — human gold label 0–4 (or null to hand back to the model)
             # `rel_paths` is the bulk form (U13) — one transaction, same
             # unclassified-is-missing contract as the single-path call.
+            # Gold is applied first so a recode clears a stale pin, then a
+            # Keep/Reject in the same body can re-pin if the client asked.
             try:
                 data = self._read_json_body()
             except json.JSONDecodeError:
@@ -1727,17 +1587,46 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                     400, f"rel_paths exceeds {MAX_PHOTO_IDS_API} (got {len(paths)})"
                 )
                 return
-            raw = data.get("verdict")
-            value = None if raw in (None, "", "auto") else str(raw).strip().lower()
-            if value not in (None, "keep", "reject"):
-                self.send_error(400, "verdict must be keep, reject, or null")
+            has_verdict = "verdict" in data
+            has_tier = "tier" in data
+            if not has_verdict and not has_tier:
+                self.send_error(400, "verdict or tier required")
                 return
+            value = None
+            tier_value: Optional[int] = None
+            if has_verdict:
+                raw = data.get("verdict")
+                value = None if raw in (None, "", "auto") else str(raw).strip().lower()
+                if value not in (None, "keep", "reject"):
+                    self.send_error(400, "verdict must be keep, reject, or null")
+                    return
+            if has_tier:
+                raw_tier = data.get("tier")
+                if raw_tier in (None, "", "auto"):
+                    tier_value = None
+                else:
+                    try:
+                        tier_value = int(raw_tier)
+                    except (TypeError, ValueError):
+                        self.send_error(400, "tier must be 0-4 or null")
+                        return
+                    if tier_value < 0 or tier_value > 4:
+                        self.send_error(400, "tier must be 0-4 or null")
+                        return
             from promptstudio.storage.db import ArchiveIndex
 
             index = ArchiveIndex.get()
-            result = index.set_manual_verdicts(paths, value)
-            updated = result["updated"]
-            missing = result["missing"]
+            updated: List[str] = []
+            missing: List[str] = []
+            if has_tier:
+                result = index.set_corrected_tiers(paths, tier_value)
+                updated = result["updated"]
+                missing = result["missing"]
+            if has_verdict:
+                result = index.set_manual_verdicts(paths, value)
+                if not has_tier:
+                    updated = result["updated"]
+                    missing = result["missing"]
             if not bulk:
                 if not updated:
                     self._send_json(
@@ -1758,15 +1647,17 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 )
                 return
             verdicts = index.verdicts_for(updated) if updated else {}
-            self._send_json(
-                {
-                    "status": "ok",
-                    "verdict": value,
-                    "updated": updated,
-                    "missing": missing,
-                    "verdicts": verdicts,
-                }
-            )
+            payload = {
+                "status": "ok",
+                "updated": updated,
+                "missing": missing,
+                "verdicts": verdicts,
+            }
+            if has_verdict:
+                payload["verdict"] = value
+            if has_tier:
+                payload["tier"] = tier_value
+            self._send_json(payload)
             return
 
         if path == "/api/creator/style/rebuild":
@@ -1810,189 +1701,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json(restored)
             except (ValueError, json.JSONDecodeError):
                 self.send_error(400, "Invalid JSON body")
-            return
-
-        if path == "/api/prompt/mode-e":
-            try:
-                data = self._read_json_body()
-                rel_path = (data.get("path") or "").strip()
-                if not rel_path:
-                    self.send_error(400, "path required")
-                    return
-                rel_path = urllib.parse.unquote(rel_path)
-                if not _archive.resolve_path(rel_path):
-                    self.send_error(404, "Photo not found")
-                    return
-                from promptstudio.prompts.comfy_mode import build_mode_e_bundle
-
-                filename = os.path.basename(rel_path)
-                cached = _prompt_cache.get(rel_path, filename) or {}
-                positive = data.get("positive_prompt")
-                negative = data.get("negative_prompt")
-                if positive is None:
-                    positive = cached.get("positive_prompt") or ""
-                if negative is None:
-                    negative = cached.get("negative_prompt") or ""
-                structured = cached.get("structured_vision")
-                if not isinstance(structured, dict):
-                    structured = None
-                bundle = build_mode_e_bundle(
-                    positive=str(positive),
-                    negative=str(negative),
-                    structured=structured,
-                )
-                apply = bool(data.get("apply"))
-                result = {
-                    "path": rel_path,
-                    "positive_prompt": bundle["positive"],
-                    "negative_prompt": bundle["negative"],
-                    "anti_terms": list(bundle["anti_terms"]),
-                    "source": bundle["source"],
-                    "clothing_keys": list(bundle["clothing_keys"]),
-                    "applied": False,
-                }
-                if apply:
-                    updated = dict(cached)
-                    updated["positive_prompt"] = bundle["positive"]
-                    updated["negative_prompt"] = bundle["negative"]
-                    updated["exports"] = build_export_variants(
-                        bundle["positive"],
-                        bundle["negative"],
-                        structured=structured,
-                    )
-                    params = dict(updated.get("parameters") or {})
-                    params["mode_e_applied"] = True
-                    updated["parameters"] = params
-                    updated.pop("history", None)
-                    _prompt_cache.set(rel_path, updated, push_history=True)
-                    result["applied"] = True
-                    # Avoid nesting huge cache blobs; return exports only
-                    saved = _prompt_cache.get(rel_path, filename) or updated
-                    result["exports"] = (saved.get("exports") or {})
-                self._send_json(result)
-            except (ValueError, json.JSONDecodeError, TypeError) as exc:
-                log.warning("/api/prompt/mode-e bad request: %s", exc)
-                self.send_error(400, "Invalid JSON body")
-            except Exception as exc:
-                import traceback
-
-                traceback.print_exc()
-                log.exception("/api/prompt/mode-e failed")
-                try:
-                    self._send_json({"status": "error", "message": str(exc)}, 500)
-                except Exception:
-                    pass
-            return
-
-        if path == "/api/comfy/generate":
-            try:
-                data = self._read_json_body()
-                rel_path = (data.get("path") or "").strip()
-                if not rel_path:
-                    self.send_error(400, "path required")
-                    return
-                rel_path = urllib.parse.unquote(rel_path)
-                if not _archive.resolve_path(rel_path):
-                    self.send_error(404, "Photo not found")
-                    return
-                if not check_comfy_health().get("comfy"):
-                    self._send_json(
-                        {"status": "offline", "message": "ComfyUI is not reachable"},
-                        503,
-                    )
-                    return
-                # No is_running() pre-check: _comfy.start() takes the ComfyUI
-                # lease and flips status under one lock. Building the prompt
-                # below is cheap, so there is nothing to short-circuit for.
-
-                # Prompt selection, Mode E and the numeric defaults all live in
-                # comfy/params.py, because A2's batch runner makes exactly the
-                # same decisions and two copies would drift.
-                try:
-                    params = resolve_generation_params(rel_path, data)
-                except NoPromptError as exc:
-                    self.send_error(400, str(exc))
-                    return
-                except WorkflowError as exc:
-                    # An unnamed or misspelled workflow. 400 with the registry's
-                    # own message, which names what is available — the generic
-                    # "Invalid JSON body" below would be a lie about the fault.
-                    self.send_error(400, str(exc))
-                    return
-
-                if _comfy.start(
-                    source_rel=rel_path,
-                    positive=params.positive,
-                    negative=params.negative,
-                    workflow=params.workflow,
-                    aspect=params.aspect,
-                    steps=params.steps,
-                    cfg=params.cfg,
-                    denoise=params.denoise,
-                    seed=params.seed,
-                    checkpoint=params.checkpoint,
-                    # Both were computed here and thrown away. Without them the
-                    # generations table cannot answer "did Mode E help" or "which
-                    # prompt engine produced the winners" (design §3.3).
-                    mode_e=params.mode_e,
-                    prompt_version=params.prompt_version,
-                ):
-                    payload = {
-                        "status": "started",
-                        "path": rel_path,
-                        "variant": params.variant,
-                        "workflow": params.workflow,
-                        "denoise": params.denoise,
-                        "steps": params.steps,
-                        "cfg": params.cfg,
-                        # The resolved seed, not the request's — `seed` is None
-                        # whenever the client did not pin one, which is the
-                        # default. ComfyJobManager.start() materialises it.
-                        "seed": _comfy.get_status().get("seed"),
-                        "use_mode_e": params.mode_e,
-                        "positive_prompt": params.positive[:400],
-                        "negative_prompt": params.negative[:300],
-                    }
-                    if params.mode_meta:
-                        payload["mode_e"] = params.mode_meta
-                    self._send_json(payload)
-                else:
-                    self._send_json(
-                        {"status": "busy", "message": _comfy.last_refusal}, 409
-                    )
-            except (ValueError, json.JSONDecodeError):
-                self.send_error(400, "Invalid JSON body")
-            return
-
-        if path == "/api/comfy/batch":
-            try:
-                data = self._read_json_body()
-            except (ValueError, json.JSONDecodeError):
-                self.send_error(400, "Invalid JSON body")
-                return
-            if not check_comfy_health().get("comfy"):
-                self._send_json(
-                    {"status": "offline", "message": "ComfyUI is not reachable"}, 503
-                )
-                return
-            # No is_running() pre-check, same as the one-shot route: start()
-            # takes the ComfyUI lease and flips status under one lock.
-            try:
-                result = _comfy_batch.start(**_batch_generate_args(data))
-            except WorkflowError as exc:
-                self.send_error(400, str(exc))
-                return
-            self._send_json(result, 409 if result.get("status") == "busy" else 200)
-            return
-
-        if path == "/api/comfy/batch/cancel":
-            ok = _comfy_batch.cancel()
-            self._send_json(
-                {
-                    "status": "cancelling" if ok else "idle",
-                    "running": _comfy_batch.is_running(),
-                }
-            )
             return
 
         # Same as do_DELETE: there is no SimpleHTTPRequestHandler.do_POST.
@@ -2352,21 +2060,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json({"sources": source_info(), "default": "instagram"})
             return
 
-        if path == "/api/workflows":
-            # A4 registry, for the generate picker. Only name/label/kind: the
-            # client has no business knowing node ids, and shipping them would
-            # invite a second injector in JavaScript.
-            from promptstudio.comfy import registry
-
-            entries = [spec.summary() for spec in registry.list_workflows()]
-            self._send_json(
-                {
-                    "workflows": entries,
-                    "default": registry.default_workflow([e["name"] for e in entries]),
-                }
-            )
-            return
-
         if path == "/api/prompt":
             rel_path = query.get("path", [None])[0]
             force_refresh = query.get("refresh", ["false"])[0].lower() in ("true", "1", "yes")
@@ -2394,7 +2087,7 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path == "/api/insights":
-            # B1 quality dashboard — prompt edit rate and generation counts.
+            # B1 quality dashboard — prompt edit rate and classifier distribution.
             # Read-only aggregates over data already on disk; no new writes.
             from promptstudio.insights import compute_insights
 
@@ -2593,141 +2286,6 @@ class GalleryRequestHandler(http.server.SimpleHTTPRequestHandler):
                 except Exception:
                     status["pending"] = None
             self._send_json(status)
-            return
-
-        if path == "/api/comfy/batch/status":
-            self._send_json(_comfy_batch.get_status())
-            return
-
-        if path == "/api/comfy/status":
-            self._send_json(_comfy.get_status())
-            return
-
-        if path == "/api/generations/list":
-            from promptstudio.storage.db import ArchiveIndex
-            from promptstudio.storage.thumbs import thumb_url
-
-            try:
-                offset = max(0, int(query.get("offset", ["0"])[0] or 0))
-            except ValueError:
-                offset = 0
-            try:
-                limit = int(query.get("limit", [str(MAX_PHOTOS_API_PAGE)])[0]
-                            or MAX_PHOTOS_API_PAGE)
-            except ValueError:
-                limit = MAX_PHOTOS_API_PAGE
-            limit = max(1, min(limit, MAX_PHOTOS_API_PAGE))
-
-            def _q(name):
-                return (query.get(name, [""])[0] or "").strip() or None
-
-            rating = _q("rating")
-            try:
-                # "" means no filter; "0" means the *unrated*, which is a real
-                # filter — so this cannot collapse to a truthiness test.
-                rating = None if rating is None else int(rating)
-            except ValueError:
-                self.send_error(400, "rating must be an integer")
-                return
-
-            index = ArchiveIndex.get()
-            rows, total = index.list_generations(
-                creator=_q("creator"),
-                workflow=_q("workflow"),
-                checkpoint=_q("checkpoint"),
-                batch_id=_q("batch_id"),
-                source_rel=_q("source"),
-                rating=rating,
-                rated_only=(query.get("rated_only", [""])[0] or "") in ("1", "true"),
-                since=_q("since"),
-                until=_q("until"),
-                has_source=_parse_has_source(query),
-                sort=(query.get("sort", ["newest"])[0] or "newest"),
-                limit=limit,
-                offset=offset,
-            )
-            out = []
-            for row in rows:
-                rel = row["rel_path"]
-                item = dict(row)
-                item["url"] = "/media/" + "/".join(
-                    urllib.parse.quote(part) for part in rel.split("/")
-                )
-                item["thumb_url"] = thumb_url(rel)
-                item["mode_e"] = bool(row["mode_e"])
-                # -1 is the legacy "never recorded" marker from the A0 import.
-                # Surfaced as a flag so the UI can disable regenerate-same-seed
-                # instead of offering a button that cannot reproduce anything.
-                item["seed_recorded"] = int(row["seed"]) >= 0
-                src = (row["source_rel"] or "").strip()
-                item["has_source"] = bool(src)
-                item["source_thumb_url"] = thumb_url(src) if src else ""
-                out.append(item)
-            self._send_json(
-                {
-                    "generations": out,
-                    "total": total,
-                    "offset": offset,
-                    "limit": limit,
-                    "has_more": offset + len(out) < total,
-                    "facets": index.generation_facets(),
-                }
-            )
-            return
-
-        if path == "/api/generations":
-            rel_path = query.get("path", [None])[0]
-            if not rel_path:
-                self.send_error(400, "path required")
-                return
-            rel_path = urllib.parse.unquote(rel_path)
-            from promptstudio.storage.db import ArchiveIndex
-
-            # Served from the `generations` table, not generations_index.json.
-            # The table is the source of truth since A0 — the JSON is a rollback
-            # parachute — and it is the only place a rating exists, which the
-            # lightbox needs to show a verdict after it reopens.
-            #
-            # Shape is kept: one row per output file becomes one record with a
-            # single-entry `files` list. A multi-image job therefore arrives as
-            # several records rather than one with several files; the lightbox
-            # reads `gens[0]` and its primary either way.
-            rows = ArchiveIndex.get().list_generations_for(rel_path)
-            gens = []
-            for row in rows:
-                rel = row["rel_path"]
-                url = "/media/" + "/".join(
-                    urllib.parse.quote(part) for part in rel.split("/")
-                )
-                gens.append(
-                    {
-                        "created_at": row["created_at"],
-                        "primary_url": url,
-                        "primary_rel": rel,
-                        "files": [
-                            {
-                                "filename": os.path.basename(rel),
-                                "rel_path": rel,
-                                "url": url,
-                                "gen_id": row["gen_id"],
-                                "rating": row["rating"],
-                            }
-                        ],
-                        "gen_id": row["gen_id"],
-                        "rating": row["rating"],
-                        "seed": row["seed"],
-                        "workflow": row["workflow"],
-                        "checkpoint": row["checkpoint"],
-                        "steps": row["steps"],
-                        "cfg": row["cfg"],
-                        "denoise": row["denoise"],
-                        "mode_e": bool(row["mode_e"]),
-                        "prompt_version": row["prompt_version"],
-                        "positive_prompt": row["positive_prompt"],
-                        "negative_prompt": row["negative_prompt"],
-                    }
-                )
-            self._send_json({"path": rel_path, "generations": gens})
             return
 
         return super().do_GET()

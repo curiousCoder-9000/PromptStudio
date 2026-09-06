@@ -26,42 +26,10 @@ const state = {
     trashEnabled: true,
     trashCount: 0,
     ollamaOnline: null,
-    comfyOnline: null,
     // Instagram fetch tool. Server-side (IG_BACKEND); not a view pref.
     instagramBackend: 'instaloader',
     instagramCookies: { mode: 'none', ready: false },
     instagramCooldown: null,
-    comfyPollTimer: null,
-    // A4 registry, from /api/workflows. Which graph runs is a user choice now,
-    // not something inferred from which of three buttons was pressed.
-    workflows: [],
-    workflowDefault: 'pro',
-    compareMode: false,
-    currentGenerations: [],
-    // The generation currently shown in the compare pane, and its rating.
-    // Deliberately not a view pref: it is derived from whatever is on screen.
-    currentGenId: null,
-    currentGenRating: 0,
-    // Outputs gallery (A1). Its own paging state so switching views does not
-    // discard the photo gallery's, and vice versa.
-    outputsView: false,
-    outputs: [],
-    outputsOffset: 0,
-    outputsTotal: 0,
-    outputsHasMore: false,
-    outputsRequest: null,
-    outputDetail: null,
-    // Card that 1/2/0/x will rate while the outputs grid is on screen.
-    outputsFocusedId: null,
-    // Photo temporarily pushed so copy-params can open a source that was
-    // not on the current gallery page. Spliced back out on lightbox close.
-    lightboxPushedPhoto: null,
-    // One batch, viewed as a contact sheet. Not a <select> like the other
-    // filters: batch ids are opaque hex, so the only sensible way in is the
-    // completion toast, and the only sensible way out is a clear button.
-    outputsBatch: null,
-    generatePollTimer: null,
-    generateWasRunning: false,
     promptDirty: false,
     lightboxIndex: -1,
     currentPromptData: null,
@@ -188,6 +156,8 @@ const elements = {
     doneDuplicatesBtn: document.getElementById('doneDuplicatesBtn'),
     duplicatesSweepBtn: document.getElementById('duplicatesSweepBtn'),
     duplicatesSweepLabel: document.getElementById('duplicatesSweepLabel'),
+    duplicatesSelectAllBtn: document.getElementById('duplicatesSelectAllBtn'),
+    duplicatesSelectAllLabel: document.getElementById('duplicatesSelectAllLabel'),
     activityBtn: document.getElementById('activityBtn'),
     activityModal: document.getElementById('activityModal'),
     activityModalOverlay: document.getElementById('activityModalOverlay'),
@@ -394,7 +364,7 @@ const elements = {
     reviewExitBtn: document.getElementById('reviewExitBtn'),
     // Triage block in the lightbox inspector
     triageBlock: document.getElementById('triageBlock'),
-    triageTierChip: document.getElementById('triageTierChip'),
+    triageTierRow: document.getElementById('triageTierRow'),
     triageMeta: document.getElementById('triageMeta'),
     triageReason: document.getElementById('triageReason'),
     triageSheetWrap: document.getElementById('triageSheetWrap'),
@@ -412,60 +382,6 @@ const elements = {
     favoritePhotoBtn: document.getElementById('favoritePhotoBtn'),
     promptHistory: document.getElementById('promptHistory'),
     promptHistoryList: document.getElementById('promptHistoryList'),
-    lightboxGenImg: document.getElementById('lightboxGenImg'),
-    genRating: document.getElementById('genRating'),
-    outputsBtn: document.getElementById('outputsBtn'),
-    outputsView: document.getElementById('outputsView'),
-    outputsGrid: document.getElementById('outputsGrid'),
-    outputsEmpty: document.getElementById('outputsEmpty'),
-    outputsCount: document.getElementById('outputsCount'),
-    outputsKeepRate: document.getElementById('outputsKeepRate'),
-    outputsSort: document.getElementById('outputsSort'),
-    outputsRating: document.getElementById('outputsRating'),
-    outputsWorkflow: document.getElementById('outputsWorkflow'),
-    outputsCheckpoint: document.getElementById('outputsCheckpoint'),
-    outputsCreator: document.getElementById('outputsCreator'),
-    outputsHasSource: document.getElementById('outputsHasSource'),
-    outputsSince: document.getElementById('outputsSince'),
-    outputsUntil: document.getElementById('outputsUntil'),
-    outputsBatchChip: document.getElementById('outputsBatchChip'),
-    outputsBatchLabel: document.getElementById('outputsBatchLabel'),
-    outputsBatchClear: document.getElementById('outputsBatchClear'),
-    generateJobChip: document.getElementById('generateJobChip'),
-    generateJobChipTitle: document.getElementById('generateJobChipTitle'),
-    generateJobChipSub: document.getElementById('generateJobChipSub'),
-    generateJobChipFill: document.getElementById('generateJobChipFill'),
-    generateJobChipIcon: document.getElementById('generateJobChipIcon'),
-    generateJobChipCancel: document.getElementById('generateJobChipCancel'),
-    bulkGenerateBtn: document.getElementById('bulkGenerateBtn'),
-    bulkWorkflowSelect: document.getElementById('bulkWorkflowSelect'),
-    outputDetailModal: document.getElementById('outputDetailModal'),
-    outputDetailImage: document.getElementById('outputDetailImage'),
-    outputDetailSource: document.getElementById('outputDetailSource'),
-    outputDetailMeta: document.getElementById('outputDetailMeta'),
-    outputDetailPositive: document.getElementById('outputDetailPositive'),
-    outputDetailNegative: document.getElementById('outputDetailNegative'),
-    closeOutputDetail: document.getElementById('closeOutputDetail'),
-    outputCopyParams: document.getElementById('outputCopyParams'),
-    outputRegenSameSeed: document.getElementById('outputRegenSameSeed'),
-    outputRegenNewSeed: document.getElementById('outputRegenNewSeed'),
-    outputDelete: document.getElementById('outputDelete'),
-    outputDetailRating: document.getElementById('outputDetailRating'),
-    generatedPane: document.getElementById('generatedPane'),
-    mediaCompare: document.getElementById('mediaCompare'),
-    compareToggleBtn: document.getElementById('compareToggleBtn'),
-    comfySdxlBtn: document.getElementById('comfySdxlBtn'),
-    comfyFluxBtn: document.getElementById('comfyFluxBtn'),
-    comfyProBtn: document.getElementById('comfyProBtn'),
-    comfyWorkflowSelect: document.getElementById('comfyWorkflowSelect'),
-    comfyDenoiseInput: document.getElementById('comfyDenoiseInput'),
-    comfyStepsInput: document.getElementById('comfyStepsInput'),
-    comfyCfgInput: document.getElementById('comfyCfgInput'),
-    comfySeedLock: document.getElementById('comfySeedLock'),
-    comfySeedInput: document.getElementById('comfySeedInput'),
-    comfyModeECheck: document.getElementById('comfyModeECheck'),
-    applyModeEBtn: document.getElementById('applyModeEBtn'),
-    comfyStatusText: document.getElementById('comfyStatusText'),
     selectModeBtn: document.getElementById('selectModeBtn'),
     creatorStylePanel: document.getElementById('creatorStylePanel'),
     creatorStylePrefix: document.getElementById('creatorStylePrefix'),
@@ -473,6 +389,8 @@ const elements = {
     rebuildStyleBtn: document.getElementById('rebuildStyleBtn'),
     bulkBar: document.getElementById('bulkBar'),
     bulkCount: document.getElementById('bulkCount'),
+    bulkSelectLoadedBtn: document.getElementById('bulkSelectLoadedBtn'),
+    bulkSelectPileBtn: document.getElementById('bulkSelectPileBtn'),
     bulkReanalyzeBtn: document.getElementById('bulkReanalyzeBtn'),
     bulkDeleteBtn: document.getElementById('bulkDeleteBtn'),
     bulkClearBtn: document.getElementById('bulkClearBtn'),
@@ -617,8 +535,8 @@ function ensureHealthPolling() {
 }
 
 /* ── Poller visibility ─────────────────────────────────────────────
-   Six independent intervals (health 30s, comfy 2.5s, scrape 2.5s,
-   sync 2.5s, batch 4s, classify 3s) used to run forever in a
+   Independent intervals (health 30s, scrape 2.5s, sync 2.5s,
+   batch 4s, classify 3s) used to run forever in a
    backgrounded tab. Nothing they watch can change in a way the user
    sees while the tab is hidden, and the jobs live server-side, so
    the state is still correct on return.
@@ -634,7 +552,6 @@ const PAUSABLE_POLLERS = [
     // so resume fetches explicitly. Coming back to a 30s-stale Ollama badge
     // would defeat the point of resuming at all.
     { key: 'healthPollTimer', resume: () => { fetchHealth(); ensureHealthPolling(); } },
-    { key: 'comfyPollTimer', resume: () => pollComfyStatus() },
     { key: 'scrapePollTimer', resume: () => ensureScrapePolling() },
     { key: 'syncPollTimer', resume: () => pollSyncStatus() },
     { key: 'batchPollTimer', resume: () => pollBatchStatus() },
@@ -683,7 +600,6 @@ async function initApp() {
     // Before fetchCreators, so the first sidebar render already has pills
     // rather than flashing them in a frame later.
     await fetchKnownSources();
-    await fetchWorkflows();
     await fetchCreators();
     // Views/boards are sidebar chrome — don't delay the first gallery
     // page on them. delete_flow (and first paint) wait on fetchPhotos.
@@ -694,7 +610,6 @@ async function initApp() {
     // Resume job chips if work is mid-flight — jobs live on the server, so a
     // browser refresh must not orphan a running batch/scrape.
     pollBatchStatus();
-    pollGenerateStatus();
     pollClassifyStatus();
     pollTasteStatus();
     // Restore scrape/sync chip after refresh (queue lives on the server)
@@ -718,7 +633,6 @@ async function fetchHealth() {
 function updateOllamaBadge(data) {
     if (!elements.ollamaBadge || !elements.ollamaStatusLabel) return;
     const online = Boolean(data.ollama);
-    state.comfyOnline = data.comfy == null ? state.comfyOnline : Boolean(data.comfy);
     elements.ollamaBadge.classList.toggle('offline', !online);
     elements.ollamaBadge.classList.toggle('online', online);
     // One class the whole page can read, so the grid stops advertising an
@@ -731,10 +645,9 @@ function updateOllamaBadge(data) {
         ? 'Ollama is online — check again'
         : 'Ollama is offline — check again');
     const model = data.model ? ` ${data.model}` : '';
-    const comfyBit = state.comfyOnline ? ' · Comfy' : '';
     elements.ollamaStatusLabel.textContent = online
-        ? `Online${model}${comfyBit}`
-        : `Offline${comfyBit}`;
+        ? `Online${model}`
+        : 'Offline';
     if (elements.batchPromptBtn) {
         elements.batchPromptBtn.disabled = !online;
         elements.batchPromptBtn.title = online
@@ -746,204 +659,6 @@ function updateOllamaBadge(data) {
         elements.regeneratePromptBtn.title = online
             ? 'Re-Analyze photo with Ollama Vision Body & Beauty Engine'
             : 'Ollama is offline';
-    }
-    updateComfyButtons();
-}
-
-/**
- * A4 workflow registry — `<archive>/_workflows/<name>/{graph,slots}.json`, plus
- * the two that ship with the package.
- *
- * The picker is the whole point: before this, the graph was inferred from which
- * of three buttons you pressed, so a workflow the server could run perfectly
- * well had no way of being asked for.
- */
-async function fetchWorkflows() {
-    try {
-        const res = await fetch('/api/workflows');
-        const data = await res.json();
-        state.workflows = Array.isArray(data.workflows) ? data.workflows : [];
-        state.workflowDefault = data.default || state.workflowDefault;
-    } catch (err) {
-        // Degrade to the built-in name rather than to an empty picker: an empty
-        // <select> means the Generate button posts nothing and says nothing.
-        console.error('Error fetching workflows:', err);
-        state.workflows = [];
-    }
-    renderWorkflowPickers();
-    return state.workflows;
-}
-
-function workflowOptions() {
-    if (state.workflows.length) return state.workflows;
-    return [{ name: state.workflowDefault || 'pro', label: 'Pro (reference)', kind: 'img2img' }];
-}
-
-function workflowKind(name) {
-    const found = workflowOptions().find((w) => w.name === name);
-    return found ? found.kind : 'img2img';
-}
-
-function workflowLabel(name) {
-    const found = workflowOptions().find((w) => w.name === name);
-    return found ? found.label : name;
-}
-
-function selectedWorkflow() {
-    const picked = elements.comfyWorkflowSelect && elements.comfyWorkflowSelect.value;
-    return picked || state.workflowDefault || 'pro';
-}
-
-function renderWorkflowPickers() {
-    const entries = workflowOptions();
-    const fallback = entries.some((w) => w.name === state.workflowDefault)
-        ? state.workflowDefault
-        : entries[0].name;
-    [elements.comfyWorkflowSelect, elements.bulkWorkflowSelect].forEach((el) => {
-        if (!el) return;
-        // Keep whatever the user already picked across a refresh of the list.
-        const current = el.value;
-        el.innerHTML = '';
-        entries.forEach((wf) => {
-            const opt = document.createElement('option');
-            opt.value = wf.name;
-            // textContent, not innerHTML: the label comes out of a JSON file the
-            // user wrote, which is third-party text (hard rule 7).
-            opt.textContent = wf.label || wf.name;
-            opt.title = wf.kind;
-            el.appendChild(opt);
-        });
-        el.value = entries.some((w) => w.name === current) ? current : fallback;
-    });
-}
-
-function updateComfyButtons() {
-    const on = state.comfyOnline !== false;
-    const hasPrompt = Boolean(state.currentPromptData);
-    [elements.comfySdxlBtn, elements.comfyFluxBtn, elements.comfyProBtn].forEach((btn) => {
-        if (!btn) return;
-        btn.disabled = !on || !hasPrompt;
-        btn.title = on ? btn.title.replace(/ \(offline\)/, '') : 'ComfyUI offline';
-    });
-    if (elements.applyModeEBtn) {
-        elements.applyModeEBtn.disabled = !hasPrompt;
-    }
-    [
-        elements.comfyWorkflowSelect,
-        elements.comfyDenoiseInput,
-        elements.comfyStepsInput,
-        elements.comfyCfgInput,
-        elements.comfySeedLock,
-        elements.comfyModeECheck,
-    ].forEach((el) => {
-        if (el) el.disabled = !on;
-    });
-    syncComfyWorkflowControls();
-    syncComfySeedInput();
-}
-
-/**
- * Denoise and Mode E only mean anything to a workflow that takes a reference
- * image. Leaving them live on a txt2img pick offers two controls the server
- * will ignore, which reads as a bug in the graph rather than in the UI.
- */
-function syncComfyWorkflowControls() {
-    const isRef = workflowKind(selectedWorkflow()) === 'img2img';
-    const off = state.comfyOnline === false;
-    [elements.comfyDenoiseInput, elements.comfyModeECheck].forEach((el) => {
-        if (!el) return;
-        el.disabled = off || !isRef;
-        const label = el.closest('.comfy-denoise-label');
-        if (label) label.style.opacity = isRef ? '' : '0.45';
-    });
-}
-
-function syncComfySeedInput() {
-    if (!elements.comfySeedInput || !elements.comfySeedLock) return;
-    const locked = elements.comfySeedLock.checked;
-    elements.comfySeedInput.disabled = !locked || state.comfyOnline === false;
-    if (!locked) {
-        elements.comfySeedInput.value = '';
-        elements.comfySeedInput.placeholder = 'random';
-    } else if (!elements.comfySeedInput.value) {
-        elements.comfySeedInput.value = String(Math.floor(Math.random() * 2 ** 31));
-    }
-}
-
-function readComfyProControls() {
-    let denoise = 0.70;
-    let steps = 32;
-    let cfg = 6.0;
-    let seed = null;
-    if (elements.comfyDenoiseInput) {
-        const parsed = parseFloat(elements.comfyDenoiseInput.value);
-        if (!Number.isNaN(parsed)) denoise = Math.min(1, Math.max(0.45, parsed));
-    }
-    if (elements.comfyStepsInput) {
-        const parsed = parseInt(elements.comfyStepsInput.value, 10);
-        if (!Number.isNaN(parsed)) steps = Math.min(60, Math.max(10, parsed));
-    }
-    if (elements.comfyCfgInput) {
-        const parsed = parseFloat(elements.comfyCfgInput.value);
-        if (!Number.isNaN(parsed)) cfg = Math.min(15, Math.max(1, parsed));
-    }
-    if (elements.comfySeedLock && elements.comfySeedLock.checked && elements.comfySeedInput) {
-        const parsed = parseInt(elements.comfySeedInput.value, 10);
-        if (!Number.isNaN(parsed)) seed = parsed;
-    }
-    const useModeE = !(elements.comfyModeECheck && !elements.comfyModeECheck.checked);
-    return { denoise, steps, cfg, seed, useModeE };
-}
-
-async function applyModeEToEditor({ save = false } = {}) {
-    if (state.lightboxIndex === -1 || !state.currentPromptData) return;
-    const photo = state.photos[state.lightboxIndex];
-    const positive = elements.positivePromptText.innerText.trim()
-        || state.currentPromptData.positive_prompt;
-    const negative = elements.negativePromptText.innerText.trim()
-        || state.currentPromptData.negative_prompt;
-    try {
-        const res = await fetch('/api/prompt/mode-e', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                path: photo.rel_path,
-                positive_prompt: positive,
-                negative_prompt: negative,
-                apply: Boolean(save),
-            }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-            showToast(data.message || 'Mode E rewrite failed');
-            return;
-        }
-        elements.positivePromptText.innerText = data.positive_prompt || '';
-        elements.negativePromptText.innerText = data.negative_prompt || '';
-        state.currentPromptData = {
-            ...state.currentPromptData,
-            ...(data.prompt || {}),
-            positive_prompt: data.positive_prompt,
-            negative_prompt: data.negative_prompt,
-        };
-        if (data.prompt && data.prompt.exports) {
-            state.currentPromptData.exports = data.prompt.exports;
-        }
-        state.promptDirty = !save;
-        if (elements.savePromptBtn) {
-            elements.savePromptBtn.style.display = state.promptDirty ? 'inline-flex' : 'none';
-        }
-        const anti = (data.anti_terms || []).slice(0, 4).join(', ');
-        showToast(
-            anti
-                ? `Mode E applied (${data.source}) · anti: ${anti}`
-                : `Mode E applied (${data.source})`
-        );
-        if (elements.comfyStatusText) {
-            elements.comfyStatusText.textContent = `Mode E ready (${data.source})`;
-        }
-    } catch (err) {
-        showToast('Mode E request failed');
     }
 }
 
@@ -1066,11 +781,20 @@ function classifyTierRows(c, classified) {
         .join('');
 }
 
-function classifyMetrics(c, { classified, errors, cut, saturated }) {
+function classifyMetrics(c, { classified, errors, cut, saturated, corrections, disagreements }) {
     const rejectHelp = 'Share judged reject at the current cut. Only the tier is '
         + 'stored, so changing CLASSIFY_REJECT_MAX_TIER re-thresholds instantly.';
     const shareHelp = 'Share of classified media on the single most common tier. '
         + `Above ${TOP_TIER_SHARE_WARN} the filter is barely discriminating.`;
+    const goldHelp = 'Human gold labels. The histogram below stays on the model '
+        + 'tier so a labelled archive cannot hide a saturated prompt.';
+    const gold = Number(corrections || 0) > 0
+        ? `<div class="insights-metric" title="${goldHelp}">
+                <span class="insights-metric-value">${Number(disagreements || 0).toLocaleString()}</span>
+                <span class="insights-metric-label">Disagreements</span>
+                <span class="insights-metric-sub">${Number(corrections).toLocaleString()} corrected</span>
+            </div>`
+        : '';
     return `
         <div class="insights-metrics">
             <div class="insights-metric">
@@ -1088,6 +812,7 @@ function classifyMetrics(c, { classified, errors, cut, saturated }) {
                 <span class="insights-metric-label">Top tier share</span>
                 <span class="insights-metric-sub">${saturated ? 'saturated' : `under ${TOP_TIER_SHARE_WARN}`}</span>
             </div>
+            ${gold}
         </div>`;
 }
 
@@ -1130,8 +855,10 @@ function renderClassifyInsights(c) {
     const cut = classifyRejectCut(data);
     const topShare = Number(data.top_tier_share || 0);
     const saturated = classifySaturated(data, topShare);
+    const corrections = Number(data.corrections || 0);
+    const disagreements = Number(data.disagreements || 0);
 
-    return classifyMetrics(data, { classified, errors, cut, saturated })
+    return classifyMetrics(data, { classified, errors, cut, saturated, corrections, disagreements })
         + (saturated ? classifySaturationWarning(topShare) : '')
         + '<div class="insights-sublabel">Tier distribution'
         + ` <span class="insights-hint">— reject cut at tier ≤ ${cut}</span></div>`
@@ -1166,8 +893,6 @@ function renderLabelInsights(l) {
 function renderInsights(data) {
     if (!elements.insightsBody) return;
     const p = data.prompts || {};
-    const gen = data.generations || {};
-
     const pipeBlocks = Object.keys(p.by_pipeline_version || {}).length
         ? Object.entries(p.by_pipeline_version).map(([ver, n]) =>
             `<span class="insights-chip"><b>${escapeHtml(ver)}</b> ${Number(n).toLocaleString()}</span>`).join(' ')
@@ -1195,26 +920,6 @@ function renderInsights(data) {
                 </div>
                 <div class="insights-sublabel">By pipeline version</div>
                 <div class="insights-dist">${pipeBlocks}</div>
-            </section>
-
-            <section class="insights-section">
-                <h4><i class="fa-solid fa-image"></i> Generations</h4>
-                <div class="insights-metrics">
-                    <div class="insights-metric">
-                        <span class="insights-metric-value">${(gen.total_outputs ?? 0).toLocaleString()}</span>
-                        <span class="insights-metric-label">Outputs</span>
-                    </div>
-                    <div class="insights-metric">
-                        <span class="insights-metric-value">${(gen.sources_with_gens ?? 0).toLocaleString()}</span>
-                        <span class="insights-metric-label">Source photos</span>
-                        <span class="insights-metric-sub">avg ${gen.avg_per_source ?? 0} each</span>
-                    </div>
-                    <div class="insights-metric">
-                        <span class="insights-metric-value">${(gen.sources_with_multiple ?? 0).toLocaleString()}</span>
-                        <span class="insights-metric-label">Retried sources</span>
-                        <span class="insights-metric-sub">keep rate: ${_fmtRate(gen.keep_rate)} (needs rating)</span>
-                    </div>
-                </div>
             </section>
 
             <section class="insights-section">
@@ -1829,6 +1534,30 @@ function togglePhotoSelection(relPath, selected) {
     updateBulkBar();
 }
 
+function pileSelectStats() {
+    const selected = state.selectedPaths.size;
+    const loaded = state.photos.length;
+    const pile = Number(state.photoTotal) || 0;
+    return { selected, loaded, pile, moreInPile: pile > loaded };
+}
+
+function syncPileSelectButtons(loadedBtn, pileBtn) {
+    const { selected, loaded, pile, moreInPile } = pileSelectStats();
+    if (loadedBtn) {
+        loadedBtn.innerHTML = moreInPile
+            ? `<i class="fa-solid fa-check-double"></i> Select loaded (${loaded})`
+            : '<i class="fa-solid fa-check-double"></i> Select all';
+        loadedBtn.title = moreInPile
+            ? `Select the ${loaded} non-favourite items currently in the grid, not the whole pile`
+            : 'Select every non-favourite in this filter';
+    }
+    if (pileBtn) {
+        pileBtn.style.display = moreInPile && selected < pile ? '' : 'none';
+        pileBtn.innerHTML =
+            `<i class="fa-solid fa-list-check"></i> Select all ${pile}`;
+    }
+}
+
 function updateBulkBar() {
     const count = state.selectedPaths.size;
     if (!elements.bulkBar) return;
@@ -1839,17 +1568,32 @@ function updateBulkBar() {
         updateReviewBar();
         return;
     }
-    if (!state.selectMode || count === 0) {
+    // Show as soon as Select is on, even at 0 selected — otherwise there is
+    // no way to hit Select all on a T2/T3/T4 filter without clicking a card.
+    if (!state.selectMode) {
         elements.bulkBar.style.display = 'none';
         return;
     }
     elements.bulkBar.style.display = 'flex';
-    elements.bulkCount.textContent = `${count} selected`;
+    const { pile, moreInPile } = pileSelectStats();
+    if (count) {
+        const loadedNote = moreInPile ? ` · ${state.photos.length} loaded` : '';
+        elements.bulkCount.textContent = `${count} selected of ${pile}${loadedNote}`;
+    } else if (moreInPile) {
+        elements.bulkCount.textContent = `${pile} in this filter · ${state.photos.length} loaded`;
+    } else {
+        elements.bulkCount.textContent = pile
+            ? `${pile} in this filter`
+            : '0 selected';
+    }
+    syncPileSelectButtons(elements.bulkSelectLoadedBtn, elements.bulkSelectPileBtn);
+    const hasSel = count > 0;
+    if (elements.bulkReanalyzeBtn) elements.bulkReanalyzeBtn.disabled = !hasSel;
+    if (elements.bulkDeleteBtn) elements.bulkDeleteBtn.disabled = !hasSel;
+    if (elements.bulkClearBtn) {
+        elements.bulkClearBtn.style.display = hasSel ? '' : 'none';
+    }
 }
-
-
-
-
 
 function setSelectMode(enabled) {
     state.selectMode = enabled;
@@ -1862,6 +1606,7 @@ function setSelectMode(enabled) {
         elements.addToCollectionBtn.style.display = enabled ? 'inline-flex' : 'none';
     }
     renderGallery();
+    updateBulkBar();
 }
 
 function clearSelection() {
@@ -2196,6 +1941,7 @@ const VERDICT_COUNT_FIELDS = [
     'photo_count', 'keep_count', 'reject_count', 'unusable_count',
     'modest_count', 't2_count', 't3_count', 't4_count',
     'unclassified_count', 'stale_count', 'error_count',
+    'disagreement_count',
 ];
 
 /**
@@ -2413,14 +2159,15 @@ function galleryCountLabel() {
 // renderVerdictSelectPassRates() rewrites those to carry scoped counts.
 const VERDICT_FILTER_TITLES = {
     keep: 'Keeps',
-    t2: 'Fashion (T2)',
-    t3: 'Revealing (T3)',
     t4: 'Swim / lingerie (T4)',
+    t3: 'Revealing (T3)',
+    t2: 'Fashion (T2)',
     reject: 'Rejects',
     unusable: 'Unusable (T0)',
     modest: 'Modest (T1)',
     unclassified: 'Not classified',
     error: 'Classify errors',
+    disagreement: 'Corrected (disagree)',
 };
 
 /**
@@ -2876,7 +2623,7 @@ function buildPhotoCard(tile) {
     card.dataset.relPath = p.rel_path;
     // The card was a <div> with a click listener and nothing else, so there
     // was no keyboard path into the lightbox -- and the lightbox is the only
-    // home of the prompt editor, triage, favourite and every ComfyUI export.
+    // home of the prompt editor, triage and favourite.
     // The whole second half of this app was mouse-only.
     //
     // No `role="button"`: that role has presentational children, which would
@@ -3437,902 +3184,13 @@ function openLightbox(index, { skipPromptLoad = false } = {}) {
     // Triage sits above both inspector modes, so photos and reels adjudicate
     // the same way. resetPromptPanel() runs first and does not touch it.
     renderTriageBlock(photo);
-    state.compareMode = false;
-    setCompareMode(false);
     openDialog(elements.lightboxModal, '#lightboxClose');
-    
+
     // Always load the media details for both photos and videos
     loadMediaDetailPanel(photo);
 
-    if (isVideo) {
-        // Skip Comfy generations / prompt auto-load for videos
-        if (elements.compareToggleBtn) elements.compareToggleBtn.style.display = 'none';
-        state.currentGenerations = [];
-    } else {
-        loadGenerationsForPhoto(photo.rel_path);
-        // Auto-load Ready cached prompts for stills only. Copy-parameters
-        // fills the editor from the generation instead, and this fetch would
-        // overwrite that with the source photo's current prompt.
-        if (!skipPromptLoad && photo.has_prompt && !photo.prompt_stale) {
-            handleGeneratePrompt(false);
-        }
-    }
-}
-
-async function loadGenerationsForPhoto(relPath) {
-    state.currentGenerations = [];
-    if (elements.compareToggleBtn) elements.compareToggleBtn.style.display = 'none';
-    if (elements.lightboxGenImg) elements.lightboxGenImg.src = '';
-    setCurrentGeneration(null);
-    try {
-        const res = await fetch(`/api/generations?path=${encodeURIComponent(relPath)}`);
-        const data = await res.json();
-        const gens = data.generations || [];
-        state.currentGenerations = gens;
-        const primary = gens[0] && (gens[0].primary_url || (gens[0].files && gens[0].files[0] && gens[0].files[0].url));
-        if (primary && elements.lightboxGenImg) {
-            elements.lightboxGenImg.src = primary;
-            if (elements.compareToggleBtn) {
-                elements.compareToggleBtn.style.display = 'inline-flex';
-            }
-        }
-        setCurrentGeneration(gens[0] || null);
-    } catch (err) {
-        console.error('Generations load failed', err);
-    }
-}
-
-// ── generation rating (A3) ───────────────────────────────────────────
-// The rating is the only judgement the generation loop captures, so pressing
-// it has to be cheap: one ordinal, four keys, no dialog.
-
-function setCurrentGeneration(gen) {
-    const file = gen && gen.files && gen.files[0];
-    state.currentGenId = (gen && gen.gen_id) || (file && file.gen_id) || null;
-    const raw = gen && gen.rating !== undefined ? gen.rating : (file && file.rating);
-    state.currentGenRating = Number(raw) || 0;
-    renderGenRating();
-}
-
-function renderGenRating() {
-    if (!elements.genRating) return;
-    const enabled = Boolean(state.currentGenId);
-    elements.genRating.style.display = enabled ? 'flex' : 'none';
-    elements.genRating.classList.toggle('has-rating', enabled && state.currentGenRating !== 0);
-    elements.genRating.querySelectorAll('.gen-rate-btn').forEach((btn) => {
-        const value = Number(btn.dataset.rating);
-        btn.classList.toggle('active', enabled && value === state.currentGenRating);
-        btn.disabled = !enabled;
-    });
-}
-
-function ratingOf(genId) {
-    if (state.currentGenId === genId) return Number(state.currentGenRating) || 0;
-    if (state.outputDetail && state.outputDetail.gen_id === genId) {
-        return Number(state.outputDetail.rating) || 0;
-    }
-    const row = state.outputs.find((g) => g.gen_id === genId);
-    return Number(row && row.rating) || 0;
-}
-
-function syncRatingButtons(root, rating) {
-    if (!root) return;
-    const r = Number(rating) || 0;
-    root.classList.toggle('has-rating', r !== 0);
-    root.querySelectorAll('.gen-rate-btn').forEach((btn) => {
-        btn.classList.toggle('active', Number(btn.dataset.rating) === r);
-        btn.disabled = false;
-    });
-}
-
-function paintOutputRating(genId, rating) {
-    const card = elements.outputsGrid
-        && elements.outputsGrid.querySelector(`[data-gen-id="${CSS.escape(genId)}"]`);
-    if (card) syncRatingButtons(card.querySelector('.gen-rating'), rating);
-    if (state.outputDetail && state.outputDetail.gen_id === genId) {
-        syncRatingButtons(elements.outputDetailRating, rating);
-    }
-}
-
-function applyRatingLocally(genId, rating) {
-    const r = Number(rating) || 0;
-    const row = state.outputs.find((g) => g.gen_id === genId);
-    if (row) row.rating = r;
-    if (state.outputDetail && state.outputDetail.gen_id === genId) {
-        state.outputDetail.rating = r;
-    }
-    const lightbox = state.currentGenerations[0];
-    if (lightbox && (lightbox.gen_id === genId || !lightbox.gen_id) && state.currentGenId === genId) {
-        lightbox.rating = r;
-        if (lightbox.files && lightbox.files[0]) lightbox.files[0].rating = r;
-    }
-    if (state.currentGenId === genId) {
-        state.currentGenRating = r;
-        renderGenRating();
-    }
-    paintOutputRating(genId, r);
-}
-
-async function rateGeneration(genId, rating) {
-    if (!genId) return;
-    const previous = ratingOf(genId);
-    // Optimistic: the control is meant to feel like a keypress, and a failed
-    // rating rolls back rather than leaving the UI ahead of the store.
-    applyRatingLocally(genId, rating);
-    // Two quick presses put two writes in flight; a late 4xx from the first
-    // must not overwrite the second — same stale-response rule as gallery
-    // fetches, without an AbortController (the write already happened).
-    const superseded = () => ratingOf(genId) !== rating;
-    try {
-        const res = await fetch('/api/generation/rate', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ gen_id: genId, rating }),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        if (superseded()) return;
-    } catch (err) {
-        console.error('Rating failed', err);
-        if (superseded()) return;
-        applyRatingLocally(genId, previous);
-        showToast('Could not save rating');
-    }
-}
-
-async function rateCurrentGeneration(rating) {
-    return rateGeneration(state.currentGenId, rating);
-}
-
-function handleGenerationRatingKey(e) {
-    const map = { '1': 1, '2': 2, '0': 0, x: -1 };
-    const rating = map[e.key.toLowerCase()];
-    if (rating === undefined) return false;
-    const detailOpen = elements.outputDetailModal
-        && elements.outputDetailModal.style.display === 'flex';
-    if (detailOpen && state.outputDetail) {
-        rateGeneration(state.outputDetail.gen_id, rating);
-        return true;
-    }
-    const lightboxOpen = elements.lightboxModal
-        && elements.lightboxModal.style.display === 'flex';
-    // Lightbox compare pane. The generated-pane guard still applies — these
-    // keys must not fire over the inspector when compare is off. compareMode
-    // can stay true after the lightbox closes, so an Outputs grid must not
-    // inherit it.
-    if (state.compareMode && state.currentGenId
-        && (!state.outputsView || lightboxOpen)) {
-        rateCurrentGeneration(rating);
-        return true;
-    }
-    if (state.outputsView && state.outputsFocusedId) {
-        rateGeneration(state.outputsFocusedId, rating);
-        return true;
-    }
-    return false;
-}
-
-// ── outputs gallery (A1) ─────────────────────────────────────────────
-// A sibling view rather than a modal: it is a gallery in its own right, with
-// its own scroll position, filters and paging. Switching views deliberately
-// does not reset the other one.
-
-const OUTPUTS_PAGE = 60;
-let outputsObserver = null;
-
-function outputsFilters() {
-    const rating = elements.outputsRating ? elements.outputsRating.value : '';
-    const params = new URLSearchParams();
-    params.set('limit', String(OUTPUTS_PAGE));
-    params.set('offset', String(state.outputsOffset));
-    params.set('sort', elements.outputsSort ? elements.outputsSort.value : 'newest');
-    // "rated" is a different question from any single rating value, so it maps
-    // to its own parameter rather than a magic rating number.
-    if (rating === 'rated') params.set('rated_only', '1');
-    else if (rating !== '') params.set('rating', rating);
-    for (const [key, el] of [
-        ['workflow', elements.outputsWorkflow],
-        ['checkpoint', elements.outputsCheckpoint],
-        ['creator', elements.outputsCreator],
-        ['has_source', elements.outputsHasSource],
-        ['since', elements.outputsSince],
-        ['until', elements.outputsUntil],
-    ]) {
-        if (el && el.value) params.set(key, el.value);
-    }
-    if (state.outputsBatch) params.set('batch_id', state.outputsBatch);
-    return params;
-}
-
-function outputsFiltersAreActive() {
-    if (state.outputsBatch) return true;
-    return [
-        elements.outputsRating, elements.outputsWorkflow, elements.outputsCheckpoint,
-        elements.outputsCreator, elements.outputsHasSource, elements.outputsSince,
-        elements.outputsUntil,
-    ].some((el) => el && el.value);
-}
-
-/**
- * Show one batch's outputs as a contact sheet.
- *
- * The endpoint has filtered on `batch_id` since A1; what was missing was any
- * way to reach it. A completion toast that lands you in an unfiltered grid of
- * every output ever made is not a result — you still have to go find the
- * fifty images you just waited for.
- */
-function openBatchContactSheet(batchId) {
-    if (!batchId) return;
-    state.outputsBatch = String(batchId);
-    renderOutputsBatchChip();
-    showOutputsView(true);
-}
-
-function clearOutputsBatch() {
-    state.outputsBatch = null;
-    renderOutputsBatchChip();
-    fetchOutputs();
-}
-
-function renderOutputsBatchChip() {
-    const chip = elements.outputsBatchChip;
-    if (!chip) return;
-    chip.style.display = state.outputsBatch ? '' : 'none';
-    if (elements.outputsBatchLabel) {
-        // textContent, not innerHTML: the id is server-generated hex today, but
-        // it arrives from a response body like everything else (rule 7).
-        elements.outputsBatchLabel.textContent = state.outputsBatch
-            ? `run ${state.outputsBatch}`
-            : '';
-    }
-}
-
-async function fetchOutputs({ append = false } = {}) {
-    if (!append) state.outputsOffset = 0;
-    if (state.outputsRequest) state.outputsRequest.abort();
-    const controller = new AbortController();
-    state.outputsRequest = controller;
-    try {
-        const res = await fetch(`/api/generations/list?${outputsFilters()}`, {
-            signal: controller.signal,
-        });
-        const data = await res.json();
-        const rows = data.generations || [];
-        state.outputs = append ? state.outputs.concat(rows) : rows;
-        // Offset commits only on a response, so an aborted page cannot corrupt
-        // paging — the same rule fetchPhotos follows.
-        state.outputsOffset = state.outputs.length;
-        state.outputsHasMore = Boolean(data.has_more);
-        state.outputsTotal = Number(data.total) || 0;
-        populateOutputFacets(data.facets || {});
-        renderOutputs({ append });
-    } catch (err) {
-        if (err.name === 'AbortError') return;
-        console.error('Outputs load failed', err);
-    } finally {
-        if (state.outputsRequest === controller) state.outputsRequest = null;
-    }
-}
-
-function populateOutputFacets(facets) {
-    for (const [key, el] of [
-        ['workflows', elements.outputsWorkflow],
-        ['checkpoints', elements.outputsCheckpoint],
-        ['creators', elements.outputsCreator],
-    ]) {
-        const values = facets[key] || [];
-        if (!el) continue;
-        // Preserve the active choice across refreshes; rebuilding the list
-        // under the user mid-filter would silently reset it.
-        const current = el.value;
-        const first = el.options[0];
-        el.innerHTML = '';
-        el.appendChild(first);
-        values.forEach((v) => {
-            const opt = document.createElement('option');
-            opt.value = v;
-            opt.textContent = v;
-            el.appendChild(opt);
-        });
-        if (values.includes(current)) el.value = current;
-    }
-}
-
-function renderOutputs({ append = false } = {}) {
-    const grid = elements.outputsGrid;
-    if (!grid) return;
-    if (!append) grid.innerHTML = '';
-    const start = append ? grid.querySelectorAll('.output-card').length : 0;
-    const frag = document.createDocumentFragment();
-    state.outputs.slice(start).forEach((gen) => frag.appendChild(outputCard(gen)));
-    grid.appendChild(frag);
-
-    if (elements.outputsCount) {
-        elements.outputsCount.textContent = `${state.outputsTotal} item${state.outputsTotal === 1 ? '' : 's'}`;
-    }
-    if (elements.outputsEmpty) {
-        elements.outputsEmpty.style.display = state.outputs.length ? 'none' : 'flex';
-        const heading = elements.outputsEmpty.querySelector('h3');
-        const copy = elements.outputsEmpty.querySelector('p');
-        if (heading && copy) {
-            if (state.outputs.length) {
-                /* filled grid — labels unused */
-            } else if (outputsFiltersAreActive()) {
-                heading.textContent = 'No matching outputs';
-                copy.textContent = 'Nothing matches these filters.';
-            } else {
-                heading.textContent = 'Nothing generated yet';
-                copy.textContent = 'Open a photo, generate with ComfyUI, and every output lands here.';
-            }
-        }
-    }
-    if (state.outputsFocusedId) focusOutputCard(state.outputsFocusedId);
-    attachOutputsSentinel();
-}
-
-function ratingButtonsHtml(rating) {
-    const r = Number(rating) || 0;
-    const btns = [
-        [-1, 'discard', 'fa-xmark', 'Discard — didn\'t work (X)', 'Discard'],
-        [0, 'clear', 'fa-minus', 'Clear rating (0)', 'Unrated'],
-        [1, 'keep', 'fa-check', 'Keep (1)', 'Keep'],
-        [2, 'star', 'fa-star', 'Star — the reason you generated at all (2)', 'Star'],
-    ];
-    return `<div class="gen-rating${r ? ' has-rating' : ''}" role="group" aria-label="Rate this generation">${
-        btns.map(([val, cls, icon, title, label]) =>
-            `<button type="button" class="gen-rate-btn ${cls}${r === val ? ' active' : ''}" data-rating="${val}" title="${title}" aria-label="${label}">`
-            + `<i class="fa-solid ${icon}"></i></button>`
-        ).join('')
-    }</div>`;
-}
-
-function sourceThumbUrl(gen) {
-    if (gen.source_thumb_url) return gen.source_thumb_url;
-    const rel = (gen.source_rel || '').replace(/\\/g, '/');
-    if (!rel) return '';
-    return '/media/thumb/' + rel.split('/').map(encodeURIComponent).join('/');
-}
-
-function outputCard(gen) {
-    const card = document.createElement('div');
-    card.className = 'photo-card output-card';
-    card.dataset.genId = gen.gen_id;
-    card.tabIndex = 0;
-    const hasSource = gen.has_source !== false && Boolean(gen.source_rel);
-    const sourceThumb = hasSource ? sourceThumbUrl(gen) : '';
-    // Third-party text: the creator handle originates outside this app.
-    card.innerHTML = `
-        <div class="photo-thumb-wrap">
-            <img class="photo-thumb" loading="lazy" src="${escapeHtml(gen.thumb_url)}" alt="">
-            ${sourceThumb
-                ? `<img class="output-source-badge" loading="lazy" src="${escapeHtml(sourceThumb)}" alt="" title="Source">`
-                : ''}
-            ${gen.seed_recorded ? '' : '<span class="output-flag" title="Seed was never recorded — cannot be reproduced">no seed</span>'}
-            ${ratingButtonsHtml(gen.rating)}
-        </div>
-        <div class="photo-meta">
-            <span class="photo-creator">@${escapeHtml(gen.creator || '')}</span>
-            <span class="photo-filename">${escapeHtml(gen.workflow || '')}</span>
-        </div>`;
-    card.addEventListener('click', (e) => {
-        const btn = e.target.closest('.gen-rate-btn');
-        if (btn) {
-            e.preventDefault();
-            e.stopPropagation();
-            focusOutputCard(gen.gen_id);
-            rateGeneration(gen.gen_id, Number(btn.dataset.rating));
-            return;
-        }
-        focusOutputCard(gen.gen_id);
-        openOutputDetail(gen.gen_id);
-    });
-    return card;
-}
-
-function focusOutputCard(genId) {
-    state.outputsFocusedId = genId || null;
-    if (!elements.outputsGrid) return;
-    elements.outputsGrid.querySelectorAll('.output-card.is-focused').forEach((el) => {
-        el.classList.remove('is-focused');
-    });
-    if (!genId) return;
-    const card = elements.outputsGrid.querySelector(`[data-gen-id="${CSS.escape(genId)}"]`);
-    if (card) card.classList.add('is-focused');
-}
-
-function attachOutputsSentinel() {
-    const grid = elements.outputsGrid;
-    if (!grid) return;
-    const existing = grid.querySelector('#outputsLoadMore');
-    if (existing) existing.remove();
-    if (!state.outputsHasMore) return;
-    // Same element and class the photo grid uses, so it inherits the existing
-    // "Scroll for more" styling rather than needing a parallel rule.
-    const sentinel = document.createElement('div');
-    sentinel.id = 'outputsLoadMore';
-    sentinel.className = 'gallery-load-more';
-    sentinel.textContent = 'Scroll for more';
-    grid.appendChild(sentinel);
-    if (!('IntersectionObserver' in window)) {
-        sentinel.style.cursor = 'pointer';
-        sentinel.addEventListener('click', () => fetchOutputs({ append: true }));
-        return;
-    }
-    if (!outputsObserver) {
-        outputsObserver = new IntersectionObserver((entries) => {
-            if (entries.some((e) => e.isIntersecting)) fetchOutputs({ append: true });
-        }, { rootMargin: '600px 0px' });
-    }
-    outputsObserver.disconnect();
-    outputsObserver.observe(sentinel);
-}
-
-function showOutputsView(on) {
-    // Outputs and review mode are mutually exclusive: review mode's strip and
-    // its `body.review-mode` rules belong to the photo gallery, which is
-    // hidden here. Leaving both on gives review mode no surface and blanks the
-    // outputs filter bar, since both use `.view-controls`.
-    if (on && state.reviewMode) exitReviewMode();
-    if (on && state.labelMode) exitLabelMode({ refetch: false });
-    state.outputsView = on;
-    // Outputs has its own creator, workflow, checkpoint, rating and date
-    // filters. Saved views, Boards and the creator list filter none of them,
-    // and were taking 320px of the row to do it.
-    document.body.classList.toggle('outputs-view', on);
-    const gallery = document.querySelector('.gallery-container:not(.outputs-container)');
-    if (gallery) gallery.style.display = on ? 'none' : 'flex';
-    if (elements.outputsView) elements.outputsView.style.display = on ? 'flex' : 'none';
-    if (elements.outputsBtn) elements.outputsBtn.classList.toggle('active', on);
-    if (on) {
-        // Always refetch on open, not only when empty. The gesture this view
-        // exists for is "generate something, then go look at it" — a cached
-        // grid would be missing exactly the output you came to see, and the
-        // keep-rate badge beside it refreshes regardless, so a stale grid next
-        // to a fresh number is worse than both being stale.
-        fetchOutputs();
-        refreshOutputsKeepRate();
-    }
-}
-
-async function refreshOutputsKeepRate() {
-    if (!elements.outputsKeepRate) return;
-    try {
-        const res = await fetch('/api/insights');
-        const data = await res.json();
-        const g = (data && data.generations) || {};
-        elements.outputsKeepRate.textContent = g.keep_rate === null || g.keep_rate === undefined
-            ? 'unrated'
-            : `keep ${Math.round(g.keep_rate * 100)}% of ${g.rated}`;
-    } catch (err) {
-        console.error('keep rate load failed', err);
-    }
-}
-
-function setupOutputsListeners() {
-    if (elements.outputsBtn) {
-        elements.outputsBtn.addEventListener('click', () => showOutputsView(!state.outputsView));
-    }
-    [elements.outputsSort, elements.outputsRating, elements.outputsWorkflow,
-     elements.outputsCheckpoint, elements.outputsCreator, elements.outputsHasSource,
-     elements.outputsSince, elements.outputsUntil].forEach((el) => {
-        if (el) el.addEventListener('change', () => fetchOutputs());
-    });
-}
-
-// ── output detail (A1) ───────────────────────────────────────────────
-
-function openOutputDetail(genId) {
-    const gen = state.outputs.find((g) => g.gen_id === genId);
-    if (!gen || !elements.outputDetailModal) return;
-    state.outputDetail = gen;
-
-    elements.outputDetailImage.src = gen.url;
-    const hasSource = gen.has_source !== false && Boolean(gen.source_rel);
-    const sourcePane = elements.outputDetailSource && elements.outputDetailSource.closest('figure');
-    if (sourcePane) sourcePane.style.display = hasSource ? '' : 'none';
-    const compare = elements.outputDetailSource && elements.outputDetailSource.closest('.output-compare');
-    if (compare) compare.classList.toggle('no-source', !hasSource);
-    if (hasSource) {
-        // The source may have been deleted since; /media 404s and the browser
-        // shows a broken pane, which is honest — the provenance panel still says
-        // which file it was.
-        elements.outputDetailSource.src = '/media/' + gen.source_rel
-            .split('/').map(encodeURIComponent).join('/');
-    } else if (elements.outputDetailSource) {
-        elements.outputDetailSource.removeAttribute('src');
-    }
-    elements.outputDetailPositive.textContent = gen.positive_prompt || '';
-    elements.outputDetailNegative.textContent = gen.negative_prompt || '';
-    syncRatingButtons(elements.outputDetailRating, gen.rating);
-    if (elements.outputCopyParams) {
-        elements.outputCopyParams.disabled = !hasSource;
-        elements.outputCopyParams.title = hasSource
-            ? 'Load these parameters into the generate controls'
-            : 'No source photo to open in the lightbox';
-    }
-    focusOutputCard(gen.gen_id);
-
-    const rows = [
-        ['Source', gen.source_rel],
-        ['Created', gen.created_at],
-        ['Workflow', gen.workflow],
-        ['Checkpoint', gen.checkpoint || '—'],
-        ['Seed', gen.seed_recorded ? String(gen.seed) : 'not recorded'],
-        ['Steps', gen.steps],
-        ['CFG', gen.cfg],
-        ['Denoise', gen.denoise === null ? '—' : gen.denoise],
-        ['Mode E', gen.mode_e ? 'on' : 'off'],
-        ['Prompt engine', gen.prompt_version || '—'],
-        ['Batch', gen.batch_id || '—'],
-    ];
-    elements.outputDetailMeta.innerHTML = rows
-        .map(([k, v]) => `<div class="output-meta-row"><span>${escapeHtml(k)}</span>` +
-            `<strong>${escapeHtml(String(v === null || v === undefined ? '—' : v))}</strong></div>`)
-        .join('');
-
-    // Legacy rows imported from the pre-A0 JSON index never had their seed
-    // written down. Offering "same seed" there would be a button that cannot
-    // do what it says, so it is disabled and says why.
-    if (elements.outputRegenSameSeed) {
-        elements.outputRegenSameSeed.disabled = !gen.seed_recorded;
-        elements.outputRegenSameSeed.title = gen.seed_recorded
-            ? `Re-run with seed ${gen.seed}`
-            : 'This generation predates seed recording and cannot be reproduced';
-    }
-    openDialog(elements.outputDetailModal);
-}
-
-function closeOutputDetail() {
-    closeDialog(elements.outputDetailModal);
-    state.outputDetail = null;
-}
-
-async function copyOutputParams() {
-    const gen = state.outputDetail;
-    if (!gen || !gen.source_rel) {
-        showToast('No source photo to open');
-        return;
-    }
-    closeOutputDetail();
-    showOutputsView(false);
-    const idx = await ensurePhotoInGallery(gen.source_rel);
-    if (idx < 0) {
-        showToast('Source photo is gone from the archive');
-        return;
-    }
-    openLightbox(idx, { skipPromptLoad: true });
-    applyGenerationParamsToLightbox(gen);
-    showToast('Parameters loaded into generate controls');
-}
-
-async function ensurePhotoInGallery(sourceRel) {
-    const existing = state.photos.findIndex((p) => p.rel_path === sourceRel);
-    if (existing >= 0) return existing;
-    try {
-        const res = await fetch(`/api/photos?path=${encodeURIComponent(sourceRel)}&limit=1`);
-        const data = await res.json();
-        const photo = (data.photos || [])[0];
-        if (!photo) return -1;
-        state.photos.push(photo);
-        state.lightboxPushedPhoto = photo.rel_path;
-        return state.photos.length - 1;
-    } catch (err) {
-        console.error('Source photo lookup failed', err);
-        return -1;
-    }
-}
-
-function applyGenerationParamsToLightbox(gen) {
-    elements.positivePromptText.textContent = gen.positive_prompt || '';
-    elements.negativePromptText.textContent = gen.negative_prompt || '';
-    state.currentPromptData = {
-        positive_prompt: gen.positive_prompt || '',
-        negative_prompt: gen.negative_prompt || '',
-        parameters: {
-            steps: gen.steps,
-            cfg_scale: gen.cfg,
-        },
-    };
-    if (elements.generatePromptSection) elements.generatePromptSection.style.display = 'none';
-    if (elements.promptContent) elements.promptContent.classList.add('visible');
-    setPromptEditable(true);
-    clearPromptDirty();
-
-    const sel = elements.comfyWorkflowSelect;
-    if (sel && gen.workflow) {
-        if (![...sel.options].some((o) => o.value === gen.workflow)) {
-            const opt = document.createElement('option');
-            opt.value = gen.workflow;
-            opt.textContent = gen.workflow;
-            sel.appendChild(opt);
-        }
-        sel.value = gen.workflow;
-        syncComfyWorkflowControls();
-    }
-    if (elements.comfyDenoiseInput && gen.denoise != null) {
-        elements.comfyDenoiseInput.value = gen.denoise;
-    }
-    if (elements.comfyStepsInput && gen.steps != null) {
-        elements.comfyStepsInput.value = gen.steps;
-    }
-    if (elements.comfyCfgInput && gen.cfg != null) {
-        elements.comfyCfgInput.value = gen.cfg;
-    }
-    if (elements.comfyModeECheck) {
-        elements.comfyModeECheck.checked = Boolean(gen.mode_e);
-    }
-    if (elements.comfySeedLock && elements.comfySeedInput) {
-        if (gen.seed_recorded) {
-            elements.comfySeedLock.checked = true;
-            elements.comfySeedInput.value = String(gen.seed);
-        } else {
-            elements.comfySeedLock.checked = false;
-        }
-        syncComfySeedInput();
-    }
-    updateComfyButtons();
-    if (elements.paramSteps && gen.steps != null) {
-        elements.paramSteps.textContent = String(gen.steps);
-    }
-    if (elements.paramCFG && gen.cfg != null) {
-        elements.paramCFG.textContent = String(gen.cfg);
-    }
-}
-
-async function regenerateOutput({ sameSeed }) {
-    const gen = state.outputDetail;
-    if (!gen) return;
-    if (sameSeed && !gen.seed_recorded) return;
-    try {
-        const res = await fetch('/api/comfy/generate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                path: gen.source_rel,
-                workflow: gen.workflow,
-                positive_prompt: gen.positive_prompt,
-                negative_prompt: gen.negative_prompt,
-                checkpoint: gen.checkpoint || undefined,
-                steps: gen.steps,
-                cfg_scale: gen.cfg,
-                denoise: gen.denoise,
-                // Omitted entirely for a new roll — sending null would be
-                // indistinguishable from "no opinion" and is what the server
-                // already treats as unpinned.
-                seed: sameSeed ? gen.seed : undefined,
-                use_mode_e: gen.mode_e,
-            }),
-        });
-        const data = await res.json();
-        if (res.status === 409) {
-            showToast(data.message || 'ComfyUI is busy');
-            return;
-        }
-        if (!res.ok) throw new Error(data.message || `HTTP ${res.status}`);
-        showToast(sameSeed ? `Re-running seed ${gen.seed}` : 'Re-running with a new seed');
-        closeOutputDetail();
-        // pollComfyStatus is self-arming — one call re-creates its own interval
-        // while a job is running and clears it when there is not.
-        pollComfyStatus();
-    } catch (err) {
-        console.error('Regenerate failed', err);
-        showToast('Could not start the generation');
-    }
-}
-
-async function deleteOutput() {
-    const gen = state.outputDetail;
-    if (!gen) return;
-    // Permanent, and the copy says so — this is the one delete in the app that
-    // does not route through _trash, because the row can rebuild the image.
-    const ok = window.confirm(
-        'Delete this generation permanently?\n\n'
-        + 'Generations are not moved to Trash — the prompt, seed and checkpoint '
-        + 'are all recorded, so it can be generated again.'
-    );
-    if (!ok) return;
-    try {
-        const res = await fetch(`/api/generation?gen_id=${encodeURIComponent(gen.gen_id)}`, {
-            method: 'DELETE',
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        state.outputs = state.outputs.filter((g) => g.gen_id !== gen.gen_id);
-        state.outputsTotal = Math.max(0, state.outputsTotal - 1);
-        // Offset tracks how many rows have been consumed from the server, so it
-        // has to come down with them — otherwise the next page starts one row
-        // late and silently skips a generation. Same rule as
-        // removePhotosFromView in the photo gallery.
-        state.outputsOffset = Math.max(0, state.outputsOffset - 1);
-        // Optimistic removal, like the photo gallery: no full refetch, so the
-        // scroll position and loaded pages survive.
-        const card = elements.outputsGrid
-            && elements.outputsGrid.querySelector(`[data-gen-id="${CSS.escape(gen.gen_id)}"]`);
-        if (card) card.remove();
-        if (elements.outputsCount) {
-            elements.outputsCount.textContent = `${state.outputsTotal} item${state.outputsTotal === 1 ? '' : 's'}`;
-        }
-        if (elements.outputsEmpty && !state.outputs.length) {
-            elements.outputsEmpty.style.display = 'flex';
-        }
-        closeOutputDetail();
-        showToast('Generation deleted');
-        refreshOutputsKeepRate();
-    } catch (err) {
-        console.error('Delete failed', err);
-        showToast('Could not delete the generation');
-    }
-}
-
-function setupOutputDetailListeners() {
-    if (elements.closeOutputDetail) {
-        elements.closeOutputDetail.addEventListener('click', closeOutputDetail);
-    }
-    // Clicking the backdrop closes, like every other dialog here.
-    const overlay = document.getElementById('outputDetailOverlay');
-    if (overlay) overlay.addEventListener('click', closeOutputDetail);
-    if (elements.outputCopyParams) {
-        elements.outputCopyParams.addEventListener('click', () => {
-            copyOutputParams();
-        });
-    }
-    if (elements.outputDetailRating) {
-        elements.outputDetailRating.addEventListener('click', (e) => {
-            const btn = e.target.closest('.gen-rate-btn');
-            if (!btn || !state.outputDetail) return;
-            rateGeneration(state.outputDetail.gen_id, Number(btn.dataset.rating));
-        });
-    }
-    if (elements.outputRegenSameSeed) {
-        elements.outputRegenSameSeed.addEventListener('click', () => regenerateOutput({ sameSeed: true }));
-    }
-    if (elements.outputRegenNewSeed) {
-        elements.outputRegenNewSeed.addEventListener('click', () => regenerateOutput({ sameSeed: false }));
-    }
-    if (elements.outputDelete) {
-        elements.outputDelete.addEventListener('click', deleteOutput);
-    }
-}
-
-function setupGenRatingListeners() {
-    if (!elements.genRating) return;
-    elements.genRating.addEventListener('click', (e) => {
-        const btn = e.target.closest('.gen-rate-btn');
-        if (!btn || btn.disabled) return;
-        rateCurrentGeneration(Number(btn.dataset.rating));
-    });
-}
-
-function setCompareMode(on) {
-    state.compareMode = on;
-    if (elements.mediaCompare) {
-        elements.mediaCompare.classList.toggle('compare-on', on);
-    }
-    if (elements.generatedPane) {
-        elements.generatedPane.style.display = on ? 'flex' : 'none';
-    }
-    if (elements.compareToggleBtn) {
-        elements.compareToggleBtn.classList.toggle('active', on);
-    }
-}
-
-async function sendToComfy(variant) {
-    if (state.lightboxIndex === -1 || !state.currentPromptData) return;
-    if (state.comfyOnline === false) {
-        showToast('ComfyUI is offline — start ComfyUI on :8188');
-        return;
-    }
-    const photo = state.photos[state.lightboxIndex];
-    const positive = elements.positivePromptText.innerText.trim()
-        || state.currentPromptData.positive_prompt;
-    const negative = elements.negativePromptText.innerText.trim()
-        || state.currentPromptData.negative_prompt;
-    // The picker decides the graph. This used to be inferred from which button
-    // was pressed, which is why a third workflow was unreachable from the UI no
-    // matter what the server could run (A4).
-    const workflow = selectedWorkflow();
-    const isRef = workflowKind(workflow) === 'img2img';
-    const controls = readComfyProControls();
-    if (elements.comfyStatusText) {
-        elements.comfyStatusText.textContent = isRef
-            ? (controls.useModeE
-                ? 'Mode E + uploading reference…'
-                : `Uploading reference + queueing ${workflowLabel(workflow)}…`)
-            : `Queueing ${workflowLabel(workflow)}…`;
-    }
-    try {
-        const body = {
-            path: photo.rel_path,
-            variant,
-            workflow,
-            positive_prompt: positive,
-            negative_prompt: negative,
-        };
-        if (isRef) {
-            body.denoise = controls.denoise;
-            body.steps = controls.steps;
-            body.cfg_scale = controls.cfg;
-            body.use_mode_e = controls.useModeE;
-            if (controls.seed != null) body.seed = controls.seed;
-        } else {
-            body.aspect_ratio = (state.currentPromptData.parameters || {}).aspect_ratio;
-            body.steps = (state.currentPromptData.parameters || {}).steps;
-            body.cfg_scale = (state.currentPromptData.parameters || {}).cfg_scale;
-        }
-        const res = await fetch('/api/comfy/generate', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        });
-        const data = await res.json();
-        if (res.status === 503) {
-            showToast('ComfyUI offline');
-            state.comfyOnline = false;
-            updateComfyButtons();
-            return;
-        }
-        if (!res.ok) {
-            showToast(data.message || 'ComfyUI busy or failed');
-            return;
-        }
-        if (data.seed != null && elements.comfySeedInput) {
-            // Echo the seed the server actually used. Left unlocked, so the next
-            // generate still rolls fresh — but the value is now sitting in the
-            // box, so ticking the lock reuses this exact seed.
-            elements.comfySeedInput.value = String(data.seed);
-        }
-        const seedBit = data.seed != null ? ` · seed ${data.seed}` : '';
-        const label = isRef
-            ? `${workflowLabel(workflow)} d=${data.denoise ?? controls.denoise}`
-                + `${data.use_mode_e ? ' ModeE' : ''}`
-            : `${workflowLabel(workflow)} · ${variant.toUpperCase()}`;
-        showToast(`ComfyUI ${label} started${seedBit}`);
-        if (elements.comfyStatusText && data.positive_prompt) {
-            elements.comfyStatusText.textContent =
-                `Queued · ${(data.positive_prompt || '').slice(0, 80)}…`;
-        }
-        pollComfyStatus();
-    } catch (err) {
-        showToast('ComfyUI request failed');
-    }
-}
-
-async function pollComfyStatus() {
-    try {
-        const res = await fetch('/api/comfy/status');
-        const data = await res.json();
-        if (elements.comfyStatusText) {
-            elements.comfyStatusText.textContent = data.progress
-                + (data.error ? ` — ${data.error}` : '');
-        }
-        if (data.running) {
-            if (!state.comfyPollTimer) {
-                state.comfyPollTimer = setInterval(pollComfyStatus, 2500);
-            }
-            return;
-        }
-        if (state.comfyPollTimer) {
-            clearInterval(state.comfyPollTimer);
-            state.comfyPollTimer = null;
-        }
-        if (data.result && data.result.primary_url) {
-            showToast('Generation complete');
-            if (elements.lightboxGenImg) {
-                elements.lightboxGenImg.src = data.result.primary_url;
-            }
-            if (elements.compareToggleBtn) {
-                elements.compareToggleBtn.style.display = 'inline-flex';
-            }
-            setCompareMode(true);
-            // Rateable immediately, before the reload below lands — the moment
-            // you want to press "star" is the moment the image appears.
-            setCurrentGeneration(data.result);
-            if (state.lightboxIndex !== -1) {
-                loadGenerationsForPhoto(state.photos[state.lightboxIndex].rel_path);
-            }
-        } else if (data.error) {
-            showToast(`ComfyUI: ${data.error}`);
-        }
-    } catch (err) {
-        console.error('Comfy status error', err);
+    if (!isVideo && !skipPromptLoad && photo.has_prompt && !photo.prompt_stale) {
+        handleGeneratePrompt(false);
     }
 }
 
@@ -4697,7 +3555,6 @@ function applyPromptData(data) {
     setPromptEditable(true);
     clearPromptDirty();
     renderPromptHistory(data);
-    updateComfyButtons();
 }
 
 function renderPromptHistory(data) {
@@ -4809,11 +3666,6 @@ function closeLightbox() {
     state.lightboxIndex = -1;
     state.currentPromptData = null;
     stopAndClearLightboxVideo();
-    if (state.lightboxPushedPhoto) {
-        const i = state.photos.findIndex((p) => p.rel_path === state.lightboxPushedPhoto);
-        if (i >= 0) state.photos.splice(i, 1);
-        state.lightboxPushedPhoto = null;
-    }
 }
 
 function navigateLightbox(direction) {
@@ -5429,7 +4281,7 @@ const dialogReturnFocus = new WeakMap();
 
 /* Innermost first -- the same order the Escape chain unwinds in. */
 const DIALOG_STACK_ORDER = [
-    'photoViewerOverlay', 'deleteConfirmModal', 'outputDetailModal', 'lightboxModal',
+    'photoViewerOverlay', 'deleteConfirmModal', 'lightboxModal',
     'syncModal', 'uploadModal', 'newCreatorModal', 'trashModal', 'duplicatesModal',
     'insightsModal', 'activityModal',
 ];
@@ -6033,10 +4885,12 @@ function dupQueueableChecks(section) {
     );
 }
 
-function toggleDupGroupSelection(section) {
-    const checks = dupQueueableChecks(section);
-    if (!checks.length) return;
-    const on = !checks.every((c) => c.checked);
+function allDupQueueableChecks() {
+    if (!elements.duplicatesBody) return [];
+    return dupQueueableChecks(elements.duplicatesBody);
+}
+
+function applyDupChecks(checks, on) {
     checks.forEach((check) => {
         check.checked = on;
         const card = check.closest('.dup-card');
@@ -6047,6 +4901,18 @@ function toggleDupGroupSelection(section) {
         else state.duplicatesSelected.delete(rel);
     });
     updateDuplicatesChrome();
+}
+
+function toggleDupGroupSelection(section) {
+    const checks = dupQueueableChecks(section);
+    if (!checks.length) return;
+    applyDupChecks(checks, !checks.every((c) => c.checked));
+}
+
+function toggleAllDupSelection() {
+    const checks = allDupQueueableChecks();
+    if (!checks.length) return;
+    applyDupChecks(checks, !checks.every((c) => c.checked));
 }
 
 function syncDupGroupButton(section) {
@@ -6071,6 +4937,32 @@ function syncDupGroupButton(section) {
         : 'Select extra copies in this group (keeper and favourites stay)';
 }
 
+function syncDupSelectAllButton() {
+    const btn = elements.duplicatesSelectAllBtn;
+    const label = elements.duplicatesSelectAllLabel;
+    if (!btn) return;
+    const checks = allDupQueueableChecks();
+    if (!checks.length) {
+        btn.disabled = true;
+        btn.setAttribute('aria-pressed', 'false');
+        if (label) label.textContent = 'Select all copies';
+        btn.title = 'Keeper and favourites cannot be queued';
+        return;
+    }
+    const allOn = checks.every((c) => c.checked);
+    const n = checks.length;
+    btn.disabled = false;
+    btn.setAttribute('aria-pressed', allOn ? 'true' : 'false');
+    if (label) {
+        label.textContent = allOn
+            ? 'Clear all'
+            : `Select all ${n} cop${n === 1 ? 'y' : 'ies'}`;
+    }
+    btn.title = allOn
+        ? 'Deselect extra copies in every group'
+        : 'Select extra copies in every group (keepers and favourites stay)';
+}
+
 function updateDuplicatesChrome(groupCount) {
     const n = state.duplicatesSelected.size;
     if (elements.duplicatesSweepLabel) {
@@ -6084,6 +4976,7 @@ function updateDuplicatesChrome(groupCount) {
     if (elements.duplicatesBody) {
         elements.duplicatesBody.querySelectorAll('.dup-group').forEach(syncDupGroupButton);
     }
+    syncDupSelectAllButton();
     if (!elements.duplicatesSummary) return;
     const groups = typeof groupCount === 'number'
         ? groupCount
@@ -6092,12 +4985,12 @@ function updateDuplicatesChrome(groupCount) {
             : 0);
     if (!groups) {
         elements.duplicatesSummary.textContent =
-            'Review a group, then Select copies. Favourites stay.';
+            'Review a group, then Select copies — or Select all copies. Favourites stay.';
         return;
     }
     elements.duplicatesSummary.textContent = n
         ? `${groups} group${groups === 1 ? '' : 's'} · ${n} queued. Trash empties the ones you have reviewed.`
-        : `${groups} group${groups === 1 ? '' : 's'}. Select copies on a row after you review it.`;
+        : `${groups} group${groups === 1 ? '' : 's'}. Select copies on a row, or Select all copies.`;
 }
 
 function openDuplicatePreview(member) {
@@ -6307,42 +5200,8 @@ function setupEventListeners() {
     if (elements.batchJobChipCancel) {
         elements.batchJobChipCancel.addEventListener('click', cancelBatchAnalyze);
     }
-    if (elements.generateJobChipCancel) {
-        elements.generateJobChipCancel.addEventListener('click', cancelBatchGenerate);
-    }
-    if (elements.outputsBatchClear) {
-        elements.outputsBatchClear.addEventListener('click', clearOutputsBatch);
-    }
     if (elements.favoritePhotoBtn) {
         elements.favoritePhotoBtn.addEventListener('click', toggleFavoriteCurrent);
-    }
-
-    if (elements.compareToggleBtn) {
-        elements.compareToggleBtn.addEventListener('click', () => {
-            if (!state.currentGenerations.length && !(elements.lightboxGenImg && elements.lightboxGenImg.src)) {
-                showToast('No generation yet — Send to ComfyUI first');
-                return;
-            }
-            setCompareMode(!state.compareMode);
-        });
-    }
-    if (elements.comfyProBtn) {
-        elements.comfyProBtn.addEventListener('click', () => sendToComfy('pro'));
-    }
-    if (elements.applyModeEBtn) {
-        elements.applyModeEBtn.addEventListener('click', () => applyModeEToEditor({ save: false }));
-    }
-    if (elements.comfySeedLock) {
-        elements.comfySeedLock.addEventListener('change', syncComfySeedInput);
-    }
-    if (elements.comfyWorkflowSelect) {
-        elements.comfyWorkflowSelect.addEventListener('change', syncComfyWorkflowControls);
-    }
-    if (elements.comfySdxlBtn) {
-        elements.comfySdxlBtn.addEventListener('click', () => sendToComfy('sdxl'));
-    }
-    if (elements.comfyFluxBtn) {
-        elements.comfyFluxBtn.addEventListener('click', () => sendToComfy('flux'));
     }
 
     if (elements.sortSelect) {
@@ -6385,14 +5244,19 @@ function setupEventListeners() {
             setSelectMode(!state.selectMode);
         });
     }
+    if (elements.bulkSelectLoadedBtn) {
+        elements.bulkSelectLoadedBtn.addEventListener('click', selectNonFavourites);
+    }
+    if (elements.bulkSelectPileBtn) {
+        elements.bulkSelectPileBtn.addEventListener('click', () => {
+            selectEntirePile();
+        });
+    }
     if (elements.bulkClearBtn) {
         elements.bulkClearBtn.addEventListener('click', clearSelection);
     }
     if (elements.bulkDeleteBtn) {
         elements.bulkDeleteBtn.addEventListener('click', promptBulkDelete);
-    }
-    if (elements.bulkGenerateBtn) {
-        elements.bulkGenerateBtn.addEventListener('click', startBulkGenerate);
     }
     if (elements.bulkReanalyzeBtn) {
         elements.bulkReanalyzeBtn.addEventListener('click', startBulkReanalyze);
@@ -6482,6 +5346,9 @@ function setupEventListeners() {
     if (elements.closeDuplicatesBtn) elements.closeDuplicatesBtn.addEventListener('click', closeDuplicatesModal);
     if (elements.doneDuplicatesBtn) elements.doneDuplicatesBtn.addEventListener('click', closeDuplicatesModal);
     if (elements.duplicatesSweepBtn) elements.duplicatesSweepBtn.addEventListener('click', sweepDuplicates);
+    if (elements.duplicatesSelectAllBtn) {
+        elements.duplicatesSelectAllBtn.addEventListener('click', toggleAllDupSelection);
+    }
     bindModalOverlayDismiss(elements.duplicatesModal, closeDuplicatesModal);
     if (elements.tasteTrainBtn) elements.tasteTrainBtn.addEventListener('click', startTasteTrain);
     if (elements.tasteJobChipCancel) {
@@ -6574,9 +5441,6 @@ function setupEventListeners() {
 
     setupClassifyListeners();
     setupLabelListeners();
-    setupGenRatingListeners();
-    setupOutputsListeners();
-    setupOutputDetailListeners();
 
     // Lightbox Actions
     elements.lightboxDeleteBtn.addEventListener('click', () => {
@@ -6879,22 +5743,6 @@ function setupEventListeners() {
             }
         }
 
-        // Above the lightbox: the output detail can be opened from the outputs
-        // view with no lightbox behind it, and a modal with no keyboard exit is
-        // the same trap review mode was.
-        if (elements.outputDetailModal
-            && elements.outputDetailModal.style.display === 'flex') {
-            if (e.key === 'Escape') {
-                closeOutputDetail();
-                return;
-            }
-            if (!e.ctrlKey && !e.metaKey && !e.altKey && handleGenerationRatingKey(e)) {
-                e.preventDefault();
-                return;
-            }
-            return;
-        }
-
         if (elements.lightboxModal.style.display === 'flex') {
             if (e.key === 'Escape') {
                 closeLightbox();
@@ -6956,12 +5804,6 @@ function setupEventListeners() {
                     e.preventDefault();
                     return;
                 }
-                // After triage, which owns K/R/X in review mode — a reject
-                // sweep must not be reinterpreted as rating a generation.
-                if (handleGenerationRatingKey(e)) {
-                    e.preventDefault();
-                    return;
-                }
                 const key = e.key.toLowerCase();
                 if (key === 'g') {
                     e.preventDefault();
@@ -6982,26 +5824,9 @@ function setupEventListeners() {
             return;
         }
 
-        // Grid-level triage (U16). Above the outputs rating keys because
-        // review mode and the outputs view are mutually exclusive, and below
-        // every overlay branch above, which all return before reaching here.
         if (!e.ctrlKey && !e.metaKey && !e.altKey && handleGridTriageKey(e)) {
             e.preventDefault();
             return;
-        }
-
-        if (state.outputsView && !e.ctrlKey && !e.metaKey && !e.altKey) {
-            const ae = document.activeElement;
-            const typing = ae && (
-                ae.tagName === 'INPUT'
-                || ae.tagName === 'SELECT'
-                || ae.tagName === 'TEXTAREA'
-                || ae.isContentEditable
-            );
-            if (!typing && handleGenerationRatingKey(e)) {
-                e.preventDefault();
-                return;
-            }
         }
 
         if (e.key === 'Escape' && isDisplayFlex(elements.syncModal)) {
@@ -8434,143 +7259,6 @@ async function startBatchAnalyze() {
 
 
 // ─────────────────────────────────────────────────────────────────────
-// A2 — batch generate.
-//
-// Deliberately a near-twin of the batch-analyze poller above rather than a
-// shared abstraction: the two jobs report different counters (skips, a batch
-// id) and end differently (this one leads somewhere), and the parts that are
-// genuinely identical are already factored out into renderJobChip.
-// ─────────────────────────────────────────────────────────────────────
-
-function generateChipSub(data) {
-    const done = (data.completed || 0) + (data.failed || 0);
-    const bits = [`${done}/${data.total} (${jobPct(done, data.total)}%)`];
-    if (data.failed) bits.push(`${data.failed} failed`);
-    // Skips are the number that makes an unexpectedly short run explicable, so
-    // they belong on the chip rather than only in the completion toast.
-    const skipped = (data.skipped_no_prompt || 0) + (data.skipped_video || 0);
-    if (skipped) bits.push(`${skipped} skipped`);
-    return bits.join(' · ');
-}
-
-async function pollGenerateStatus() {
-    try {
-        const res = await fetch('/api/comfy/batch/status');
-        const data = await res.json();
-        if (data.running) {
-            renderJobChip('generate', {
-                active: true,
-                title: data.cancel_requested ? 'Generating — stopping' : 'Generating',
-                sub: generateChipSub(data),
-                completed: (data.completed || 0) + (data.failed || 0),
-                total: data.total,
-                cancellable: true,
-                cancelled: Boolean(data.cancel_requested)
-            });
-            if (!state.generatePollTimer) {
-                state.generatePollTimer = setInterval(pollGenerateStatus, 4000);
-            }
-        } else {
-            if (state.generatePollTimer) {
-                clearInterval(state.generatePollTimer);
-                state.generatePollTimer = null;
-            }
-            renderJobChip('generate', { active: false });
-            // Only on a running → stopped transition this tab actually saw.
-            // Announcing on the first poll after a page load would re-toast a
-            // batch that finished yesterday.
-            if (state.generateWasRunning) {
-                announceGenerateFinished(data);
-                if (state.outputsView) fetchOutputs();
-            }
-        }
-        state.generateWasRunning = Boolean(data.running);
-    } catch (err) {
-        console.error('Batch generate status error:', err);
-    }
-}
-
-function announceGenerateFinished(data) {
-    const skipped = (data.skipped_no_prompt || 0) + (data.skipped_video || 0);
-    const parts = [`${data.completed || 0} generated`];
-    if (data.failed) parts.push(`${data.failed} failed`);
-    if (skipped) parts.push(`${skipped} skipped`);
-    if (data.cancelled && data.pending) parts.push(`${data.pending} not run`);
-    showToast({
-        title: data.cancelled ? 'Generate cancelled' : 'Generate complete',
-        body: parts.join(' · '),
-        variant: data.cancelled ? undefined : 'success',
-        // The whole point of a batch is that you were not watching it. Landing
-        // in an unfiltered grid of every output ever made would mean hunting
-        // for the run you just waited on.
-        actionLabel: data.batch_id ? 'View run' : null,
-        onAction: data.batch_id ? () => openBatchContactSheet(data.batch_id) : null,
-        // Longer than the default 3.5s: an action nobody is at the keyboard for
-        // is the same as no action.
-        duration: data.batch_id ? 15000 : undefined
-    });
-}
-
-async function cancelBatchGenerate() {
-    try {
-        const res = await fetch('/api/comfy/batch/cancel', { method: 'POST' });
-        const data = await res.json().catch(() => ({}));
-        showToast(
-            data.status === 'cancelling'
-                ? 'Stopping — the image in flight is being interrupted'
-                : 'No batch generate running'
-        );
-        pollGenerateStatus();
-    } catch (err) {
-        showToast('Cancel failed');
-    }
-}
-
-async function startBatchGenerate(body, { label = 'Generate' } = {}) {
-    try {
-        const res = await fetch('/api/comfy/batch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok && data.status === 'started') {
-            // Set before the first poll so the completion toast fires even for
-            // the first batch of the session.
-            state.generateWasRunning = true;
-            const skipped = (data.skipped_no_prompt || 0) + (data.skipped_video || 0);
-            showToast({
-                title: `${label} started`,
-                body: `${data.pending} queued`
-                    + (skipped ? ` · ${skipped} skipped (no prompt yet)` : '')
-                    + (data.capped ? ' · capped by COMFY_BATCH_MAX' : '')
-            });
-            pollGenerateStatus();
-        } else if (data.status === 'nothing_to_do') {
-            const skipped = data.skipped_no_prompt || 0;
-            showToast(skipped
-                ? `Nothing to generate — ${skipped} need analyzing first`
-                : 'Nothing to generate');
-        } else {
-            showToast(data.message || 'ComfyUI busy or unreachable');
-        }
-    } catch (err) {
-        showToast('Batch generate failed');
-    }
-}
-
-function startBulkGenerate() {
-    const paths = Array.from(state.selectedPaths);
-    if (!paths.length) return;
-    // The batch runs the workflow the bulk bar's picker names, not whatever the
-    // server would have defaulted to.
-    const workflow = (elements.bulkWorkflowSelect && elements.bulkWorkflowSelect.value)
-        || state.workflowDefault || 'pro';
-    startBatchGenerate({ paths, workflow }, { label: workflowLabel(workflow) });
-}
-
-
-// ─────────────────────────────────────────────────────────────────────
 // Keep/reject classification: sidebar section, job chip, review mode,
 // and the triage panel in the lightbox.
 //
@@ -8595,6 +7283,16 @@ function tierLabel(tier) {
     const key = String(tier);
     const labels = state.tierLabels || TIER_LABEL_FALLBACK;
     return labels[key] || TIER_LABEL_FALLBACK[key] || 'Unknown';
+}
+
+/** Display tier: human gold if set, else the model's measurement. */
+function effectiveTier(v) {
+    if (!v) return -1;
+    if (v.corrected_tier != null && Number.isFinite(Number(v.corrected_tier))) {
+        return Number(v.corrected_tier);
+    }
+    const t = Number(v.tier);
+    return Number.isFinite(t) ? t : -1;
 }
 
 /**
@@ -8666,15 +7364,19 @@ function verdictBadgeHtml(photo) {
             <i class="fa-solid fa-triangle-exclamation"></i> Error</span>`;
     }
     const isReject = v.verdict === 'reject';
-    const title = `${tierLabel(v.tier)}${v.reason ? ' — ' + v.reason : ''}`;
+    const shown = effectiveTier(v);
+    const title = `${tierLabel(shown)}${v.corrected_tier != null ? ` (model T${Number(v.tier)})` : ''}${v.reason ? ' — ' + v.reason : ''}`;
     // Rejects name *why* (unusable vs modest are acted on separately); keeps
     // show the tier, where the number is the interesting part. "T0" on both
     // told you nothing you could act on.
     const face = isReject
-        ? (v.tier === 0 ? 'Unusable' : v.tier === 1 ? 'Modest' : 'Reject')
-        : `T${Number(v.tier)}`;
+        ? (shown === 0 ? 'Unusable' : shown === 1 ? 'Modest' : 'Reject')
+        : `T${shown}`;
+    const corrected = v.corrected_tier != null
+        ? '<i class="fa-solid fa-pen verdict-pill-corrected" title="Corrected by hand"></i> '
+        : '';
     return `<span class="verdict-pill ${isReject ? 'reject' : 'keep'}${quiet}" title="${escapeHtml(title)}">
-        ${manual}<i class="fa-solid ${isReject ? 'fa-ban' : 'fa-check'}"></i> ${escapeHtml(face)}</span>`;
+        ${manual}${corrected}<i class="fa-solid ${isReject ? 'fa-ban' : 'fa-check'}"></i> ${escapeHtml(face)}</span>`;
 }
 
 // ── sidebar panel ────────────────────────────────────────────────────
@@ -9037,7 +7739,6 @@ function updateLabelBar() {
 }
 
 async function enterLabelMode() {
-    if (state.outputsView) showOutputsView(false);
     if (state.reviewMode) exitReviewMode({ refetch: false });
     state.labelMode = true;
     state.labelFilter = 'unlabeled';
@@ -9167,7 +7868,6 @@ function enterReviewMode(creator, verdict = 'reject') {
     // Review mode's surface is the photo gallery. Entered from the Outputs view
     // — which the classify toast can do while the user is browsing generations
     // — it would otherwise turn on with nothing on screen to review.
-    if (state.outputsView) showOutputsView(false);
     if (state.labelMode) exitLabelMode({ refetch: false });
     if (creator && creator !== state.selectedCreator) {
         state.selectedCreator = creator;
@@ -9300,6 +8000,7 @@ const VERDICT_SELECT_COUNT = {
     modest: 'modest_count',
     unclassified: 'unclassified_count',
     error: 'error_count',
+    disagreement: 'disagreement_count',
 };
 
 function verdictFilterCount(key) {
@@ -9382,7 +8083,7 @@ function updateReviewBar() {
             // U16 put Keep/Reject on the card, so "click a card to triage" is
             // now wrong in a new way: a click opens the inspector, and the
             // buttons on the tile are what decide.
-            : 'Keep or Reject on a card · K · R · X on a focused one · click to open it';
+            : 'Keep or Reject on a card · K · R · 0–4 tier · X on a focused one · click to open it';
     }
 
     // Archive-wide review used to show zeroes on every chip, because the counts
@@ -9425,20 +8126,13 @@ function updateReviewBar() {
                 `${pile} item${pile === 1 ? '' : 's'}`;
         }
     }
-    if (elements.reviewSelectAllBtn) {
-        const n = loaded;
-        elements.reviewSelectAllBtn.innerHTML = moreInPile
-            ? `<i class="fa-solid fa-check-double"></i> Select loaded (${n})`
-            : '<i class="fa-solid fa-check-double"></i> Select non-favourites';
-        elements.reviewSelectAllBtn.title = moreInPile
-            ? `Select the ${n} non-favourite items currently in the grid, not the whole pile`
-            : 'Select every non-favourite in this pile';
-    }
-    if (elements.reviewSelectPileBtn) {
-        const showPile = moreInPile && selected < pile;
-        elements.reviewSelectPileBtn.style.display = showPile ? '' : 'none';
-        elements.reviewSelectPileBtn.innerHTML =
-            `<i class="fa-solid fa-list-check"></i> Select all ${pile}`;
+    syncPileSelectButtons(elements.reviewSelectAllBtn, elements.reviewSelectPileBtn);
+    if (elements.reviewSelectAllBtn && !moreInPile) {
+        // Review keeps the older "non-favourites" wording on a fully-loaded
+        // reject pile — that is the delete-oriented mode. Browse says Select all.
+        elements.reviewSelectAllBtn.innerHTML =
+            '<i class="fa-solid fa-check-double"></i> Select non-favourites';
+        elements.reviewSelectAllBtn.title = 'Select every non-favourite in this pile';
     }
     if (elements.reviewSelectToggleBtn) {
         setToggleState(elements.reviewSelectToggleBtn, Boolean(state.selectMode));
@@ -9472,7 +8166,6 @@ function updateReviewBar() {
  * This is the loaded page only. `selectEntirePile` is the whole-filter action.
  */
 function selectNonFavourites() {
-    if (!state.reviewMode) return;
     setSelectMode(true);
     let skipped = 0;
     state.photos.forEach((p) => {
@@ -9484,7 +8177,8 @@ function selectNonFavourites() {
         }
     });
     renderGallery();
-    updateReviewBar();
+    if (state.reviewMode) updateReviewBar();
+    else updateBulkBar();
     const n = state.selectedPaths.size;
     const more = (state.photoTotal || 0) > state.photos.length;
     if (!n) {
@@ -9497,11 +8191,11 @@ function selectNonFavourites() {
 }
 
 /**
- * Select every path matching the current review filter, including items the
- * infinite scroll has not loaded. Favourites are still skipped.
+ * Select every path matching the current gallery filter, including items the
+ * infinite scroll has not loaded. Favourites are still skipped. Used by
+ * review mode and by browse Select on a T2/T3/T4 (or any) filter.
  */
 async function selectEntirePile() {
-    if (!state.reviewMode) return;
     setSelectMode(true);
     let controller = null;
     try {
@@ -9521,7 +8215,8 @@ async function selectEntirePile() {
             }
         });
         renderGallery();
-        updateReviewBar();
+        if (state.reviewMode) updateReviewBar();
+        else updateBulkBar();
         const n = state.selectedPaths.size;
         const truncated = Boolean(data.truncated);
         if (!n) {
@@ -9657,23 +8352,29 @@ function currentTriagePhoto() {
 function renderTriageBlock(photo) {
     if (!elements.triageBlock) return;
     const v = photo && photo.verdict;
-    if (!state.reviewMode || !v) {
+    if (!v) {
         elements.triageBlock.style.display = 'none';
         return;
     }
     elements.triageBlock.style.display = 'flex';
 
-    const tier = Number(v.tier);
-    if (elements.triageTierChip) {
-        elements.triageTierChip.textContent = tier >= 0
-            ? `Tier ${tier} · ${tierLabel(tier)}`
-            : 'Classify failed';
-        elements.triageTierChip.className = `tier-chip t${tier >= 0 ? tier : 'err'}`;
+    const shown = effectiveTier(v);
+    const modelTier = Number(v.tier);
+    if (elements.triageTierRow) {
+        elements.triageTierRow.querySelectorAll('[data-tier]').forEach((btn) => {
+            const n = Number(btn.dataset.tier);
+            const on = shown === n;
+            btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            btn.classList.toggle('active', on);
+        });
     }
     if (elements.triageMeta) {
         const bits = [];
         if (v.confidence != null) bits.push(`conf ${Math.round(v.confidence * 100)}%`);
         if (v.prompt_version) bits.push(v.prompt_version);
+        if (v.corrected_tier != null && Number.isFinite(modelTier)) {
+            bits.push(`corrected from T${modelTier}`);
+        }
         if (v.manual) bits.push(`set to ${v.manual} by hand`);
         elements.triageMeta.textContent = bits.join(' · ');
     }
@@ -9744,6 +8445,62 @@ async function applyManualVerdict(photo, value) {
         showToast('Verdict request failed');
         return false;
     }
+}
+
+/**
+ * Recode the exposure tier (gold label). Sibling of `applyManualVerdict`:
+ * same patch path, never a gallery refetch. `tier` on the payload stays the
+ * model's measurement; `corrected_tier` is the human call.
+ *
+ * Passing `null` clears the gold label and hands the measurement back.
+ */
+async function applyCorrectedTier(photo, value) {
+    if (!photo || !photo.verdict) {
+        showToast('Nothing to judge here');
+        return false;
+    }
+    try {
+        const res = await fetch('/api/classify/verdict', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ rel_path: photo.rel_path, tier: value })
+        });
+        const data = await res.json();
+        if (!res.ok || data.status !== 'ok') {
+            showToast(data.message || 'Could not save that tier');
+            return false;
+        }
+        photo.verdict = data.verdict;
+        patchCardVerdict(photo);
+        return true;
+    } catch (err) {
+        showToast('Tier request failed');
+        return false;
+    }
+}
+
+/** Next gold value for a click/key on `want` (0–4). Active effective tier
+ *  clears a correction; the model's own uncorrected tier is a no-op. */
+function nextCorrectedTier(photo, want) {
+    const v = photo && photo.verdict;
+    if (!v) return undefined;
+    const current = effectiveTier(v);
+    if (current === want) {
+        return v.corrected_tier != null ? null : undefined;
+    }
+    return want;
+}
+
+async function setCorrectedTier(value, { advance = false } = {}) {
+    const photo = currentTriagePhoto();
+    if (!photo) {
+        showToast('Nothing to judge here');
+        return;
+    }
+    const ok = await applyCorrectedTier(photo, value);
+    if (!ok) return;
+    renderTriageBlock(photo);
+    if (advance) navigateLightbox(1);
 }
 
 /**
@@ -9824,6 +8581,17 @@ function handleGridTriageKey(e) {
         promptDeletePhoto(photo);
         return true;
     }
+    if (key >= '0' && key <= '4') {
+        const want = Number(key);
+        const next = nextCorrectedTier(photo, want);
+        if (next === undefined) return true;
+        applyCorrectedTier(photo, next).then((ok) => {
+            if (!ok) return;
+            updateReviewBar();
+            focusNextCard(card);
+        });
+        return true;
+    }
     if (key !== 'k' && key !== 'r') return false;
     const want = key === 'k' ? 'keep' : 'reject';
     const current = photo.verdict && photo.verdict.verdict;
@@ -9848,7 +8616,7 @@ function focusNextCard(card) {
 }
 
 function handleTriageKey(e) {
-    if (!state.reviewMode || state.lightboxIndex < 0) return false;
+    if (state.lightboxIndex < 0) return false;
     // Never steal a keystroke from a text field — the prompt editor lives in
     // the same modal.
     const el = document.activeElement;
@@ -9856,6 +8624,15 @@ function handleTriageKey(e) {
         return false;
     }
     const key = e.key.toLowerCase();
+    if (key >= '0' && key <= '4') {
+        const photo = currentTriagePhoto();
+        if (!photo || !photo.verdict) return false;
+        const next = nextCorrectedTier(photo, Number(key));
+        if (next === undefined) return true;
+        setCorrectedTier(next);
+        return true;
+    }
+    if (!state.reviewMode) return false;
     if (key === 'k') {
         setManualVerdict('keep', { advance: true });
         return true;
@@ -9982,5 +8759,16 @@ function setupClassifyListeners() {
     }
     if (elements.triageAutoBtn) {
         elements.triageAutoBtn.addEventListener('click', () => setManualVerdict(null));
+    }
+    if (elements.triageTierRow) {
+        elements.triageTierRow.addEventListener('click', (e) => {
+            const btn = e.target.closest('[data-tier]');
+            if (!btn) return;
+            const photo = currentTriagePhoto();
+            if (!photo) return;
+            const next = nextCorrectedTier(photo, Number(btn.dataset.tier));
+            if (next === undefined) return;
+            setCorrectedTier(next);
+        });
     }
 }

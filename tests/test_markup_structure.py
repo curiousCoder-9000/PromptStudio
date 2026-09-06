@@ -115,10 +115,8 @@ def test_every_aria_labelledby_resolves():
 
 # ── copy that describes the machine rather than the thing (U32) ──────────
 #
-# `seed`, `CFG`, `denoise` and `steps` are deliberately absent from this list:
-# they are ComfyUI's own vocabulary, and a user driving a ComfyUI workflow
-# knows them by those names. What does not belong on screen is this repo's
-# internal shorthand.
+# Sampler / Steps / CFG / Aspect still appear in the prompt inspector — they
+# are the vision pipeline's export parameters, not internal shorthand.
 SYSTEM_VOICE = [
     "(C1)", "(A1)", "(B4)", "(F1)", "(E1)",   # backlog ids from the review docs
     "pHash",                                   # how duplicate detection works

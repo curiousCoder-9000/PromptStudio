@@ -23,8 +23,8 @@ const { Session, Report, sleep } = require('./cdp');
 const SATURATED = {
   total: 100,
   warn_above: 0.6,
-  counts: { keep: 5, t2: 2, t3: 2, t4: 1, reject: 95, unusable: 90, modest: 5, unclassified: 0, error: 0 },
-  shares: { keep: 0.05, t2: 0.02, t3: 0.02, t4: 0.01, reject: 0.95, unusable: 0.9, modest: 0.05, unclassified: 0, error: 0 }
+  counts: { keep: 5, t2: 2, t3: 2, t4: 1, reject: 95, unusable: 90, modest: 5, unclassified: 0, error: 0, disagreement: 0 },
+  shares: { keep: 0.05, t2: 0.02, t3: 0.02, t4: 0.01, reject: 0.95, unusable: 0.9, modest: 0.05, unclassified: 0, error: 0, disagreement: 0 }
 };
 
 (async () => {
@@ -49,7 +49,7 @@ const SATURATED = {
   `);
   r.check('stats carries verdict facets', facets !== null, JSON.stringify(facets));
   r.check('every filter has a share', facets
-    && facets.keys.join(',') === 'error,keep,modest,reject,t2,t3,t4,unclassified,unusable',
+    && facets.keys.join(',') === 'disagreement,error,keep,modest,reject,t2,t3,t4,unclassified,unusable',
     facets && facets.keys.join(','));
   r.check('the guard limit is served, not hardcoded in the page',
     facets && facets.warn === 0.6, String(facets && facets.warn));
@@ -65,7 +65,7 @@ const SATURATED = {
 
   const agree = await s.eval(`
     const out = [];
-    for (const key of ['reject', 'keep', 't2', 't3', 't4', 'unusable', 'modest', 'unclassified']) {
+    for (const key of ['reject', 'keep', 't2', 't3', 't4', 'unusable', 'modest', 'unclassified', 'disagreement']) {
       const res = await fetch('/api/photos?limit=1&verdict=' + key);
       const data = await res.json();
       out.push({ key, page: data.total, facet: state.verdictFacets.counts[key] });
@@ -190,6 +190,7 @@ const SATURATED = {
       modest_count: 0,
       unclassified_count: 0,
       error_count: 0,
+      disagreement_count: 0,
       stale_count: 0
     }];
     state.selectedCreator = 'fully_done';
@@ -223,6 +224,7 @@ const SATURATED = {
       modest_count: 5,
       unclassified_count: 0,
       error_count: 0,
+      disagreement_count: 0,
       stale_count: 0
     }];
     state.selectedCreator = 'sat';

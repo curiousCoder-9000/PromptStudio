@@ -3,9 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Vision Prompt Studio & Creator Studio</title>
+    <title>PromptStudio</title>
     <!-- Fonts and icons are vendored under assets/ — this app is local-first
-         (local archive, local Ollama, local Comfy) and used to pull its entire
+         (local archive, local Ollama) and used to pull its entire
          icon set from cdnjs. Offline that made every icon an empty box, and
          several buttons here have no text at all. Refresh with:
              py scripts/vendor_web_assets.py -->
@@ -64,12 +64,7 @@
                 <button id="trashBtn" class="btn btn-secondary icon-only" title="Restore or permanently remove deleted media" aria-label="Trash — restore or permanently remove deleted media" style="display:none;">
                     <i class="fa-solid fa-trash-can"></i> <span class="nav-count-badge" id="trashCountBadge">0</span>
                 </button>
-                <!-- Outputs is a sibling view, not a modal: it is a gallery in
-                     its own right and gets scrolled, filtered and paged. -->
-                <button id="outputsBtn" class="btn btn-secondary icon-only" title="Browse everything ComfyUI has generated" aria-label="Outputs — browse everything ComfyUI has generated">
-                    <i class="fa-solid fa-images"></i>
-                </button>
-                <button id="insightsBtn" class="btn btn-secondary icon-only" title="Prompt edit rate, generation counts" aria-label="Insights — prompt edit rate, generation counts">
+                <button id="insightsBtn" class="btn btn-secondary icon-only" title="Prompt edit rate, classifier distribution" aria-label="Insights — prompt edit rate, classifier distribution">
                     <i class="fa-solid fa-chart-line"></i>
                 </button>
                 <button id="refreshBtn" class="btn btn-secondary icon-only" title="Reload the archive" aria-label="Reload the archive">
@@ -232,14 +227,15 @@
                         <select id="verdictFilterSelect" class="sort-select" title="How many photos each verdict currently selects in this view">
                             <option value="">Any verdict</option>
                             <option value="keep">Keeps</option>
-                            <option value="t2">Fashion (T2)</option>
-                            <option value="t3">Revealing (T3)</option>
                             <option value="t4">Swim / lingerie (T4)</option>
+                            <option value="t3">Revealing (T3)</option>
+                            <option value="t2">Fashion (T2)</option>
                             <option value="reject">Rejects</option>
                             <option value="unusable">Unusable (T0)</option>
                             <option value="modest">Modest (T1)</option>
                             <option value="unclassified">Not classified</option>
                             <option value="error">Classify errors</option>
+                            <option value="disagreement">Corrected (disagree)</option>
                         </select>
                         <button class="filter-chip" id="favoritesFilterBtn" aria-pressed="false" type="button" title="Show favorites only">
                             <i class="fa-solid fa-star"></i> Favorites
@@ -274,7 +270,7 @@
                         <!-- Rewritten per state by updateReviewBar(): the static
                              copy promised click-to-triage while select mode was
                              forced on and made that click impossible. -->
-                        <span class="review-bar-hint" id="reviewBarHint">Keep or Reject on a card · <kbd>K</kbd> keep <kbd>R</kbd> reject <kbd>X</kbd> delete</span>
+                        <span class="review-bar-hint" id="reviewBarHint">Keep or Reject on a card · <kbd>K</kbd> keep <kbd>R</kbd> reject · <kbd>0</kbd>–<kbd>4</kbd> tier · <kbd>X</kbd> delete</span>
                     </div>
                     <!-- Each chip carries its pass rate (B4): the share of the
                          whole archive that filter admits, warning-styled once a
@@ -369,135 +365,7 @@
                 </div>
             </div>
 
-            <!-- Outputs gallery (A1). Sibling of the photo gallery so both keep
-                 their own scroll position and paging state. -->
-            <div class="gallery-container outputs-container" id="outputsView" style="display:none;">
-                <div class="gallery-header">
-                    <div class="gallery-title-group">
-                        <h2><i class="fa-solid fa-images"></i> Outputs</h2>
-                        <span class="photo-badge" id="outputsCount">0 items</span>
-                        <span class="photo-badge keep-rate" id="outputsKeepRate" title="Kept ÷ rated. Unrated outputs are not counted either way.">—</span>
-                        <!-- Shown only while a single batch is being viewed as a
-                             contact sheet. Without it an empty filtered grid is
-                             indistinguishable from "no outputs exist". -->
-                        <span class="photo-badge batch-badge" id="outputsBatchChip" style="display:none;">
-                            <i class="fa-solid fa-layer-group"></i>
-                            <span id="outputsBatchLabel"></span>
-                            <button type="button" class="badge-clear" id="outputsBatchClear" title="Show all outputs" aria-label="Clear batch filter">
-                                <i class="fa-solid fa-xmark"></i>
-                            </button>
-                        </span>
-                    </div>
-                    <div class="view-controls">
-                        <label class="control-label" for="outputsSort">Sort</label>
-                        <select id="outputsSort" class="sort-select" title="Sort outputs">
-                            <option value="newest">Newest</option>
-                            <option value="oldest">Oldest</option>
-                            <option value="rating">Rating (best first)</option>
-                            <option value="source">Source photo</option>
-                        </select>
-                        <select id="outputsRating" class="sort-select" title="Filter by rating">
-                            <option value="">Any rating</option>
-                            <option value="rated">Rated (any)</option>
-                            <option value="2">★ Starred</option>
-                            <option value="1">✓ Kept</option>
-                            <option value="0">Unrated</option>
-                            <option value="-1">✕ Discarded</option>
-                        </select>
-                        <select id="outputsWorkflow" class="sort-select" title="Filter by workflow">
-                            <option value="">Any workflow</option>
-                        </select>
-                        <select id="outputsCheckpoint" class="sort-select" title="Filter by checkpoint">
-                            <option value="">Any checkpoint</option>
-                        </select>
-                        <select id="outputsCreator" class="sort-select" title="Filter by creator">
-                            <option value="">Any creator</option>
-                        </select>
-                        <select id="outputsHasSource" class="sort-select" title="Filter by whether a source photo was recorded">
-                            <option value="">Any source</option>
-                            <option value="1">Has source</option>
-                            <option value="0">No source</option>
-                        </select>
-                        <label class="control-label" for="outputsSince">From</label>
-                        <input type="date" id="outputsSince" class="sort-select" title="Created on or after this date">
-                        <label class="control-label" for="outputsUntil">To</label>
-                        <input type="date" id="outputsUntil" class="sort-select" title="Created on or before this date">
-                    </div>
-                </div>
-
-                <div class="gallery-grid" id="outputsGrid"></div>
-
-                <div class="empty-state" id="outputsEmpty" style="display:none;">
-                    <i class="fa-solid fa-wand-magic-sparkles empty-icon"></i>
-                    <h3>Nothing generated yet</h3>
-                    <p>Open a photo, generate with ComfyUI, and every output lands here.</p>
-                </div>
-            </div>
             </main>
-        </div>
-    </div>
-
-    <!-- Output detail: source vs output, full provenance, regenerate. -->
-    <div class="modal-dialog-container" id="outputDetailModal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="outputDetailTitle">
-        <div class="modal-overlay" id="outputDetailOverlay"></div>
-        <div class="modal-card wide">
-            <div class="sync-modal-header">
-                <div class="modal-icon purple"><i class="fa-solid fa-wand-magic-sparkles"></i></div>
-                <div class="sync-modal-titles">
-                    <h3 id="outputDetailTitle">Generation</h3>
-                    <p class="sync-modal-sub">Everything recorded about this output — enough to reproduce it.</p>
-                </div>
-                <button type="button" class="icon-btn" id="closeOutputDetail" title="Close" aria-label="Close">
-                    <i class="fa-solid fa-xmark"></i>
-                </button>
-            </div>
-            <div class="output-detail">
-                <div class="output-compare">
-                    <figure class="output-compare-pane">
-                        <figcaption>Source</figcaption>
-                        <img id="outputDetailSource" src="" alt="Source photo">
-                    </figure>
-                    <figure class="output-compare-pane">
-                        <figcaption>Generated</figcaption>
-                        <img id="outputDetailImage" src="" alt="Generated image">
-                    </figure>
-                </div>
-                <div class="output-meta" id="outputDetailMeta"></div>
-                <div class="output-prompts">
-                    <label class="control-label">Positive</label>
-                    <pre class="output-prompt-text" id="outputDetailPositive"></pre>
-                    <label class="control-label">Negative</label>
-                    <pre class="output-prompt-text" id="outputDetailNegative"></pre>
-                </div>
-            </div>
-            <div class="modal-actions output-detail-actions">
-                <div class="gen-rating in-detail" id="outputDetailRating" role="group" aria-label="Rate this generation">
-                    <button type="button" class="gen-rate-btn discard" data-rating="-1" title="Discard — didn't work (X)" aria-label="Discard">
-                        <i class="fa-solid fa-xmark"></i>
-                    </button>
-                    <button type="button" class="gen-rate-btn clear" data-rating="0" title="Clear rating (0)" aria-label="Unrated">
-                        <i class="fa-solid fa-minus"></i>
-                    </button>
-                    <button type="button" class="gen-rate-btn keep" data-rating="1" title="Keep (1)" aria-label="Keep">
-                        <i class="fa-solid fa-check"></i>
-                    </button>
-                    <button type="button" class="gen-rate-btn star" data-rating="2" title="Star — the reason you generated at all (2)" aria-label="Star">
-                        <i class="fa-solid fa-star"></i>
-                    </button>
-                </div>
-                <button class="btn btn-secondary" id="outputCopyParams" type="button">
-                    <i class="fa-solid fa-sliders"></i> Copy parameters
-                </button>
-                <button class="btn btn-secondary" id="outputRegenSameSeed" type="button">
-                    <i class="fa-solid fa-rotate"></i> Regenerate — same seed
-                </button>
-                <button class="btn btn-primary" id="outputRegenNewSeed" type="button">
-                    <i class="fa-solid fa-dice"></i> Regenerate — new seed
-                </button>
-                <button class="btn btn-danger" id="outputDelete" type="button">
-                    <i class="fa-solid fa-trash-can"></i> Delete
-                </button>
-            </div>
         </div>
     </div>
 
@@ -505,12 +373,14 @@
     <div class="bulk-bar" id="bulkBar" style="display:none;">
         <span class="bulk-count" id="bulkCount">0 selected</span>
         <div class="bulk-actions">
+            <button class="btn btn-secondary" id="bulkSelectLoadedBtn" type="button" title="Select every non-favourite loaded in the grid">
+                <i class="fa-solid fa-check-double"></i> Select all
+            </button>
+            <button class="btn btn-secondary" id="bulkSelectPileBtn" type="button" style="display:none;" title="Select every matching item, including ones not yet scrolled into view">
+                <i class="fa-solid fa-list-check"></i> Select all
+            </button>
             <button class="btn btn-secondary" id="bulkReanalyzeBtn" type="button">
                 <i class="fa-solid fa-wand-magic-sparkles"></i> Re-analyze
-            </button>
-            <select id="bulkWorkflowSelect" class="sort-select" title="Which ComfyUI workflow the batch runs"></select>
-            <button class="btn btn-secondary" id="bulkGenerateBtn" type="button" title="Batch generate through ComfyUI">
-                <i class="fa-solid fa-palette"></i> Generate
             </button>
             <button class="btn btn-danger" id="bulkDeleteBtn" type="button">
                 <i class="fa-solid fa-trash-can"></i> Delete
@@ -536,39 +406,17 @@
                     <button class="lightbox-nav next" id="lightboxNext" aria-label="Next"><i class="fa-solid fa-chevron-right"></i></button>
                     <div class="media-compare" id="mediaCompare">
                         <div class="media-pane original" id="lightboxMediaPane">
-                            <span class="media-pane-label">Original</span>
                             <img id="lightboxImg" src="" alt="Full view" title="Click to view full size">
                             <video id="lightboxVideo" controls loop muted playsinline preload="auto" style="display:none;" title="Double-click for fullscreen · ←/→ seek · Space play/pause"></video>
                             <button type="button" class="video-expand-btn" id="videoExpandBtn" title="Open fullscreen player (double-click video)">
                                 <i class="fa-solid fa-expand"></i>
                             </button>
                         </div>
-                        <div class="media-pane generated" id="generatedPane" style="display:none;">
-                            <span class="media-pane-label">Generated</span>
-                            <img id="lightboxGenImg" src="" alt="ComfyUI generation">
-                            <div class="gen-rating" id="genRating" role="group" aria-label="Rate this generation">
-                                <button type="button" class="gen-rate-btn discard" data-rating="-1" title="Discard — didn't work (X)" aria-label="Discard">
-                                    <i class="fa-solid fa-xmark"></i>
-                                </button>
-                                <button type="button" class="gen-rate-btn clear" data-rating="0" title="Clear rating (0)" aria-label="Unrated">
-                                    <i class="fa-solid fa-minus"></i>
-                                </button>
-                                <button type="button" class="gen-rate-btn keep" data-rating="1" title="Keep (1)" aria-label="Keep">
-                                    <i class="fa-solid fa-check"></i>
-                                </button>
-                                <button type="button" class="gen-rate-btn star" data-rating="2" title="Star — the reason you generated at all (2)" aria-label="Star">
-                                    <i class="fa-solid fa-star"></i>
-                                </button>
-                            </div>
-                        </div>
                     </div>
                     <div class="media-badge-group">
                         <span class="media-badge" id="lightboxCreator">@username</span>
                         <span class="media-badge filename" id="lightboxFilename">filename.jpg</span>
                         <span class="media-badge slide-count" id="lightboxSlideCount" style="display:none;"></span>
-                        <button class="media-badge compare-toggle" id="compareToggleBtn" type="button" style="display:none;">
-                            <i class="fa-solid fa-columns"></i> Compare
-                        </button>
                     </div>
                 </div>
 
@@ -598,7 +446,13 @@
                          still gets its metadata panel underneath. -->
                     <div class="triage-block" id="triageBlock" style="display:none;">
                         <div class="triage-head">
-                            <span class="tier-chip" id="triageTierChip">Tier —</span>
+                            <div class="triage-tier-row" id="triageTierRow" role="group" aria-label="Exposure tier">
+                                <button type="button" class="tier-chip t0" data-tier="0" title="Unusable (T0). Wrong bucket — change the tier. Keep/Reject is only the keep line.">T0</button>
+                                <button type="button" class="tier-chip t1" data-tier="1" title="Fully modest (T1). Wrong bucket — change the tier. Keep/Reject is only the keep line.">T1</button>
+                                <button type="button" class="tier-chip t2" data-tier="2" title="Normal fashion (T2). Wrong bucket — change the tier. Keep/Reject is only the keep line.">T2</button>
+                                <button type="button" class="tier-chip t3" data-tier="3" title="Revealing daywear (T3). Wrong bucket — change the tier. Keep/Reject is only the keep line.">T3</button>
+                                <button type="button" class="tier-chip t4" data-tier="4" title="Swim / lingerie (T4). Wrong bucket — change the tier. Keep/Reject is only the keep line.">T4</button>
+                            </div>
                             <span class="triage-meta" id="triageMeta"></span>
                         </div>
                         <p class="triage-reason" id="triageReason"></p>
@@ -606,7 +460,7 @@
                             <div class="sync-status-label">What the model saw</div>
                             <img class="triage-sheet" id="triageSheet" src="" alt="Contact sheet the reel was judged from" loading="lazy">
                         </div>
-                        <div class="triage-verdict-row">
+                        <div class="triage-verdict-row" id="triageVerdictRow">
                             <button type="button" class="triage-btn keep" id="triageKeepBtn" title="Keep this (K)">
                                 <i class="fa-solid fa-check"></i> Keep
                             </button>
@@ -618,7 +472,11 @@
                             </button>
                         </div>
                         <div class="triage-keys">
-                            <kbd>K</kbd> keep <kbd>R</kbd> reject <kbd>X</kbd> delete <kbd>←</kbd><kbd>→</kbd> move <kbd>Esc</kbd> close
+                            <kbd>0</kbd>–<kbd>4</kbd> tier
+                            <span class="triage-keys-review">
+                                · <kbd>K</kbd> keep <kbd>R</kbd> reject <kbd>X</kbd> delete
+                            </span>
+                            <kbd>←</kbd><kbd>→</kbd> move <kbd>Esc</kbd> close
                         </div>
                     </div>
 
@@ -740,53 +598,6 @@
                                 <button class="copy-btn secondary" id="copySdxlBtn" type="button"><i class="fa-solid fa-copy"></i> SDXL</button>
                                 <button class="copy-btn secondary" id="copyPonyBtn" type="button"><i class="fa-solid fa-copy"></i> Pony</button>
                             </div>
-                            <div class="sync-status-label" style="margin-top:10px;">ComfyUI</div>
-                            <div class="comfy-pro-controls" id="comfyProControls">
-                                <label class="comfy-denoise-label" title="Which ComfyUI graph to run — from &lt;archive&gt;/_workflows">
-                                    Workflow
-                                    <select id="comfyWorkflowSelect" class="sort-select comfy-workflow-select"></select>
-                                </label>
-                                <label class="comfy-denoise-label" title="Mode E: raise to change outfit more">
-                                    Denoise
-                                    <input type="number" id="comfyDenoiseInput" class="comfy-denoise-input"
-                                           min="0.45" max="1" step="0.01" value="0.70">
-                                </label>
-                                <label class="comfy-denoise-label" title="Sampler steps">
-                                    Steps
-                                    <input type="number" id="comfyStepsInput" class="comfy-denoise-input"
-                                           min="10" max="60" step="1" value="32">
-                                </label>
-                                <label class="comfy-denoise-label" title="CFG scale">
-                                    CFG
-                                    <input type="number" id="comfyCfgInput" class="comfy-denoise-input"
-                                           min="1" max="15" step="0.5" value="6.0">
-                                </label>
-                                <label class="comfy-denoise-label" title="Lock seed for reproducibility">
-                                    <input type="checkbox" id="comfySeedLock" class="comfy-check">
-                                    Seed
-                                    <input type="number" id="comfySeedInput" class="comfy-denoise-input comfy-seed-input"
-                                           min="0" step="1" value="" placeholder="random" disabled>
-                                </label>
-                                <label class="comfy-denoise-label" title="Strip face/body from prompt; add anti-source-clothing negatives">
-                                    <input type="checkbox" id="comfyModeECheck" class="comfy-check" checked>
-                                    Mode E
-                                </label>
-                            </div>
-                            <div class="export-btns">
-                                <button class="copy-btn secondary" id="applyModeEBtn" type="button" title="Rewrite editor prompts for reference-image generation">
-                                    <i class="fa-solid fa-scissors"></i> Apply Mode E
-                                </button>
-                                <button class="copy-btn" id="comfyProBtn" type="button" title="Run the selected workflow">
-                                    <i class="fa-solid fa-wand-magic-sparkles"></i> Generate
-                                </button>
-                                <button class="copy-btn secondary" id="comfySdxlBtn" type="button" title="Selected workflow, SDXL prompt export">
-                                    <i class="fa-solid fa-play"></i> SDXL prompt
-                                </button>
-                                <button class="copy-btn secondary" id="comfyFluxBtn" type="button" title="Selected workflow, Flux prompt export">
-                                    <i class="fa-solid fa-play"></i> Flux prompt
-                                </button>
-                            </div>
-                            <div class="comfy-status" id="comfyStatusText"></div>
                         </div>
 
                     </div>
@@ -813,7 +624,7 @@
                 <div class="modal-icon purple"><i class="fa-solid fa-chart-line"></i></div>
                 <div class="sync-modal-titles">
                     <h3 id="insightsModalTitle">Quality Insights</h3>
-                    <p class="sync-modal-sub">How often you rewrite a prompt, and what you have generated.</p>
+                    <p class="sync-modal-sub">How often you rewrite a prompt, and how the classifier is distributing the archive.</p>
                 </div>
                 <button type="button" class="icon-btn" id="closeInsightsBtn" title="Close" aria-label="Close insights">
                     <i class="fa-solid fa-xmark"></i>
@@ -866,7 +677,7 @@
                 <div class="modal-icon orange"><i class="fa-solid fa-clone"></i></div>
                 <div class="sync-modal-titles">
                     <h3 id="duplicatesTitle">Duplicates</h3>
-                    <p class="sync-modal-sub" id="duplicatesSummary">Review a group, then Select copies. Favourites stay.</p>
+                    <p class="sync-modal-sub" id="duplicatesSummary">Review a group, then Select copies — or Select all copies. Favourites stay.</p>
                 </div>
                 <button type="button" class="icon-btn" id="closeDuplicatesBtn" title="Close" aria-label="Close duplicates">
                     <i class="fa-solid fa-xmark"></i>
@@ -876,6 +687,10 @@
                 <div class="insights-loading">Loading…</div>
             </div>
             <div class="modal-actions trash-modal-actions">
+                <button type="button" class="btn btn-secondary" id="duplicatesSelectAllBtn" disabled aria-pressed="false" title="Select extra copies in every group. Keepers and favourites stay.">
+                    <i class="fa-solid fa-check-double"></i>
+                    <span id="duplicatesSelectAllLabel">Select all copies</span>
+                </button>
                 <button type="button" class="btn btn-danger" id="duplicatesSweepBtn" title="Move selected copies to Trash">
                     <i class="fa-solid fa-trash-can"></i>
                     <span id="duplicatesSweepLabel">Trash selected copies</span>
@@ -1187,22 +1002,6 @@
             </div>
             <div class="scrape-job-chip-actions">
                 <button type="button" class="scrape-job-chip-btn" id="batchJobChipCancel" title="Stop after the current photo">Cancel</button>
-            </div>
-        </div>
-
-        <!-- Batch generate (A2). Same ids-by-convention shape, so
-             renderJobChip('generate', …) drives it with no new rendering code. -->
-        <div class="scrape-job-chip" id="generateJobChip" style="display:none;" role="status" aria-live="polite">
-            <div class="scrape-job-chip-main">
-                <i class="fa-solid fa-palette scrape-job-chip-icon spinning" id="generateJobChipIcon"></i>
-                <div class="scrape-job-chip-text">
-                    <div class="scrape-job-chip-title" id="generateJobChipTitle">Generating</div>
-                    <div class="scrape-job-chip-sub" id="generateJobChipSub"></div>
-                    <div class="job-chip-progress"><div class="job-chip-progress-fill" id="generateJobChipFill"></div></div>
-                </div>
-            </div>
-            <div class="scrape-job-chip-actions">
-                <button type="button" class="scrape-job-chip-btn" id="generateJobChipCancel" title="Stop now — the image in flight is interrupted">Cancel</button>
             </div>
         </div>
 

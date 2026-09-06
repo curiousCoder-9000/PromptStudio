@@ -10,14 +10,10 @@ practice rather than theoretical.
 The fix is to compare on a path *boundary*: a candidate is contained if it is
 the base itself or starts with ``base + os.sep``.
 
-This lived correctly in ``ArchiveStore.resolve_path`` and incorrectly in two
-other copies (``comfy.client.resolve_archive_file``, ``TrashStore.restore``),
-which is what this module exists to prevent. Anything that turns
-archive-relative input into a filesystem path goes through ``safe_join``.
-
-``comfy.client.resolve_archive_file`` no longer exists — A0 deleted it and the
-Comfy runner now calls ``ArchiveStore.resolve_path`` directly, so there is one
-resolver rather than two agreeing by convention.
+This lived correctly in ``ArchiveStore.resolve_path`` and incorrectly in
+``TrashStore.restore``, which is what this module exists to prevent. Anything
+that turns archive-relative input into a filesystem path goes through
+``safe_join``.
 """
 
 from __future__ import annotations

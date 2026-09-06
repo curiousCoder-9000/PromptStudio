@@ -6,11 +6,11 @@ useless without `LEASES`.
 
 ## Leases
 
-Background jobs contend for three things that cannot be shared: the Ollama
-vision model, the Instagram session, and ComfyUI. That contention used to be
-encoded as pairwise `is_running()` checks scattered across modules —
-`BatchPromptManager` and `handler` re-checking each other at
-eight call sites. Two problems with that:
+Background jobs contend for things that cannot be shared: the Ollama vision
+model, and each scrape source's session. That contention used to be encoded
+as pairwise `is_running()` checks scattered across modules —
+`BatchPromptManager` and `handler` re-checking each other at eight call
+sites. Two problems with that:
 
 * **It is O(n) per new job type.** Every new manager means editing every other
   manager's guard.
@@ -30,11 +30,6 @@ nothing and is told which resource blocked it.
     finally:
         LEASES.release("classify")
 
-This models the contention that already exists. ComfyUI is declared but
-deliberately not made exclusive with Ollama: they do share a GPU, but today they
-can run together, and changing that is a product decision rather than a
-refactor.
-
 ## BackgroundJob
 
 `review_backend_architecture.md` S6 counted five managers independently
@@ -42,11 +37,11 @@ reimplementing the same singleton / `_job_lock` / `_cancel` / `get_status` /
 `is_running` / `cancel` / thread-spawn scaffolding. `BackgroundJob` is that
 scaffolding, written once.
 
-Only three managers use it: `BatchPromptManager`, `ClassifyJobManager` and
-`ComfyBatchManager`. **`SyncManager` and `CreatorScrapeQueue` are deliberately
-left alone** — they carry pause/resume, multi-day pacing and per-lane queue
-state, which is a different shape, and bending them to fit would be shaping the
-abstraction to the review doc rather than to the code.
+`BatchPromptManager` and `ClassifyJobManager` use it. **`SyncManager` and
+`CreatorScrapeQueue` are deliberately left alone** — they carry pause/resume,
+multi-day pacing and per-lane queue state, which is a different shape, and
+bending them to fit would be shaping the abstraction to the review doc rather
+than to the code.
 """
 
 from __future__ import annotations
@@ -62,7 +57,6 @@ log = get_logger(__name__)
 
 # Resource names. Values are user-facing — they appear in "busy" messages.
 OLLAMA = "ollama"
-COMFY = "comfy"
 
 # Scrape capacity is per platform, not global. Instagram's session is the thing
 # that cannot be shared; Reddit has nothing in common with it, so serialising
@@ -83,7 +77,7 @@ def scrape_resource(source: str) -> str:
 # exactly that; it is now simply one lane among several.
 INSTAGRAM = scrape_resource("instagram")
 
-_STATIC_RESOURCES = (OLLAMA, COMFY)
+_STATIC_RESOURCES = (OLLAMA,)
 
 
 def all_resources() -> tuple:

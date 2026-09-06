@@ -1,3 +1,3 @@
-"""PromptStudio — Instagram archive scraping, vision analysis, and prompt generation."""
+"""PromptStudio — Instagram archive scraping, smart gallery, and classifier."""
 
 __version__ = "2.0.0"

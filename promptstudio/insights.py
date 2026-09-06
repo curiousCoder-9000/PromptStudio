@@ -3,7 +3,6 @@
 No new instrumentation. Reads:
 
 - prompt bundles (`manual_edit`, `history`, pipeline version) — edit/regenerate rates
-- the `generations` table — output volume and `keep_rate` (A0/A3)
 - `media_verdicts` — the classifier's tier distribution
 - `labels` — B3 taste keep/discard (own denominator: labelled rows only)
 
@@ -45,13 +44,12 @@ def saturation_report(
     one question that matters about a score or a filter: does a single value
     hold more than `threshold` of the population. The classifier's tiers were
     only the first thing to fail it — 85% on one tier, three prompt versions
-    in a row — and the same collapse in generation ratings would make
-    `keep_rate` just as meaningless.
+    in a row.
 
     **The caller owns the denominator.** Pass only the population the metric
-    is defined over: scored tiers (never the -1 errors), rated generations
-    (never the 0s). A bucket for "not judged yet" would fire on every fresh
-    archive, and a guard with a standing false alarm gets switched off.
+    is defined over: scored tiers (never the -1 errors), labelled rows
+    (never unlabeled). A bucket for "not judged yet" would fire on every
+    fresh archive, and a guard with a standing false alarm gets switched off.
 
     Below `min_n` it reports `measured: False` rather than a verdict. On a
     handful of items the top share swings by tens of points per row, and
@@ -150,43 +148,6 @@ def _prompt_insights(cache: Optional[dict] = None) -> Dict[str, Any]:
     }
 
 
-def _generation_insights() -> Dict[str, Any]:
-    """Output volume and the keep rate, from the `generations` table.
-
-    Reads the table, not `generations_index.json` — the JSON is a rollback
-    parachute that A0 caps nowhere and A3 never writes ratings to.
-
-    `keep_rate = kept / rated`, deliberately **not** `kept / total`: an unrated
-    output is not evidence either way, and dividing by the total would make the
-    metric drift toward zero as the archive grows rather than measuring
-    anything. It is `None` until something is rated, because 0.0 would render
-    as a damning score for an archive nobody has judged yet.
-
-    B4 rides along on the same denominator. If one rating value holds most of
-    what has been judged, `keep_rate` has stopped discriminating for exactly
-    the reason a saturated tier makes the reject filter a no-op — so the guard
-    is reported here too rather than only over the classifier.
-    """
-    from promptstudio.config import DISTRIBUTION_MIN_RATED
-    from promptstudio.storage.db import ArchiveIndex
-
-    index = ArchiveIndex.get()
-    summary = index.generation_rating_summary()
-
-    # Reconstructed from the aggregates already fetched, not a second query:
-    # `kept` is rating >= 1, so keep-only is kept minus starred, and the three
-    # buckets sum to `rated` by construction.
-    rated_buckets = {
-        "discard": int(summary.get("discarded") or 0),
-        "keep": int(summary.get("kept") or 0) - int(summary.get("starred") or 0),
-        "star": int(summary.get("starred") or 0),
-    }
-    summary["saturation"] = saturation_report(
-        rated_buckets, what="generation rating", min_n=DISTRIBUTION_MIN_RATED
-    )
-    return summary
-
-
 def _classify_insights() -> Dict[str, Any]:
     """Tier distribution and reject rate over everything classified so far.
 
@@ -206,6 +167,7 @@ def _classify_insights() -> Dict[str, Any]:
     index = ArchiveIndex.get()
     index.ensure_ready()
     hist = index.tier_histogram()
+    gold = index.correction_counts()
 
     scored = sum(c for tier, c in hist.items() if int(tier) >= 0)
     errors = int(hist.get("-1", 0))
@@ -218,6 +180,8 @@ def _classify_insights() -> Dict[str, Any]:
     scored_buckets = {
         f"tier {tier}": c for tier, c in hist.items() if int(tier) >= 0
     }
+    corrections = int(gold.get("corrections") or 0)
+    disagreements = int(gold.get("disagreements") or 0)
 
     return {
         "classified": scored,
@@ -229,6 +193,11 @@ def _classify_insights() -> Dict[str, Any]:
         # Fraction of classified media sitting on the single most common tier.
         "top_tier_share": _rate(top, scored),
         "error_rate": _rate(errors, scored + errors),
+        # Gold labels. Histogram above stays on the *model* tier — mixing
+        # corrections in would let a labelled archive hide a saturated prompt.
+        "corrections": corrections,
+        "disagreements": disagreements,
+        "disagreement_rate": _rate(disagreements, scored),
         "saturation": saturation_report(
             scored_buckets, what="classified tier", min_n=DISTRIBUTION_MIN_CLASSIFIED
         ),
@@ -287,11 +256,6 @@ def compute_insights() -> Dict[str, Any]:
         log.exception("prompt insights failed: %s", e)
         prompts = {"total": 0, "error": str(e)}
     try:
-        generations = _generation_insights()
-    except Exception as e:
-        log.exception("generation insights failed: %s", e)
-        generations = {"total_outputs": 0, "error": str(e)}
-    try:
         classify = _classify_insights()
     except Exception as e:
         log.exception("classify insights failed: %s", e)
@@ -309,7 +273,6 @@ def compute_insights() -> Dict[str, Any]:
 
     return {
         "prompts": prompts,
-        "generations": generations,
         "classify": classify,
         "labels": labels,
         "taste": taste,

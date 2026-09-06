@@ -1,8 +1,8 @@
 # PromptStudio
 
-Local **AI Vision Prompt Studio** for personal photo archives (especially Instagram creators).
+Local **scraper, smart gallery, and classifier** for personal photo archives (especially Instagram creators).
 
-Analyzes images under a local archive folder with **Ollama** multimodal vision, builds photorealistic prompts for Stable Diffusion / Flux / Midjourney / ComfyUI, and manages scrape → gallery → generate in one dark glass UI.
+Scrapes creators into a local archive, browses them in a glass gallery, and classifies keep/reject with **Ollama** vision. Optional prompt reverse-engineering is still available from the lightbox.
 
 > **Privacy first.** This project is designed so **secrets, sessions, personal following lists, and media never belong in git**. Configure everything via `.env`.
 
@@ -10,7 +10,7 @@ Analyzes images under a local archive folder with **Ollama** multimodal vision, 
 
 - Ollama two-stage vision (`v2-structured`): structured JSON → rewrite → Flux/SDXL/Pony exports
 - Glassmorphic gallery: search, favorites, sort, media type, infinite scroll, thumbs
-- Lightbox: edit prompts, history restore, Mode E, optional ComfyUI generate
+- Lightbox: edit prompts, history restore, Flux/SDXL/Pony export copies
 - Instagram sync: saved posts, creator feed, following bulk (anti-ban pacing + resume)
 - X / Twitter and Reddit scraping via gallery-dl, into the same archive and gallery
 - Safe delete: soft delete to `_trash/` with one-click **Undo** + Trash restore/purge
@@ -45,8 +45,6 @@ py server.py
 
 Open **http://localhost:5000**
 
-Optional: ComfyUI at `http://127.0.0.1:8188` for the generate loop.
-
 ### Instagram login (optional scrape)
 
 ```powershell
@@ -67,7 +65,6 @@ Set `INSTAGRAM_SESSION_USER` and (if needed) `INSTALOADER_SESSION_DIR` in `.env`
 | `IG_CAPTION_KEYWORDS` | Caption rank keywords | fashion/model set |
 | `PROMPTSTUDIO_TRASH` | Soft delete to `_trash/` (`0` = unlink now) | `1` |
 | `PROMPTSTUDIO_TRASH_DAYS` | Trash retention for "Purge expired" | `30` |
-| `COMFYUI_URL` | Optional ComfyUI | `http://127.0.0.1:8188` |
 | `X_COOKIES_FILE` | cookies.txt for X scraping | _(empty — required for X)_ |
 | `REDDIT_COOKIES_FILE` | cookies.txt for Reddit (optional) | _(empty)_ |
 | `SCRAPE_FOLDER_SUFFIX` | Suffix non-IG folders (`nina__x`) | `1` |
@@ -124,7 +121,6 @@ CI runs lint + tests on Python 3.10 and 3.13, plus the UI suites
 | [docs/review_backend_architecture.md](docs/review_backend_architecture.md) | Backend review — durability, observability, measurements |
 | [docs/product_review.md](docs/product_review.md) | Product themes & accepted backlog |
 | [docs/roadmap.md](docs/roadmap.md) | Phases done / optional next |
-| [docs/design_generation_loop.md](docs/design_generation_loop.md) | Active spec — Phases 13–14 |
 | [AGENTS.md](AGENTS.md) | Hard rules for AI agents (auto-loaded via `CLAUDE.md`) |
 | [scripts/README.md](scripts/README.md) · [tests/ui/README.md](tests/ui/README.md) | CLI wrappers · browser suites |
 | [docs/archive/](docs/archive/) | Shipped/superseded designs — history, not current behavior |
@@ -136,7 +132,7 @@ server.py                 # entry
 .env.example              # public config template
 promptstudio/             # application logic
   config.py               # loads .env + env vars
-  server/ storage/ prompts/ scraping/ comfy/
+  server/ storage/ prompts/ scraping/
 scripts/                  # thin CLIs
 index.html style.css app.js
 docs/

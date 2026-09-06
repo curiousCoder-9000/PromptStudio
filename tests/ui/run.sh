@@ -153,8 +153,7 @@ if [ ${#SUITES[@]} -eq 0 ]; then
   SUITES=(test_delete_flow.js test_escaping.js test_jobs_and_prefs.js test_classify_review.js
           test_insights_and_pollers.js test_distribution_guard.js
           test_browse_and_paging.js test_source_filter.js test_post_grouping.js
-          test_scrape_lanes.js test_generation_rating.js
-          test_outputs_gallery.js test_batch_generate.js test_workflow_registry.js
+          test_scrape_lanes.js
           test_label_mode.js test_phase15.js test_layout_and_a11y.js
           test_dialogs_and_aria.js
           # Last on purpose: seed_many.py adds a few hundred rows so the

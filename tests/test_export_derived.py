@@ -1,10 +1,10 @@
 """E1 — export and re-import derived state.
 
 Derived state is everything the archive cannot re-download: prompts and
-verdicts that cost GPU hours, favourites and ratings that are the user's own
-judgement, styles, and the generation index. Media is deliberately **not** in
-the bundle — it is the one thing that can be fetched again, and including it
-would turn a portable file into a copy of the archive.
+verdicts that cost GPU hours, favourites that are the user's own judgement,
+and styles. Media is deliberately **not** in the bundle — it is the one
+thing that can be fetched again, and including it would turn a portable file
+into a copy of the archive.
 
 The test that matters is the round trip: export, wipe, import, and every store
 answers the way it did before.
@@ -46,131 +46,21 @@ def populated(make_photo):
     CreatorStyleStore().save({"nina": {"prefix": "shot on film", "n": 5}})
     index.set_verdict(rel, creator="nina", tier=3, reason="looks good")
     index.set_phash(rel, 1234567890)
-    gen_id = index.record_generation(
-        rel_path="_generations/nina/a_gen_1.png",
-        source_rel=rel,
-        creator="nina",
-        workflow="pro",
-        seed=4242,
-        positive_prompt="a portrait, golden hour",
-    )
-    index.rate_generation(gen_id, 2)
     index.set_label(rel, 1)
-    return rel, gen_id
+    return rel
 
 
 def _wipe_derived():
     """Clear every derived store, leaving the media alone."""
-    import shutil
-
-    from promptstudio.config import COMFY_WORKFLOWS_DIR
-
     index = ArchiveIndex.get()
     with index._lock:
-        for table in ("prompts", "media_verdicts", "phashes", "generations", "labels"):
+        for table in ("prompts", "media_verdicts", "phashes", "labels"):
             index._conn.execute(f"DELETE FROM {table}")
         index._conn.commit()
     PromptCache().invalidate_memory()
     FavoritesStore().save(set())
     FavoritesStore().invalidate_memory()
     CreatorStyleStore().save({})
-    shutil.rmtree(COMFY_WORKFLOWS_DIR, ignore_errors=True)
-
-
-# ── A4 workflows: file-backed, like favourites and styles ────────────
-
-WF_SLOTS = {
-    "name": "myref",
-    "label": "My reference graph",
-    "kind": "txt2img",
-    "slots": {"positive": {"node": "2", "field": "text"}, "seed": {"node": "3", "field": "seed"}},
-}
-WF_GRAPH = {
-    "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "", "clip": ["1", 1]}},
-    "3": {"class_type": "KSampler", "inputs": {"seed": 0}},
-}
-
-
-@pytest.fixture
-def user_workflow():
-    from promptstudio.config import COMFY_WORKFLOWS_DIR
-
-    directory = os.path.join(COMFY_WORKFLOWS_DIR, "myref")
-    os.makedirs(directory, exist_ok=True)
-    for filename, doc in (("slots.json", WF_SLOTS), ("graph.json", WF_GRAPH)):
-        with open(os.path.join(directory, filename), "w", encoding="utf-8") as f:
-            json.dump(doc, f)
-    return "myref"
-
-
-def test_workflows_are_an_exportable_kind(user_workflow, tmp_path):
-    """An imported ComfyUI graph plus its slot map is derived state nobody wants
-    to rebuild by hand — and it is file-backed, so it has no table."""
-    assert "workflows" in DERIVED_KINDS
-    out = tmp_path / "derived.json"
-
-    summary = export_derived(str(out))
-
-    assert summary["workflows"] == 1
-    payload = json.loads(out.read_text(encoding="utf-8"))["payload"]["workflows"]
-    assert payload["myref"]["slots"] == WF_SLOTS
-    assert payload["myref"]["graph"] == WF_GRAPH
-
-
-def test_the_built_in_workflows_are_not_exported(user_workflow, tmp_path):
-    """`pro` and `txt2img` ship with the package. Carrying stale copies in every
-    bundle would let an old export shadow an updated built-in on restore."""
-    out = tmp_path / "derived.json"
-    export_derived(str(out))
-    payload = json.loads(out.read_text(encoding="utf-8"))["payload"]["workflows"]
-    assert set(payload) == {"myref"}
-
-
-def test_a_workflow_survives_the_round_trip_and_is_loadable(user_workflow, tmp_path):
-    from promptstudio.comfy import registry
-
-    out = tmp_path / "derived.json"
-    export_derived(str(out))
-    _wipe_derived()
-    assert "myref" not in registry.workflow_names()
-
-    import_derived(str(out))
-
-    spec = registry.get_workflow("myref")
-    assert spec.label == "My reference graph"
-    assert spec.builtin is False
-
-
-def test_a_bundle_cannot_write_a_workflow_outside_the_registry(user_workflow, tmp_path):
-    """A bundle is a file from somewhere else. A name with a separator in it
-    would land `slots.json` wherever it pointed."""
-    from promptstudio.config import COMFY_WORKFLOWS_DIR
-
-    out = tmp_path / "derived.json"
-    export_derived(str(out))
-    bundle = json.loads(out.read_text(encoding="utf-8"))
-    entry = bundle["payload"]["workflows"].pop("myref")
-    bundle["payload"]["workflows"]["../escaped"] = entry
-    out.write_text(json.dumps(bundle), encoding="utf-8")
-    _wipe_derived()
-
-    summary = import_derived(str(out), kinds=["workflows"])
-
-    assert summary["workflows"] == 0
-    assert not os.path.exists(os.path.join(os.path.dirname(COMFY_WORKFLOWS_DIR), "escaped"))
-
-
-def test_restoring_workflows_alone_leaves_the_other_kinds_untouched(
-    populated, user_workflow, tmp_path
-):
-    out = tmp_path / "derived.json"
-    export_derived(str(out))
-    _wipe_derived()
-
-    summary = import_derived(str(out), kinds=["workflows"])
-
-    assert summary == {"workflows": 1}
-    assert ArchiveIndex.get().prompt_count() == 0
 
 
 def test_export_writes_a_versioned_bundle(populated, tmp_path):
@@ -183,7 +73,7 @@ def test_export_writes_a_versioned_bundle(populated, tmp_path):
     assert data["version"] == BUNDLE_VERSION
     assert set(data["kinds"]) == set(DERIVED_KINDS)
     assert summary["prompts"] == 1
-    assert summary["generations"] == 1
+    assert summary["labels"] == 1
 
 
 def test_the_bundle_carries_no_media_and_no_absolute_paths(populated, tmp_path):
@@ -200,7 +90,7 @@ def test_the_bundle_carries_no_media_and_no_absolute_paths(populated, tmp_path):
 
 
 def test_round_trip_restores_every_kind(populated, tmp_path):
-    rel, gen_id = populated
+    rel = populated
     out = tmp_path / "derived.json"
     export_derived(str(out))
     _wipe_derived()
@@ -214,10 +104,6 @@ def test_round_trip_restores_every_kind(populated, tmp_path):
     assert CreatorStyleStore().load()["nina"]["prefix"] == "shot on film"
     verdict = index.get_verdict(rel)
     assert verdict["tier"] == 3
-    gens = index.list_generations_for(rel)
-    assert len(gens) == 1
-    assert gens[0]["rating"] == 2, "the user's judgement did not survive the trip"
-    assert gens[0]["seed"] == 4242
     assert index.get_label(rel)["label"] == 1
 
 
@@ -233,7 +119,7 @@ def test_importing_twice_changes_nothing(populated, tmp_path):
     assert first == second
     index = ArchiveIndex.get()
     assert index.prompt_count() == 1
-    assert len(index.list_generations_for("nina/a.jpg")) == 1
+    assert index.get_label("nina/a.jpg")["label"] == 1
 
 
 def test_a_dry_run_reports_without_writing(populated, tmp_path):
@@ -258,7 +144,7 @@ def test_a_single_kind_can_be_restored_alone(populated, tmp_path):
 
     assert ArchiveIndex.get().prompt_count() == 1
     assert FavoritesStore().is_favorite("nina/a.jpg") is False
-    assert ArchiveIndex.get().list_generations_for("nina/a.jpg") == []
+    assert ArchiveIndex.get().get_label("nina/a.jpg") is None
 
 
 def test_exporting_a_single_kind_omits_the_others(populated, tmp_path):
@@ -304,7 +190,7 @@ def test_a_gzipped_bundle_round_trips(populated, tmp_path):
 def test_importing_does_not_resurrect_state_for_missing_media(populated, tmp_path):
     """The bundle is keyed by rel_path. Restoring onto an archive that no longer
     has the photo must not invent an index row for a file that is not there."""
-    rel, _gen_id = populated
+    rel = populated
     out = tmp_path / "derived.json"
     export_derived(str(out))
     _wipe_derived()

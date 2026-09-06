@@ -7,7 +7,7 @@ Workspace rules, auto-loaded via [CLAUDE.md](CLAUDE.md).
 
 | Piece | Detail |
 |-------|--------|
-| App | PromptStudio — local IG archive + Ollama vision prompts + optional ComfyUI |
+| App | PromptStudio — local IG archive scraper, smart gallery, and classifier |
 | Server | `server.py` → `promptstudio.server.handler` · `http://localhost:5000` (threaded) |
 | Vision | Ollama `OLLAMA_VISION_MODEL` default **`qwen2.5vl:7b`** · pipeline `v2-structured` |
 | Frontend | `index.html` / `style.css` / `app.js` (glass dark: `#8b5cf6` `#ec4899` `#06b6d4`) |
@@ -34,6 +34,8 @@ These are the single source of truth — other docs point here rather than resta
     measurement; keep/reject is derived against `CLASSIFY_REJECT_MAX_TIER` at query
     time. Storing the collapsed answer is what made the previous classifier cost a
     full-archive rescore per change of mind. Never add a `verdict` column.
+    Human gold lives in `corrected_tier` and never overwrites `tier` — filters
+    read `COALESCE(corrected_tier, tier)`; insights/B4 stay on the model number.
 13. **Measure before optimising, and report the number.** Two "obvious" wins in this codebase turned out to be losses under measurement (FTS5 search, incremental rebuild) — both recorded in [docs/review_backend_architecture.md](docs/review_backend_architecture.md).
 14. **Loopback only, and blank means loopback.** There is no auth and CORS is `*`, so any
     non-loopback bind hands the archive and `DELETE /api/photo` to the whole network. Use
@@ -60,7 +62,7 @@ These are the single source of truth — other docs point here rather than resta
 | A new score or filter | `promptstudio/insights.py` `saturation_report` + `tests/test_distribution_guard.py` (rule 17) |
 | Vision / prompts | `promptstudio/prompts/engine.py` |
 | Keep/reject classify | `promptstudio/scraping/media_classifier.py` · job in `classify_job.py` |
-| Setting a verdict from anywhere in the UI | `applyManualVerdict(photo, value)` + `patchCardVerdict(photo)` in `app.js`. The lightbox and the card are two callers of one function on purpose — never re-implement the patch, and never refetch (it drops the row out from under the cursor) |
+| Setting a verdict from anywhere in the UI | `applyManualVerdict(photo, value)` (keep/reject pin) and `applyCorrectedTier(photo, value)` (gold 0–4) + `patchCardVerdict(photo)` in `app.js`. Lightbox and card are two callers of those functions on purpose — never re-implement the patch, and never refetch (it drops the row out from under the cursor) |
 | Gallery index | `promptstudio/storage/db.py` |
 | Gallery feels slow | [`docs/review_gallery_performance.md`](docs/review_gallery_performance.md) — §11 for what already shipped; measure first; do not flip FTS5 |
 | Thumbnails | `promptstudio/storage/thumb_queue.py` (ingest + workers) · `thumbs.py` (encode) · `scripts/backfill_thumbnails.py`. **Never** encode on the `/media/thumb/` request thread |
@@ -71,8 +73,6 @@ These are the single source of truth — other docs point here rather than resta
 | Duplicate detection | `promptstudio/storage/dedupe.py` |
 | Instagram sync | `promptstudio/scraping/downloader.py` (Instaloader) · `instagram_source.py` (`IG_BACKEND=gallery-dl`) |
 | Add a scrape source | `promptstudio/scraping/sources/` |
-| Add a ComfyUI workflow | `promptstudio/comfy/registry.py` · `comfy/workflows/<name>/` |
-| ComfyUI | `promptstudio/comfy/client.py` |
 | Frontend | `app.js` |
 | Layout budget · focus rings · icon glyphs | `tests/ui/test_layout_and_a11y.js` — measured, not read; see [`docs/review_ui_product.md`](docs/review_ui_product.md) §10–11 |
 | A new overlay, or anything about focus | `openDialog`/`closeDialog` in `app.js` — never assign `style.display` on a dialog directly. `tests/ui/test_dialogs_and_aria.js` · [`docs/review_ui_product.md`](docs/review_ui_product.md) §13 |
@@ -89,7 +89,7 @@ py server.py            # app on :5000
 py prompt_engine.py     # vision smoke test
 ```
 
-Health: `GET /api/health` → `ollama`, `model` (`qwen2.5vl:7b` default), `model_ready`, `comfy`, `leases`.
+Health: `GET /api/health` → `ollama`, `model` (`qwen2.5vl:7b` default), `model_ready`, `leases`.
 
 ## Docs (token budget)
 
@@ -109,7 +109,6 @@ Load only what the task needs.
 | [docs/review_ui_product.md](docs/review_ui_product.md) | UI/UX gaps U1–U11 + Stage-1 fix log |
 | [docs/backlog_features.md](docs/backlog_features.md) · [docs/backlog_engineering.md](docs/backlog_engineering.md) | F1–F8 · E1–E5, picked up directly |
 | [docs/roadmap.md](docs/roadmap.md) | Phase history; 13–15 planned |
-| [docs/design_generation_loop.md](docs/design_generation_loop.md) | Active spec for Phases 13–14 |
 | [docs/design_source_filter.md](docs/design_source_filter.md) | Source as a view filter — provenance comes from `photos.source` |
 | [docs/design_scrape_lanes.md](docs/design_scrape_lanes.md) | Per-source scrape lanes — concurrency, cancel, pause, pacing |
 | [scripts/README.md](scripts/README.md) · [tests/ui/README.md](tests/ui/README.md) | CLI examples · browser suites |
