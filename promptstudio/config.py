@@ -186,6 +186,8 @@ POST_SCAN_FACTOR = float(os.environ.get("IG_POST_SCAN_FACTOR", "3"))
 _IG_BACKEND_ALIASES = {
     "instaloader": "instaloader",
     "il": "instaloader",
+    "instadownloader": "instaloader",
+    "instagramdownloader": "instaloader",
     "gallery-dl": "gallery-dl",
     "gallerydl": "gallery-dl",
     "gdl": "gallery-dl",

@@ -651,6 +651,7 @@ def test_missing_gallery_dl_binary_reports_cleanly(monkeypatch):
         ("", "instaloader"),
         ("instaloader", "instaloader"),
         ("il", "instaloader"),
+        ("instadownloader", "instaloader"),
         ("gallery-dl", "gallery-dl"),
         ("gdl", "gallery-dl"),
         ("gallerydl", "gallery-dl"),
@@ -738,9 +739,108 @@ def test_ig_gdl_saved_url_uses_session_user():
     argv = InstagramGalleryDlSource()._build_argv(
         target, ScrapeOptions.normalize("full", deep=True), SAVED_DIR
     )
-    assert "--base-directory" in argv
+    assert "-d" in argv
     assert "--directory" not in argv
     assert argv[-1].endswith("/archi/saved/")
+
+
+def test_ig_gdl_argv_uses_listed_post_urls_instead_of_profile():
+    src = InstagramGalleryDlSource()
+    target = src.parse_target("dobermannn777")
+    urls = [
+        "https://www.instagram.com/p/AAAA/",
+        "https://www.instagram.com/p/BBBB/",
+    ]
+    argv = src._build_argv(
+        target, ScrapeOptions.normalize("latest", deep=False, max_posts=24), "/tmp/dest", urls=urls
+    )
+    assert argv[-2:] == urls
+    assert "https://www.instagram.com/dobermannn777/" not in argv
+
+
+def test_ig_gdl_listed_urls_come_from_polaris(monkeypatch, tmp_path):
+    cookies = tmp_path / "ig-cookies.txt"
+    cookies.write_text("# Netscape\n", encoding="utf-8")
+    monkeypatch.setenv("IG_COOKIES_FILE", str(cookies))
+
+    def fake_list(username, **_kw):
+        assert username == "dobermannn777"
+        return ["AbCdEf", "GhIjKl"]
+
+    monkeypatch.setattr(
+        "promptstudio.scraping.instagram_polaris.list_profile_shortcodes",
+        fake_list,
+    )
+    src = InstagramGalleryDlSource()
+    target = src.parse_target("dobermannn777")
+    listed = src._listed_urls(
+        target,
+        ScrapeOptions.normalize("latest", deep=False, max_posts=24),
+        SourceContext(save_dir=str(tmp_path), log=lambda _m: None),
+    )
+    assert listed == [
+        "https://www.instagram.com/p/AbCdEf/",
+        "https://www.instagram.com/p/GhIjKl/",
+    ]
+
+
+def test_ig_gdl_saved_does_not_list_polaris_posts(monkeypatch, tmp_path):
+    monkeypatch.setenv("IG_COOKIES_FILE", str(tmp_path / "ig-cookies.txt"))
+    called = []
+    monkeypatch.setattr(
+        "promptstudio.scraping.instagram_polaris.list_profile_shortcodes",
+        lambda *_a, **_k: called.append(True) or ["XXXX"],
+    )
+    src = InstagramGalleryDlSource()
+    target = src.parse_saved_target("mei.xoxo.yuki")
+    assert (
+        src._listed_urls(target, ScrapeOptions(), SourceContext(save_dir=str(tmp_path), log=lambda _m: None))
+        is None
+    )
+    assert called == []
+
+
+def test_polaris_lists_shortcodes_and_paginates():
+    from promptstudio.scraping.instagram_polaris import list_profile_shortcodes
+
+    pages = []
+
+    def fake_request(fields):
+        pages.append(json.loads(fields["variables"]))
+        if len(pages) == 1:
+            return {
+                "data": {
+                    "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                        "edges": [
+                            {"node": {"code": "AAA"}},
+                            {"node": {"code": "BBB"}},
+                        ],
+                        "page_info": {"has_next_page": True, "end_cursor": "c1"},
+                    }
+                }
+            }
+        return {
+            "data": {
+                "xdt_api__v1__feed__user_timeline_graphql_connection": {
+                    "edges": [
+                        {"node": {"code": "CCC"}},
+                        {"node": {"code": "DDD"}},
+                    ],
+                    "page_info": {"has_next_page": False, "end_cursor": "c2"},
+                }
+            }
+        }
+
+    codes = list_profile_shortcodes(
+        "nina",
+        cookies_file="/unused",
+        max_posts=3,
+        page_sleep_sec=0,
+        _request=fake_request,
+    )
+    assert codes == ["AAA", "BBB", "CCC"]
+    assert pages[0]["username"] == "nina"
+    assert pages[1]["after"] == "c1"
 
 
 IG_RAW = {

@@ -273,11 +273,21 @@ class GalleryDlSource:
 
     # ------------------------------------------------------------- argv
 
+    def _listed_urls(
+        self,
+        target: SourceTarget,
+        options: ScrapeOptions,
+        ctx: SourceContext,
+    ) -> Optional[List[str]]:
+        """Optional extra URLs that replace `target.url` for this run."""
+        return None
+
     def _build_argv(
         self,
         target: SourceTarget,
         options: ScrapeOptions,
         dest: str,
+        urls: Optional[List[str]] = None,
     ) -> List[str]:
         argv = [
             *self._gallery_dl_cmd(),
@@ -315,7 +325,10 @@ class GalleryDlSource:
         if GALLERY_DL_EXTRA_ARGS.strip():
             argv += shlex.split(GALLERY_DL_EXTRA_ARGS)
 
-        argv.append(target.url)
+        if urls:
+            argv.extend(urls)
+        else:
+            argv.append(target.url)
         return argv
 
     def _filename_format(self, target: SourceTarget) -> str:
@@ -344,7 +357,8 @@ class GalleryDlSource:
         dest = os.path.join(save_dir, target.folder)
         os.makedirs(dest, exist_ok=True)
 
-        argv = self._build_argv(target, options, dest)
+        listed = self._listed_urls(target, options, ctx)
+        argv = self._build_argv(target, options, dest, urls=listed)
         ctx.log(
             f"=== {self.label} scrape {target.label} mode={options.mode} "
             f"videos={'on' if options.include_videos else 'off'} ==="
@@ -1067,7 +1081,7 @@ class InstagramGalleryDlSource(GalleryDlSource):
             # Saved posts belong to many owners. `-d` + directory={username}
             # lands each file in that owner's archive folder.
             return [
-                "--base-directory",
+                "-d",
                 dest,
                 "-o",
                 'extractor.instagram.directory=["{username}"]',
@@ -1106,6 +1120,45 @@ class InstagramGalleryDlSource(GalleryDlSource):
             "-o",
             f"extractor.instagram.videos={videos}",
         ]
+
+    def _listed_urls(
+        self,
+        target: SourceTarget,
+        options: ScrapeOptions,
+        ctx: SourceContext,
+    ) -> Optional[List[str]]:
+        """Profile grids 302; list shortcodes via Polaris then download /p/ URLs."""
+        if target.kind == "saved":
+            return None
+        from promptstudio.config import clamp_ig_posts, ig_gdl_sleep_sec, instagram_cookies_file
+        from promptstudio.scraping.instagram_polaris import list_profile_shortcodes
+
+        cookies = instagram_cookies_file()
+        if not cookies or not os.path.isfile(cookies):
+            return None
+        if options.max_posts is not None and int(options.max_posts) > 0:
+            n = int(options.max_posts)
+        else:
+            n = int(options.resolved_max_posts())
+        n = clamp_ig_posts(n)
+        if n <= 0:
+            return None
+        try:
+            codes = list_profile_shortcodes(
+                target.handle,
+                cookies_file=cookies,
+                max_posts=n,
+                cancelled=ctx.cancelled,
+                log_line=ctx.log,
+                page_sleep_sec=min(3.0, max(0.0, float(ig_gdl_sleep_sec()))),
+            )
+        except Exception as exc:
+            ctx.log(f"Polaris listing failed ({exc}); falling back to profile URL")
+            return None
+        if not codes:
+            ctx.log("Polaris listed 0 posts; falling back to profile URL")
+            return None
+        return [f"https://www.instagram.com/p/{code}/" for code in codes]
 
     def _list_media(self, dest: str, target: SourceTarget) -> set:
         if target.kind == "saved":
